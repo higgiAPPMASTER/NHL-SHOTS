@@ -268,6 +268,7 @@ async def get_shot_qualified_players(
                 continue
 
             seen.add(pid)
+            est = _est_line(spg)
             pool.append({
                 "name":     p["skaterFullName"],
                 "pid":      pid,
@@ -275,6 +276,7 @@ async def get_shot_qualified_players(
                 "opponent": opp,
                 "homeRoad": hr,
                 "line":     1.5,
+                "estLine":  est,
                 "spg":      round(spg, 2),
                 "gp":       gp,
                 "oppSA":    sa_map.get(opp, 0.0),
@@ -364,6 +366,14 @@ async def _scrape_sm(url: str, cookie: str, sem: asyncio.Semaphore) -> List[int]
     return totals
 
 
+def _est_line(spg: float) -> float:
+    """Estimate sportsbook line from season shots/game average."""
+    if spg >= 3.0:
+        return 3.5
+    elif spg >= 2.0:
+        return 2.5
+    return 1.5
+
 def _hit_rate(totals: List[int], line: float) -> Tuple[int, int, float]:
     total = len(totals)
     if total == 0:
@@ -420,10 +430,12 @@ async def run_picks() -> Dict:
         if t3 < MIN_GAMES:
             return None
         h3, _, r3 = _hit_rate(t3_list, p["line"])
+        ha10avg  = round(sum(t3_list) / t3, 2)  # avg shots in last 10 H/A games
 
         # Step 2 — career H/A vs today's opponent
         t2 = len(t2_raw)
         h2, _, r2 = _hit_rate(t2_raw, p["line"])
+        opp_avg = round(sum(t2_raw) / t2, 2) if t2 > 0 else p["spg"]  # avg shots vs this opp H/A
 
         # DQ logic
         s2_ok = (t2 < MIN_GAMES) or (r2 >= HIT_THRESH)
@@ -441,6 +453,8 @@ async def run_picks() -> Dict:
             "step3Hits":  h3,
             "step3Total": t3,
             "step3Rate":  r3,
+            "oppAvg":     opp_avg,
+            "ha10avg":    ha10avg,
             "score":      score,
         }
 
@@ -632,7 +646,7 @@ function render(d){
     h+=`<div class="tbl-wrap"><table>
       <thead><tr>
         <th>#</th><th>Player</th><th>Team</th><th>Opp</th><th>H/A</th>
-        <th>Avg S/G</th>
+        <th>Avg vs Opp H/A</th><th>L10 H/A Avg</th><th>Est. Line</th>
         <th>Career vs Opp 1.5 S</th><th>Last 10 H/A 1.5 S</th>
         <th>Score</th><th>Opp SA/G</th>
       </tr></thead><tbody>`;
@@ -644,7 +658,9 @@ function render(d){
         <td><span class="badge t-badge">${p.team}</span></td>
         <td><span class="badge t-badge">${p.opponent}</span></td>
         <td><span class="badge ${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></td>
-        <td><span class="line-v">${p.spg}</span></td>
+        <td><span class="line-v">${p.oppAvg}</span></td>
+        <td><span class="line-v">${p.ha10avg}</span></td>
+        <td><span class="badge" style="background:#1a1a3e;color:#f59e0b;font-size:.85rem">~${p.estLine}</span></td>
         <td><span class="${rc(p.step2Rate)}">${p.step2Hits}/${p.step2Total} (${p.step2Rate}%)</span></td>
         <td><span class="${rc(p.step3Rate)}">${p.step3Hits}/${p.step3Total} (${p.step3Rate}%)</span></td>
         <td><span class="score-v">${p.score}</span></td>
