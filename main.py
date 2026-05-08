@@ -482,7 +482,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>🏒 NHL Shots Picks</title>
+<title>🏒 NHL Money Shots</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#07090f;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
@@ -560,7 +560,7 @@ footer{text-align:center;padding:28px;color:#1e3060;font-size:.78rem;margin-top:
 <body>
 
 <div class="hdr">
-  <h1>🏒 NHL SHOTS PICKS</h1>
+  <h1>🏒 NHL MONEY SHOTS</h1>
   <p id="hdr-date">Shots on Goal Daily Analyzer</p>
 </div>
 
@@ -573,7 +573,7 @@ footer{text-align:center;padding:28px;color:#1e3060;font-size:.78rem;margin-top:
   <div id="out"></div>
 </div>
 
-<footer>NHL Shots Picks · StatMuse + NHL Stats API</footer>
+<footer>NHL Money Shots · StatMuse + NHL Stats API</footer>
 
 <script>
 async function checkStatus(){
