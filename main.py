@@ -551,14 +551,35 @@ footer{text-align:center;padding:28px;color:#1e3060;font-size:.78rem;margin-top:
 </div>
 
 <div class="wrap">
+  <div style="text-align:center;margin-bottom:16px">
+    <span id="sm-status" style="font-size:.9rem;font-weight:700;color:#64748b">⏳ Checking StatMuse connection…</span>
+  </div>
   <button class="btn" id="runBtn" onclick="run()">▶ &nbsp;RUN TODAY'S PICKS</button>
   <div id="status" class="status"></div>
   <div id="out"></div>
 </div>
 
-<footer>NHL Shots Picks · The Odds API + StatMuse + NHL Stats API</footer>
+<footer>NHL Shots Picks · StatMuse + NHL Stats API</footer>
 
 <script>
+async function checkStatus(){
+  try{
+    const r=await fetch('/api/status');
+    const d=await r.json();
+    const el=document.getElementById('sm-status');
+    if(d.statmuse==='connected'){
+      el.innerHTML='🟢 StatMuse Connected';
+      el.style.color='#22c55e';
+    }else{
+      el.innerHTML='🔴 StatMuse Disconnected — check credentials';
+      el.style.color='#ef4444';
+    }
+  }catch(e){
+    document.getElementById('sm-status').textContent='⚠️ Status unknown';
+  }
+}
+window.onload=checkStatus;
+
 async function run(){
   const btn=document.getElementById('runBtn');
   const st=document.getElementById('status');
@@ -651,6 +672,22 @@ async def index(_: str = Depends(verify_user)):
 async def api_picks(_: str = Depends(verify_user)):
     result = await run_picks()
     return JSONResponse(result)
+
+@app.get("/api/status")
+async def api_status(_: str = Depends(verify_user)):
+    """Check StatMuse connection status."""
+    global _sm_cookie
+    connected = _sm_cookie is not None
+    if not connected:
+        try:
+            await get_sm_cookie()
+            connected = True
+        except Exception:
+            connected = False
+    return {
+        "statmuse": "connected" if connected else "disconnected",
+        "time": datetime.utcnow().isoformat(),
+    }
 
 @app.get("/health")
 async def health():
