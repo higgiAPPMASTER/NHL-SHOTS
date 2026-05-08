@@ -151,17 +151,24 @@ async def _fetch(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
     return None
 
 
-async def get_today_games() -> List[Dict]:
-    today = date.today().isoformat()
+def get_season_for_date(d: date) -> str:
+    """Return NHL season ID for a given date e.g. 20242025"""
+    if d.month >= 10:
+        return f"{d.year}{d.year + 1}"
+    return f"{d.year - 1}{d.year}"
+
+
+async def get_today_games(target_date: str = None) -> List[Dict]:
+    target_date = target_date or date.today().isoformat()
     async with httpx.AsyncClient(follow_redirects=True) as c:
-        data = await _fetch(f"{NHL_API}/schedule/{today}", c)
+        data = await _fetch(f"{NHL_API}/schedule/{target_date}", c)
     if not data:
         return []
     games = []
     for day in data.get("gameWeek", []):
-        if day.get("date") == today:
+        if day.get("date") == target_date:
             for g in day.get("games", []):
-                if g.get("gameState", "") in ("FUT", "PRE", "LIVE", "CRIT"):
+                if g.get("gameState", "") in ("FUT", "PRE", "LIVE", "CRIT", "OFF", "FINAL"):
                     games.append({
                         "gameId":    g["id"],
                         "homeTeam":  g["homeTeam"]["abbrev"],
@@ -173,7 +180,7 @@ async def get_today_games() -> List[Dict]:
     return games
 
 
-async def get_team_sa_map() -> Dict[str, float]:
+async def get_team_sa_map(season: str = "20242025") -> Dict[str, float]:
     """Shots Against Per Game — joins /standings (abbrev) + /team/summary (SA/G)."""
     import urllib.parse
     sort_p = urllib.parse.quote('[{"property":"shotsAgainstPerGame","direction":"DESC"}]')
@@ -181,7 +188,7 @@ async def get_team_sa_map() -> Dict[str, float]:
         f"{NHL_STATS}/team/summary"
         f"?isAggregate=false&isGame=false&sort={sort_p}"
         f"&start=0&limit=50&factCayenneExp=gamesPlayed>=1"
-        f"&cayenneExp=gameTypeId=2 and seasonId<=20242025 and seasonId>=20242025"
+        f"&cayenneExp=gameTypeId=2 and seasonId<={season} and seasonId>={season}"
     )
     async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
         sd, md = await asyncio.gather(
@@ -224,6 +231,7 @@ async def get_shot_qualified_players(
     games: List[Dict],
     sa_map: Dict[str, float],
     sem: asyncio.Semaphore,
+    season: str = "20242025",
 ) -> List[Dict]:
     """Return skaters on today's teams averaging ≥ MIN_SPG shots/game."""
 
@@ -244,7 +252,7 @@ async def get_shot_qualified_players(
                     params={
                         "limit": 100,
                         "start": 0,
-                        "cayenneExp": f"gameTypeId=2 and seasonId=20242025 and teamAbbrevs='{team}'",
+                        "cayenneExp": f"gameTypeId=2 and seasonId={season} and teamAbbrevs='{team}'",
                     },
                 )
         if r.status_code != 200:
@@ -387,19 +395,22 @@ def _hit_rate(totals: List[int], line: float) -> Tuple[int, int, float]:
 #  Main algorithm
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def run_picks() -> Dict:
+async def run_picks(target_date: str = None) -> Dict:
     sem_nhl = asyncio.Semaphore(SEM_NHL)
     sem_sm  = asyncio.Semaphore(SEM_SM)
 
+    target_date = target_date or date.today().isoformat()
+    season = get_season_for_date(date.fromisoformat(target_date))
+
     # ── Step 1 — fetch games, SA map, StatMuse cookie in parallel ────────────
     games, sa_map, cookie = await asyncio.gather(
-        get_today_games(),
-        get_team_sa_map(),
+        get_today_games(target_date),
+        get_team_sa_map(season),
         get_sm_cookie(),
     )
 
     if not games:
-        return {"error": "No NHL games scheduled today.", "picks": [], "games": []}
+        return {"error": f"No NHL games found for {target_date}.", "picks": [], "games": []}
 
     # SA rankings for display
     playing = list({g["homeTeam"] for g in games} | {g["awayTeam"] for g in games})
@@ -409,7 +420,7 @@ async def run_picks() -> Dict:
     )
 
     # Build player pool from NHL skater season averages
-    pool = await get_shot_qualified_players(games, sa_map, sem_nhl)
+    pool = await get_shot_qualified_players(games, sa_map, sem_nhl, season)
 
     if not pool:
         return {"error": f"No skaters averaging ≥{MIN_SPG} S/G on today's teams.", "picks": [], "games": games}
@@ -471,6 +482,7 @@ async def run_picks() -> Dict:
         "sa_ranks":  sa_ranks,
         "poolSize":  len(pool),
         "qualified": len(picks),
+        "targetDate": target_date,
         "runTime":   datetime.utcnow().isoformat() + "Z",
     }
 
@@ -485,133 +497,177 @@ HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>🏒 NHL Money Shots</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Barlow:wght@400;500;600;700&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#07090f;color:#e2e8f0;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
+body{background:#0c0c0e;color:#f0f0f0;font-family:'Barlow',system-ui,sans-serif;min-height:100vh}
 
-.hdr{background:linear-gradient(135deg,#001f5c 0%,#003fa3 50%,#001f5c 100%);
-     padding:28px 20px;text-align:center;border-bottom:3px solid #1e90ff}
-.hdr h1{font-size:2.4rem;font-weight:900;letter-spacing:3px;text-shadow:0 0 30px rgba(30,144,255,.6)}
-.hdr p{color:#90c8ff;margin-top:8px;font-size:.95rem;letter-spacing:1px}
+/* ── Header ── */
+.hdr{position:relative;overflow:hidden;background:#000;padding:0;border-bottom:3px solid #FFB81C}
+.hdr-inner{position:relative;z-index:2;padding:32px 20px 24px;text-align:center}
+.hdr::before{content:'';position:absolute;inset:0;
+  background:linear-gradient(160deg,#1a0000 0%,#000 40%,#1a1100 100%);z-index:0}
+.hdr::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,#FFB81C,#c8102e,#FFB81C,transparent);z-index:1}
+.hdr h1{font-family:'Barlow Condensed',sans-serif;font-size:3rem;font-weight:900;
+  letter-spacing:6px;color:#fff;text-transform:uppercase;
+  text-shadow:0 0 40px rgba(255,184,28,.4),0 2px 0 #FFB81C}
+.hdr h1 span{color:#FFB81C}
+.hdr-sub{color:#888;margin-top:6px;font-size:.85rem;letter-spacing:3px;text-transform:uppercase}
+.hdr-bar{display:flex;justify-content:center;gap:32px;margin-top:16px;flex-wrap:wrap}
+.hdr-stat{text-align:center}
+.hdr-stat .v{font-family:'Barlow Condensed',sans-serif;font-size:1.5rem;font-weight:800;color:#FFB81C}
+.hdr-stat .l{font-size:.68rem;color:#555;text-transform:uppercase;letter-spacing:1px}
 
-.wrap{max-width:1280px;margin:0 auto;padding:28px 16px}
+/* ── Layout ── */
+.wrap{max-width:1400px;margin:0 auto;padding:28px 20px}
 
-.btn{display:block;margin:0 auto 28px;padding:16px 56px;
-     background:linear-gradient(135deg,#003fa3,#1e90ff);
-     border:none;border-radius:10px;color:#fff;font-size:1.15rem;
-     font-weight:800;cursor:pointer;letter-spacing:1px;
-     transition:transform .2s,box-shadow .2s}
-.btn:hover{transform:translateY(-3px);box-shadow:0 10px 28px rgba(30,144,255,.45)}
-.btn:disabled{opacity:.55;cursor:not-allowed;transform:none}
+/* ── Controls ── */
+.controls{display:flex;align-items:center;justify-content:center;gap:16px;
+  flex-wrap:wrap;margin-bottom:24px;padding:20px;
+  background:#111;border:1px solid #222;border-radius:12px}
+.date-wrap{display:flex;align-items:center;gap:10px}
+.date-wrap label{color:#FFB81C;font-weight:700;font-size:.9rem;text-transform:uppercase;letter-spacing:1px}
+.date-wrap input[type=date]{background:#1a1a1a;color:#f0f0f0;border:1px solid #333;
+  border-radius:8px;padding:10px 16px;font-size:.95rem;font-family:'Barlow',sans-serif;
+  cursor:pointer;outline:none}
+.date-wrap input[type=date]:focus{border-color:#FFB81C}
+.sm-dot{font-size:.82rem;font-weight:600;padding:6px 14px;border-radius:20px;
+  background:#1a1a1a;border:1px solid #333}
 
-.status{text-align:center;color:#90c8ff;margin-bottom:20px;font-size:.88rem}
+/* ── Run Button ── */
+.btn{padding:14px 52px;background:linear-gradient(135deg,#c8102e,#8b0000);
+  border:none;border-radius:8px;color:#fff;font-size:1rem;
+  font-family:'Barlow Condensed',sans-serif;font-weight:800;
+  letter-spacing:2px;text-transform:uppercase;cursor:pointer;
+  transition:all .2s;box-shadow:0 4px 16px rgba(200,16,46,.3)}
+.btn:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(200,16,46,.5);background:linear-gradient(135deg,#e01535,#a00010)}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
 
-.chips{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:28px}
-.chip{background:#0d1426;border:1px solid #1e3060;border-radius:10px;
-      padding:14px 20px;flex:1;min-width:130px;text-align:center}
-.chip .val{font-size:1.8rem;font-weight:900;color:#1e90ff}
-.chip .lbl{font-size:.72rem;color:#4a6080;margin-top:3px;text-transform:uppercase;letter-spacing:.5px}
+.status{text-align:center;color:#666;margin:12px 0 24px;font-size:.85rem}
 
-.sec{font-size:1.15rem;font-weight:800;color:#1e90ff;
-     margin:28px 0 14px;padding-left:14px;border-left:4px solid #1e90ff;letter-spacing:.5px}
+/* ── Summary chips ── */
+.chips{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:32px}
+.chip{background:#111;border:1px solid #222;border-radius:10px;padding:16px 12px;text-align:center;
+  position:relative;overflow:hidden}
+.chip::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:#FFB81C}
+.chip .val{font-family:'Barlow Condensed',sans-serif;font-size:2rem;font-weight:900;color:#FFB81C}
+.chip .lbl{font-size:.65rem;color:#555;margin-top:4px;text-transform:uppercase;letter-spacing:.8px}
 
-.games{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:32px}
-.gcard{background:#0d1426;border:1px solid #1e3060;border-radius:10px;padding:14px;text-align:center}
-.gcard .mu{font-size:1rem;font-weight:700}
-.gcard .gt{font-size:.78rem;color:#4a6080;margin-top:5px}
+/* ── Section headers ── */
+.sec{font-family:'Barlow Condensed',sans-serif;font-size:1.1rem;font-weight:800;
+  color:#fff;margin:28px 0 14px;padding:10px 16px;
+  background:#111;border-left:4px solid #FFB81C;
+  text-transform:uppercase;letter-spacing:2px;border-radius:0 6px 6px 0}
 
+/* ── Games grid ── */
+.games{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:28px}
+.gcard{background:#111;border:1px solid #222;border-radius:10px;padding:14px;text-align:center;
+  transition:border-color .2s}
+.gcard:hover{border-color:#FFB81C}
+.gcard .mu{font-family:'Barlow Condensed',sans-serif;font-size:1.1rem;font-weight:700;color:#fff;letter-spacing:1px}
+.gcard .gt{font-size:.74rem;color:#555;margin-top:6px}
+.gcard .puck{font-size:1.2rem;margin-bottom:4px}
+
+/* ── SA badges ── */
 .sa-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:28px}
-.sa-badge{background:#0d1426;border:1px solid #1e3060;border-radius:20px;padding:6px 14px;font-size:.8rem}
-.sa-badge .rk{color:#1e90ff;font-weight:800}
-.sa-badge .sv{color:#f59e0b;font-weight:700}
+.sa-badge{background:#111;border:1px solid #222;border-radius:6px;padding:6px 12px;font-size:.78rem;font-family:'Barlow Condensed',sans-serif}
+.sa-badge .rk{color:#FFB81C;font-weight:800;font-size:.9rem}
+.sa-badge .sv{color:#c8102e;font-weight:700}
 
-.tbl-wrap{overflow-x:auto;border-radius:12px;border:1px solid #1e3060}
-table{width:100%;border-collapse:collapse;background:#0a0e1a}
-thead{background:linear-gradient(135deg,#001f5c,#003fa3)}
-th{padding:13px 14px;text-align:left;font-size:.75rem;text-transform:uppercase;
-   letter-spacing:.6px;color:#90c8ff;white-space:nowrap}
-td{padding:12px 14px;border-bottom:1px solid #141e36;font-size:.9rem;white-space:nowrap}
+/* ── Table ── */
+.tbl-wrap{overflow-x:auto;border-radius:10px;border:1px solid #222;margin-bottom:8px}
+table{width:100%;border-collapse:collapse;background:#0c0c0e}
+thead tr{background:#111;border-bottom:2px solid #FFB81C}
+th{padding:12px 14px;text-align:left;font-family:'Barlow Condensed',sans-serif;
+  font-size:.8rem;text-transform:uppercase;letter-spacing:1.5px;color:#FFB81C;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #1a1a1a;font-size:.88rem;white-space:nowrap}
+tr:nth-child(even) td{background:#0f0f11}
+tr:hover td{background:#161618}
 tr:last-child td{border-bottom:none}
-tr:hover td{background:#0d1426}
 
-.rk-num{font-weight:900;color:#1e90ff;font-size:1.1rem}
-.pname{font-weight:700;color:#f1f5f9}
-.badge{padding:3px 9px;border-radius:5px;font-size:.76rem;font-weight:700}
-.t-badge{background:#0a2050;color:#60a5fa}
-.home{background:#052e16;color:#4ade80}
-.away{background:#3b0764;color:#c084fc}
-.line-v{color:#f59e0b;font-weight:800;font-size:1rem}
-.odds-v{color:#64748b;font-size:.82rem}
+.rk-num{font-family:'Barlow Condensed',sans-serif;font-weight:900;color:#FFB81C;font-size:1.2rem}
+.pname{font-weight:600;color:#fff}
+.badge{padding:3px 10px;border-radius:4px;font-size:.74rem;font-weight:700;letter-spacing:.5px}
+.t-badge{background:#1a1a1a;color:#aaa;border:1px solid #2a2a2a}
+.home{background:#0d2b0d;color:#4ade80;border:1px solid #1a4a1a}
+.away{background:#2b0d0d;color:#f87171;border:1px solid #4a1a1a}
+.line-v{color:#FFB81C;font-weight:700;font-family:'Barlow Condensed',sans-serif;font-size:1rem}
 .rate-hi{color:#22c55e;font-weight:700}
-.rate-md{color:#f59e0b;font-weight:700}
+.rate-md{color:#FFB81C;font-weight:700}
 .rate-lo{color:#ef4444;font-weight:700}
-.score-v{color:#a78bfa;font-weight:900;font-size:1.05rem}
-.sa-v{color:#38bdf8;font-size:.82rem}
+.score-v{font-family:'Barlow Condensed',sans-serif;color:#fff;font-weight:900;font-size:1.1rem}
+.sa-v{color:#888;font-size:.82rem}
+.est-line{background:#1a1400;color:#FFB81C;border:1px solid #3a2a00;padding:3px 10px;
+  border-radius:4px;font-size:.8rem;font-weight:700;font-family:'Barlow Condensed',sans-serif}
 
-.loading{text-align:center;padding:70px 20px}
-.spin{width:52px;height:52px;border:4px solid #141e36;border-top:4px solid #1e90ff;
-      border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 18px}
+/* ── States ── */
+.loading{text-align:center;padding:80px 20px}
+.spin{width:56px;height:56px;border:4px solid #1a1a1a;border-top:4px solid #FFB81C;
+  border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 20px}
 @keyframes spin{to{transform:rotate(360deg)}}
-.err{background:#2d0707;border:1px solid #dc2626;border-radius:10px;
-     padding:22px;text-align:center;color:#fca5a5;font-weight:600}
-.empty{text-align:center;padding:50px;color:#334155}
+.err{background:#200;border:1px solid #c8102e;border-radius:10px;
+  padding:24px;text-align:center;color:#f87171;font-weight:600}
+.empty{text-align:center;padding:60px;color:#444}
 
-footer{text-align:center;padding:28px;color:#1e3060;font-size:.78rem;margin-top:20px}
+footer{text-align:center;padding:32px;color:#333;font-size:.78rem;border-top:1px solid #1a1a1a;margin-top:32px}
+footer span{color:#FFB81C}
 </style>
 </head>
 <body>
 
 <div class="hdr">
-  <h1>🏒 NHL MONEY SHOTS</h1>
-  <p id="hdr-date">Shots on Goal Daily Analyzer</p>
+  <div class="hdr-inner">
+    <h1>🏒 NHL <span>Money</span> Shots</h1>
+    <div class="hdr-sub">Shots on Goal Daily Analyzer</div>
+  </div>
 </div>
 
 <div class="wrap">
-  <div style="text-align:center;margin-bottom:16px">
-    <span id="sm-status" style="font-size:.9rem;font-weight:700;color:#64748b">⏳ Checking StatMuse connection…</span>
+
+  <div class="controls">
+    <div class="date-wrap">
+      <label>📅 Date</label>
+      <input type="date" id="datePicker" max=""/>
+    </div>
+    <button class="btn" id="runBtn" onclick="run()">▶ Run Picks</button>
+    <span id="sm-status" class="sm-dot" style="color:#555">● StatMuse</span>
   </div>
-  <button class="btn" id="runBtn" onclick="run()">▶ &nbsp;RUN TODAY'S PICKS</button>
+
   <div id="status" class="status"></div>
   <div id="out"></div>
 </div>
 
-<footer>NHL Money Shots · StatMuse + NHL Stats API</footer>
+<footer>NHL <span>Money Shots</span> · StatMuse + NHL Stats API · higgiAPPMASTER</footer>
 
 <script>
-async function checkStatus(){
-  try{
-    const r=await fetch('/api/status');
-    const d=await r.json();
-    const el=document.getElementById('sm-status');
-    if(d.statmuse==='connected'){
-      el.innerHTML='🟢 StatMuse Connected';
-      el.style.color='#22c55e';
-    }else{
-      el.innerHTML='🔴 StatMuse Disconnected — check credentials';
-      el.style.color='#ef4444';
-    }
-  }catch(e){
-    document.getElementById('sm-status').textContent='⚠️ Status unknown';
-  }
-}
-window.onload=checkStatus;
+document.addEventListener('DOMContentLoaded',()=>{
+  const dp=document.getElementById('datePicker');
+  const today=new Date().toISOString().split('T')[0];
+  dp.value=today; dp.max=today;
+});
 
 async function run(){
   const btn=document.getElementById('runBtn');
   const st=document.getElementById('status');
   const out=document.getElementById('out');
-  btn.disabled=true; btn.textContent='⏳  Analyzing…';
-  st.textContent='Logging into StatMuse, fetching props & player histories…';
-  out.innerHTML='<div class="loading"><div class="spin"></div><p style="color:#90c8ff">Running algorithm — allow 60–120 seconds</p></div>';
+  const picksDate = document.getElementById('datePicker').value || new Date().toISOString().split('T')[0];
+  btn.disabled=true; btn.textContent='⏳ Analyzing…';
+  st.textContent=`Fetching games for ${picksDate}…`;
+  out.innerHTML='<div class="loading"><div class="spin"></div><p style="color:#888">Logging into StatMuse — analyzing player histories…<br><small style="color:#555">Allow 60–90 seconds</small></p></div>';
+  const smEl=document.getElementById('sm-status');
+  smEl.innerHTML='● Connecting…'; smEl.style.color='#888';
   try{
-    const res=await fetch('/api/picks');
+    const res=await fetch(`/api/picks?target_date=${picksDate}`);
     const d=await res.json();
+    smEl.innerHTML='● StatMuse Connected'; smEl.style.color='#22c55e';
     if(d.error){out.innerHTML=`<div class="err">⚠️ ${d.error}</div>`;return;}
     render(d);
-    document.getElementById('hdr-date').textContent=
-      new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
-    st.textContent=`✅ Done — ${d.qualified} players qualified · ${d.picks.length} picks returned`;
-  }catch(e){out.innerHTML=`<div class="err">❌ ${e.message}</div>`;}
-  finally{btn.disabled=false;btn.textContent='🔄  REFRESH PICKS';}
+    st.textContent=`✅ ${d.qualified} players qualified · ${d.picks.length} top picks · ${picksDate}`;
+  }catch(e){
+    smEl.innerHTML='● StatMuse Error'; smEl.style.color='#c8102e';
+    out.innerHTML=`<div class="err">❌ ${e.message}</div>`;
+  }
+  finally{btn.disabled=false;btn.textContent='▶ Run Picks';}
 }
 
 function rc(r){return r>=90?'rate-hi':r>=80?'rate-md':'rate-lo';}
@@ -620,29 +676,29 @@ function render(d){
   let h='';
 
   h+=`<div class="chips">
-    <div class="chip"><div class="val">${d.games.length}</div><div class="lbl">Games Today</div></div>
-    <div class="chip"><div class="val">${d.poolSize}</div><div class="lbl">Avg ≥1.5 S/G</div></div>
+    <div class="chip"><div class="val">${d.games.length}</div><div class="lbl">Games</div></div>
+    <div class="chip"><div class="val">${d.poolSize}</div><div class="lbl">≥1.5 S/G Pool</div></div>
     <div class="chip"><div class="val">${d.qualified}</div><div class="lbl">Qualified</div></div>
     <div class="chip"><div class="val">${d.picks.length}</div><div class="lbl">Top Picks</div></div>
     <div class="chip"><div class="val">80%</div><div class="lbl">Min Hit Rate</div></div>
   </div>`;
 
-  h+=`<div class="sec">📅 Today's Games</div><div class="games">`;
+  h+=`<div class="sec">🏒 Games — ${d.targetDate||''}</div><div class="games">`;
   for(const g of d.games){
     const t=g.startTime?new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}):'';
-    h+=`<div class="gcard"><div class="mu">${g.awayTeam} @ ${g.homeTeam}</div><div class="gt">${t}</div></div>`;
+    h+=`<div class="gcard"><div class="puck">🪬</div><div class="mu">${g.awayTeam} @ ${g.homeTeam}</div><div class="gt">${t}</div></div>`;
   }
   h+=`</div>`;
 
-  h+=`<div class="sec">🛡️ Shots Against Rankings — Today's Teams</div><div class="sa-list">`;
+  h+=`<div class="sec">🛡️ Shots Against / Game Rankings</div><div class="sa-list">`;
   (d.sa_ranks||[]).forEach(([team,sa],i)=>{
-    h+=`<div class="sa-badge"><span class="rk">#${i+1} ${team}</span> <span class="sv">${sa.toFixed(1)} SA/G</span></div>`;
+    h+=`<div class="sa-badge"><span class="rk">#${i+1} ${team}</span> <span class="sv">${sa.toFixed(1)}</span></div>`;
   });
   h+=`</div>`;
 
-  h+=`<div class="sec">🎯 Top ${d.picks.length} Picks</div>`;
+  h+=`<div class="sec">🎯 Top ${d.picks.length} Money Shots</div>`;
   if(!d.picks.length){
-    h+=`<div class="empty">No players met the 80%+ hit rate threshold today.</div>`;
+    h+=`<div class="empty">No players met the 80%+ hit rate threshold for this date.</div>`;
   }else{
     const thead=`<thead><tr>
       <th>#</th><th>Player</th><th>Team</th><th>Opp</th><th>H/A</th>
@@ -658,7 +714,7 @@ function render(d){
 
     // Rest of qualified players
     if(d.rest && d.rest.length){
-      h+=`<div class="sec" style="margin-top:32px">📋 Also Qualified (${d.rest.length} more)</div>`;
+      h+=`<div class="sec" style="margin-top:32px">📋 Also Qualified — ${d.rest.length} more players</div>`;
       h+=`<div class="tbl-wrap"><table>${thead}<tbody>`;
       d.rest.forEach((p,i)=>{ h+=pickRow(p,i,false); });
       h+=`</tbody></table></div>`;
@@ -678,7 +734,7 @@ function pickRow(p,i,showRank){
     <td><span class="badge ${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></td>
     <td><span class="line-v">${p.oppAvg}</span></td>
     <td><span class="line-v">${p.ha10avg}</span></td>
-    <td><span class="badge" style="background:#1a1a3e;color:#f59e0b;font-size:.85rem">~${p.estLine}</span></td>
+    <td><span class="est-line">~${p.estLine}</span></td>
     <td><span class="${rc(p.step2Rate)}">${p.step2Hits}/${p.step2Total} (${p.step2Rate}%)</span></td>
     <td><span class="${rc(p.step3Rate)}">${p.step3Hits}/${p.step3Total} (${p.step3Rate}%)</span></td>
     <td><span class="score-v">${p.score}</span></td>
@@ -698,8 +754,8 @@ async def index(_: str = Depends(verify_user)):
     return HTML
 
 @app.get("/api/picks")
-async def api_picks(_: str = Depends(verify_user)):
-    result = await run_picks()
+async def api_picks(target_date: str = None, _: str = Depends(verify_user)):
+    result = await run_picks(target_date)
     return JSONResponse(result)
 
 @app.get("/api/status")
