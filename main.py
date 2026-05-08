@@ -466,6 +466,7 @@ async def run_picks() -> Dict:
 
     return {
         "picks":     picks[:TOP_N],
+        "rest":      picks[TOP_N:],
         "games":     games,
         "sa_ranks":  sa_ranks,
         "poolSize":  len(pool),
@@ -643,34 +644,46 @@ function render(d){
   if(!d.picks.length){
     h+=`<div class="empty">No players met the 80%+ hit rate threshold today.</div>`;
   }else{
-    h+=`<div class="tbl-wrap"><table>
-      <thead><tr>
-        <th>#</th><th>Player</th><th>Team</th><th>Opp</th><th>H/A</th>
-        <th>Avg vs Opp H/A</th><th>L10 H/A Avg</th><th>Est. Line</th>
-        <th>Career vs Opp 1.5 S</th><th>Last 10 H/A 1.5 S</th>
-        <th>Score</th><th>Opp SA/G</th>
-      </tr></thead><tbody>`;
-    d.picks.forEach((p,i)=>{
-      const ha=p.homeRoad==='H';
-      h+=`<tr>
-        <td><span class="rk-num">${i+1}</span></td>
-        <td><span class="pname">${p.name}</span></td>
-        <td><span class="badge t-badge">${p.team}</span></td>
-        <td><span class="badge t-badge">${p.opponent}</span></td>
-        <td><span class="badge ${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></td>
-        <td><span class="line-v">${p.oppAvg}</span></td>
-        <td><span class="line-v">${p.ha10avg}</span></td>
-        <td><span class="badge" style="background:#1a1a3e;color:#f59e0b;font-size:.85rem">~${p.estLine}</span></td>
-        <td><span class="${rc(p.step2Rate)}">${p.step2Hits}/${p.step2Total} (${p.step2Rate}%)</span></td>
-        <td><span class="${rc(p.step3Rate)}">${p.step3Hits}/${p.step3Total} (${p.step3Rate}%)</span></td>
-        <td><span class="score-v">${p.score}</span></td>
-        <td><span class="sa-v">${p.oppSA.toFixed(1)}</span></td>
-      </tr>`;
-    });
+    const thead=`<thead><tr>
+      <th>#</th><th>Player</th><th>Team</th><th>Opp</th><th>H/A</th>
+      <th>Avg vs Opp H/A</th><th>L10 H/A Avg</th><th>Est. Line</th>
+      <th>Career vs Opp 1.5 S</th><th>Last 10 H/A 1.5 S</th>
+      <th>Score</th><th>Opp SA/G</th>
+    </tr></thead>`;
+
+    // Top 10
+    h+=`<div class="tbl-wrap"><table>${thead}<tbody>`;
+    d.picks.forEach((p,i)=>{ h+=pickRow(p,i,true); });
     h+=`</tbody></table></div>`;
+
+    // Rest of qualified players
+    if(d.rest && d.rest.length){
+      h+=`<div class="sec" style="margin-top:32px">📋 Also Qualified (${d.rest.length} more)</div>`;
+      h+=`<div class="tbl-wrap"><table>${thead}<tbody>`;
+      d.rest.forEach((p,i)=>{ h+=pickRow(p,i,false); });
+      h+=`</tbody></table></div>`;
+    }
   }
 
   document.getElementById('out').innerHTML=h;
+}
+
+function pickRow(p,i,showRank){
+  const ha=p.homeRoad==='H';
+  return `<tr>
+    ${showRank?`<td><span class="rk-num">${i+1}</span></td>`:'<td><span style="color:#334155">${i+11}</span></td>'}
+    <td><span class="pname">${p.name}</span></td>
+    <td><span class="badge t-badge">${p.team}</span></td>
+    <td><span class="badge t-badge">${p.opponent}</span></td>
+    <td><span class="badge ${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></td>
+    <td><span class="line-v">${p.oppAvg}</span></td>
+    <td><span class="line-v">${p.ha10avg}</span></td>
+    <td><span class="badge" style="background:#1a1a3e;color:#f59e0b;font-size:.85rem">~${p.estLine}</span></td>
+    <td><span class="${rc(p.step2Rate)}">${p.step2Hits}/${p.step2Total} (${p.step2Rate}%)</span></td>
+    <td><span class="${rc(p.step3Rate)}">${p.step3Hits}/${p.step3Total} (${p.step3Rate}%)</span></td>
+    <td><span class="score-v">${p.score}</span></td>
+    <td><span class="sa-v">${p.oppSA.toFixed(1)}</span></td>
+  </tr>`;
 }
 </script>
 </body>
