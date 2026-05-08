@@ -633,7 +633,7 @@ function render(d){
       <thead><tr>
         <th>#</th><th>Player</th><th>Team</th><th>Opp</th><th>H/A</th>
         <th>Avg S/G</th>
-        <th>Career vs Opp</th><th>Last 10 H/A</th>
+        <th>Career vs Opp 1.5 S</th><th>Last 10 H/A 1.5 S</th>
         <th>Score</th><th>Opp SA/G</th>
       </tr></thead><tbody>`;
     d.picks.forEach((p,i)=>{
