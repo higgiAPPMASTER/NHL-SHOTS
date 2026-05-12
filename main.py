@@ -293,6 +293,57 @@ async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
 #  Sportsbook Lines — tries Odds API, then DraftKings, then estimates
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def get_odds_nhl_lines(target_date: str) -> Dict[str, Dict]:
+    """Fetch NHL player shots on goal lines from The Odds API.
+    Returns {player_name: {line, odds}}
+    """
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if not api_key:
+        return {}
+    lines: Dict[str, Dict] = {}
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(
+                f"{ODDS_API}/sports/icehockey_nhl/events",
+                params={"apiKey": api_key, "dateFormat": "iso"})
+            if r.status_code != 200:
+                print(f"[OddsAPI NHL] events {r.status_code}")
+                return {}
+            events = [e for e in r.json()
+                      if e.get("commence_time", "")[:10] == target_date]
+            print(f"[OddsAPI NHL] {len(events)} games for {target_date}")
+            seen: set = set()
+            for ev in events:
+                r2 = await c.get(
+                    f"{ODDS_API}/sports/icehockey_nhl/events/{ev['id']}/odds",
+                    params={"apiKey": api_key, "regions": "us",
+                            "markets": "player_shots_on_goal",
+                            "oddsFormat": "american"})
+                if r2.status_code != 200:
+                    continue
+                for book in r2.json().get("bookmakers", []):
+                    for mkt in book.get("markets", []):
+                        if mkt.get("key") != "player_shots_on_goal":
+                            continue
+                        for oc in mkt.get("outcomes", []):
+                            if oc.get("name") != "Over":
+                                continue
+                            player = oc.get("description", "").strip()
+                            line   = float(oc.get("point") or 0)
+                            if player and line > 0 and player not in seen:
+                                seen.add(player)
+                                lines[player] = {
+                                    "line":   line,
+                                    "odds":   str(oc.get("price", "")),
+                                    "source": "OddsAPI",
+                                }
+                    break  # first bookmaker
+    except Exception as e:
+        print(f"[OddsAPI NHL] error: {e}")
+    print(f"[OddsAPI NHL] {len(lines)} shot lines fetched")
+    return lines
+
+
 async def get_shot_lines() -> Dict[str, Dict]:
     """Fetch real shots on goal lines.
     Tries: 1) The Odds API  2) FanDuel  3) DraftKings  4) Estimates
@@ -463,84 +514,108 @@ async def _lines_from_draftkings() -> Dict[str, Dict]:
 #  NHL Skater Stats — season shot averages (replaces sportsbook props)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _match_odds_name(odds_name: str, roster: List[Dict]) -> Optional[Dict]:
+    """Match Odds API player name to NHL roster player."""
+    def norm(n): return n.lower().replace(".","").replace("-"," ").replace("'","").strip()
+    on = norm(odds_name)
+    for p in roster:
+        if norm(p["name"]) == on: return p
+    parts = on.split()
+    if len(parts) >= 2:
+        fi, last = parts[0][0], parts[-1]
+        for p in roster:
+            pp = norm(p["name"]).split()
+            if len(pp) >= 2 and pp[0][0] == fi and pp[-1] == last:
+                return p
+    return None
+
+
 async def get_shot_qualified_players(
     games: List[Dict],
     sa_map: Dict[str, float],
     sem: asyncio.Semaphore,
     season: str = "20252026",
-    lines_map: Dict = None,
+    lines_map: Dict = None,   # {player_name: {line, odds}} from Odds API
 ) -> List[Dict]:
-    """Return skaters on today's teams averaging ≥ MIN_SPG shots/game."""
+    """Build player pool from Odds API lines (primary) or season averages (fallback)."""
     if lines_map is None:
         lines_map = {}
 
-    # Build team → game context
     team_ctx: Dict[str, Dict] = {}
     for g in games:
         team_ctx[g["homeTeam"]] = {"opponent": g["awayTeam"], "homeRoad": "H"}
         team_ctx[g["awayTeam"]] = {"opponent": g["homeTeam"],  "homeRoad": "R"}
 
+    # Get rosters for all playing teams
+    roster_vals = await asyncio.gather(
+        *[get_roster(t, sem) for t in team_ctx], return_exceptions=True)
+    rosters = {t: (r if isinstance(r, list) else [])
+               for t, r in zip(team_ctx.keys(), roster_vals)}
+
     pool: List[Dict] = []
     seen: set = set()
 
-    async def _fetch_team(team: str):
-        async with sem:
-            async with httpx.AsyncClient(timeout=20) as c:
-                r = await c.get(
-                    f"{NHL_STATS}/skater/summary",
-                    params={
-                        "limit": 100,
-                        "start": 0,
-                        "cayenneExp": f"gameTypeId=2 and seasonId={season} and teamAbbrevs='{team}'",
-                    },
-                )
-        if r.status_code != 200:
-            print(f"[NHL] Skater stats {team} → {r.status_code}")
-            return
-
-        ctx = team_ctx.get(team, {})
-        opp = ctx.get("opponent", "")
-        hr  = ctx.get("homeRoad", "")
-
-        for p in r.json().get("data", []):
-            pid   = p.get("playerId")
-            gp    = p.get("gamesPlayed", 0)
-            shots = p.get("shots", 0)
-            pos   = p.get("positionCode", "")
-
-            if pos == "G" or gp < MIN_GP:
-                continue
-            spg = shots / gp
-            if spg < MIN_SPG or pid in seen:
-                continue
-
-            seen.add(pid)
-            name     = p["skaterFullName"]
-            est      = _est_line(spg)
-            # Use real sportsbook line if available
-            sb_info  = lines_map.get(name, {})
-            real_line = sb_info.get("line")
+    # PRIMARY: build from Odds API lines (sportsbook line = threshold)
+    if lines_map:
+        for odds_name, sb_info in lines_map.items():
+            line     = sb_info["line"]
             real_odds = sb_info.get("odds", "")
-            line_src  = sb_info.get("source", "Est") if real_line else "Est"
+            matched  = None
+            team     = None
+            for t, roster in rosters.items():
+                p = _match_odds_name(odds_name, roster)
+                if p:
+                    matched = p
+                    team    = t
+                    break
+            if not matched or team not in team_ctx or matched["id"] in seen:
+                continue
+            seen.add(matched["id"])
+            opp = team_ctx[team]["opponent"]
             pool.append({
-                "name":      name,
-                "pid":       pid,
+                "name":      odds_name,
+                "pid":       matched["id"],
                 "team":      team,
                 "opponent":  opp,
-                "homeRoad":  hr,
-                "line":      real_line if real_line else 1.5,
-                "realLine":  real_line,
+                "homeRoad":  team_ctx[team]["homeRoad"],
+                "line":      line,           # REAL sportsbook line as threshold
+                "realLine":  line,
                 "realOdds":  real_odds,
-                "lineSource":line_src,
-                "estLine":   est,
-                "spg":       round(spg, 2),
-                "gp":        gp,
+                "lineSource": "OddsAPI",
+                "estLine":   line,
+                "spg":       line,           # use line as display value
                 "oppSA":     sa_map.get(opp, 0.0),
             })
+        print(f"[NHL] {len(pool)} players with Odds API shot lines")
 
-    await asyncio.gather(*[_fetch_team(t) for t in team_ctx], return_exceptions=True)
+    # FALLBACK: use season averages if no Odds API lines
+    if not pool:
+        print("[NHL] No Odds API lines — falling back to season averages")
+        async def _fetch_team(team: str):
+            async with sem:
+                async with httpx.AsyncClient(timeout=20) as c:
+                    r = await c.get(f"{NHL_STATS}/skater/summary",
+                                    params={"limit":100,"start":0,
+                                            "cayenneExp":f"gameTypeId=2 and seasonId={season} and teamAbbrevs='{team}'"})
+            if r.status_code != 200: return
+            ctx = team_ctx.get(team, {})
+            opp, hr = ctx.get("opponent",""), ctx.get("homeRoad","")
+            for p in r.json().get("data",[]):
+                pid, gp, shots = p.get("playerId"), p.get("gamesPlayed",0), p.get("shots",0)
+                if p.get("positionCode") == "G" or gp < MIN_GP: continue
+                spg = shots / gp
+                if spg < MIN_SPG or pid in seen: continue
+                seen.add(pid)
+                name = p["skaterFullName"]
+                est  = _est_line(spg)
+                pool.append({"name":name,"pid":pid,"team":team,"opponent":opp,
+                             "homeRoad":hr,"line":1.5,"realLine":None,"realOdds":"",
+                             "lineSource":"Est","estLine":est,"spg":round(spg,2),
+                             "oppSA":sa_map.get(opp,0.0)})
+        await asyncio.gather(*[_fetch_team(t) for t in team_ctx], return_exceptions=True)
+        print(f"[NHL] {len(pool)} skaters from season averages (fallback)")
+
     pool.sort(key=lambda x: x["oppSA"], reverse=True)
-    print(f"[NHL] {len(pool)} skaters averaging ≥{MIN_SPG} S/G on today's teams")
     return pool
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -759,22 +834,59 @@ def _hit_rate(totals: List[int], line: float) -> Tuple[int, int, float]:
 #  Main algorithm
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _nhl_player_logs(pid: int, sem: asyncio.Semaphore) -> List[Dict]:
+    """Fetch NHL game logs for a player across multiple seasons."""
+    all_logs = []
+    async with sem:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as c:
+            results = await asyncio.gather(
+                *[_fetch(f"{NHL_API}/player/{pid}/game-log/{s}/2", c) for s in SEASONS],
+                return_exceptions=True
+            )
+    for data in results:
+        if not isinstance(data, dict): continue
+        for g in data.get("gameLog", []):
+            all_logs.append({
+                "date":     g.get("gameDate", ""),
+                "shots":    int(g.get("shots", 0) or 0),
+                "points":   int(g.get("goals", 0) or 0) + int(g.get("assists", 0) or 0),
+                "homeRoad": g.get("homeRoadFlag", ""),
+                "opponent": g.get("opponentAbbrev", ""),
+            })
+    all_logs.sort(key=lambda x: x["date"], reverse=True)
+    return all_logs
+
+
+def _calc_hit_rate_from_logs(logs: List[Dict], line: float, home_road: str,
+                             opponent: str = None, last_n: int = None):
+    filtered = [g for g in logs if g["homeRoad"] == home_road]
+    if opponent:
+        filtered = [g for g in filtered if g["opponent"] == opponent]
+    if last_n:
+        filtered = filtered[:last_n]
+    total = len(filtered)
+    if total == 0:
+        return 0, 0, 0.0, 0.0
+    hits = sum(1 for g in filtered if g["shots"] > line)
+    avg  = round(sum(g["shots"] for g in filtered) / total, 2)
+    rate = round(hits / total * 100, 1)
+    return hits, total, rate, avg
+
+
 async def run_picks(target_date: str = None) -> Dict:
     global _progress
     sem_nhl = asyncio.Semaphore(SEM_NHL)
-    sem_sm  = asyncio.Semaphore(SEM_SM)
 
     target_date = target_date or date.today().isoformat()
     season = get_season_for_date(date.fromisoformat(target_date))
 
-    _progress = {"stage": "Fetching today's games & sportsbook lines...", "done": 0, "total": 0, "pct": 10}
+    _progress = {"stage": "Fetching games & sportsbook lines...", "done": 0, "total": 0, "pct": 10}
 
-    # ── Step 1 — fetch games, SA map, lines, StatMuse cookie in parallel ─────
-    games, sa_map, cookie, lines_map = await asyncio.gather(
+    # ── Step 1 — fetch games, SA map, Odds API lines in parallel (no StatMuse) ─────
+    games, sa_map, lines_map = await asyncio.gather(
         get_today_games(target_date),
         get_team_sa_map(season),
-        get_sm_cookie(),
-        get_shot_lines(),
+        get_odds_nhl_lines(target_date),
     )
     _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
 
@@ -790,30 +902,31 @@ async def run_picks(target_date: str = None) -> Dict:
 
     # Build player pool from NHL skater season averages
     pool = await get_shot_qualified_players(games, sa_map, sem_nhl, season, lines_map)
-    _progress = {"stage": f"Analyzing {len(pool)} players via StatMuse...", "done": 0, "total": len(pool), "pct": 35}
+    _progress = {"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35}
 
     if not pool:
-        return {"error": f"No skaters averaging ≥{MIN_SPG} S/G on today's teams.", "picks": [], "games": games}
+        return {"error": "No players found for today's games.", "picks": [], "games": games}
 
-    # ── Steps 2 & 3 — StatMuse hit-rate analysis ──────────────────────────────
+    # Fetch NHL API game logs for all players concurrently
+    log_tasks = {p["pid"]: _nhl_player_logs(p["pid"], sem_nhl) for p in pool}
+    log_results = await asyncio.gather(*log_tasks.values(), return_exceptions=True)
+    logs_map = {pid: (r if isinstance(r, list) else [])
+                for pid, r in zip(log_tasks.keys(), log_results)}
+
+    _progress = {"stage": "Analyzing hit rates...", "done": 0, "total": len(pool), "pct": 70}
+
+    # ── Steps 2 & 3 — NHL Stats API hit-rate analysis (no StatMuse needed) ──
     async def analyze(p: Dict) -> Optional[Dict]:
-        url2 = _sm_url_career(p["name"], p["homeRoad"], p["opponent"])
-        url3 = _sm_url_last10(p["name"], p["homeRoad"])
+        logs = logs_map.get(p["pid"], [])
+        hr, opp, line = p["homeRoad"], p["opponent"], p["line"]
 
-        t2_raw, t3_raw = await asyncio.gather(
-            _scrape_sm(url2, cookie, sem_sm),
-            _scrape_sm(url3, cookie, sem_sm),
-        )
+        # Step 2: career H/A vs today's opponent
+        h2, t2, r2, avg2 = _calc_hit_rate_from_logs(logs, line, hr, opponent=opp)
+        # Step 3: last 10 H/A games any opponent
+        h3, t3, r3, avg3 = _calc_hit_rate_from_logs(logs, line, hr, last_n=10)
 
-        t3_list = t3_raw[:10]
-        t3 = len(t3_list)
         if t3 < MIN_GAMES:
             return None
-        h3, _, r3 = _hit_rate(t3_list, p["line"])
-        ha10avg  = round(sum(t3_list) / t3, 2)
-        t2 = len(t2_raw)
-        h2, _, r2 = _hit_rate(t2_raw, p["line"])
-        opp_avg  = round(sum(t2_raw) / t2, 2) if t2 > 0 else p["spg"]
         s2_ok = (t2 < MIN_GAMES) or (r2 >= HIT_THRESH)
         s3_ok = r3 >= HIT_THRESH
         if not s2_ok or not s3_ok:
@@ -822,9 +935,9 @@ async def run_picks(target_date: str = None) -> Dict:
 
         return {
             **p,
-            "step2Hits":  h2, "step2Total": t2, "step2Rate":  r2,
-            "step3Hits":  h3, "step3Total": t3, "step3Rate":  r3,
-            "oppAvg":     opp_avg, "ha10avg": ha10avg, "score": score,
+            "step2Hits": h2, "step2Total": t2, "step2Rate": r2,
+            "step3Hits": h3, "step3Total": t3, "step3Rate": r3,
+            "oppAvg": avg2, "ha10avg": avg3, "score": score,
         }
 
     completed = [0]
@@ -832,7 +945,7 @@ async def run_picks(target_date: str = None) -> Dict:
         result = await analyze(p)
         completed[0] += 1
         _progress["done"]  = completed[0]
-        _progress["pct"]   = 35 + int((completed[0] / max(len(pool),1)) * 60)
+        _progress["pct"]   = 70 + int((completed[0] / max(len(pool),1)) * 25)
         _progress["stage"] = f"Analyzing players... {completed[0]}/{len(pool)}"
         return result
 
@@ -1004,25 +1117,22 @@ footer b{color:#FFB81C}
 
 <div class="wrap">
 
-  <!-- STEP 1: Connect StatMuse -->
-  <div class="conn-box">
-    <h2>Step 1 — Connect to StatMuse</h2>
-    <p>Sign in to StatMuse before running picks. Takes about 30 seconds.</p>
-    <button class="btn-connect" id="connectBtn" onclick="connectSM()">
-      CONNECT TO STATMUSE
-    </button>
-    <div class="conn-status" id="connStatus"></div>
+  <!-- Status bar (no login needed) -->
+  <div style="background:#111;border:1px solid #222;border-radius:10px;padding:12px 20px;margin-bottom:16px;display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+    <span id="odds-status" style="font-size:.82rem;font-weight:700;color:#555">● Checking Odds API...</span>
+    <span id="fd-status"   style="font-size:.82rem;font-weight:700;color:#555">● FanDuel</span>
+    <span style="font-size:.78rem;color:#333;margin-left:auto">NHL Stats API · No login required</span>
   </div>
 
-  <!-- STEP 2: Run Picks (locked until connected) -->
-  <div class="run-box" id="runBox">
-    <h2>Step 2 — Run Picks</h2>
-    <p>Pick a date and run the algorithm. Connect StatMuse first.</p>
+  <!-- Run Picks -->
+  <div class="run-box unlocked" id="step2box">
+    <div class="step-label">RUN PICKS</div>
+    <p class="step-desc">Select a date and run — NHL Stats API powers all hit rates</p>
     <div class="date-row">
       <label>DATE</label>
       <input type="date" id="datePicker" max=""/>
     </div>
-    <button class="btn-run" id="runBtn" onclick="runPicks()" disabled>
+    <button class="btn-run" id="runBtn" onclick="runPicks()">
       RUN PICKS
     </button>
   </div>
@@ -1043,42 +1153,16 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 
 // STEP 1: Connect
-async function connectSM(){
-  var btn = document.getElementById('connectBtn');
-  var status = document.getElementById('connStatus');
-  btn.disabled = true;
-  btn.textContent = 'CONNECTING... (~30 SEC)';
-  status.className = 'conn-status';
-  status.style.display = 'none';
-  try {
-    var r = await fetch('/api/status');
-    var d = await r.json();
-    if(d.statmuse === 'connected'){
-      var fdStatus = d.fanduel === 'configured' ? '✅ FanDuel: Ready — real lines will load' : '⚠️ FanDuel: Not configured (add FD_EMAIL + FD_PASSWORD in Render)';
-      status.innerHTML = '✅ StatMuse: Connected<br>' + fdStatus;
-      status.className = 'conn-status ok';
-      status.style.display = 'block';
-      btn.textContent = 'CONNECTED';
-      btn.style.background = '#009900';
-      var runBox = document.getElementById('runBox');
-      runBox.className = 'run-box unlocked';
-      document.getElementById('runBtn').disabled = false;
-      document.querySelector('.run-box p').textContent = 'Pick a date and hit RUN PICKS.';
-    } else {
-      status.textContent = 'FAILED — Check STATMUSE_EMAIL and STATMUSE_PASSWORD in Render';
-      status.className = 'conn-status fail';
-      status.style.display = 'block';
-      btn.disabled = false;
-      btn.textContent = 'TRY AGAIN';
-    }
-  } catch(e) {
-    status.textContent = 'ERROR: ' + e.message;
-    status.className = 'conn-status fail';
-    status.style.display = 'block';
-    btn.disabled = false;
-    btn.textContent = 'TRY AGAIN';
-  }
+async function checkStatus(){
+  try{
+    var r=await fetch('/api/status'); var d=await r.json();
+    var o=document.getElementById('odds-status');
+    var f=document.getElementById('fd-status');
+    if(o){o.style.color=d.odds_api==='configured'?'#22c55e':'#cc0000';o.textContent=d.odds_api==='configured'?'● Odds API: Ready':'● Odds API: Not configured';}
+    if(f){f.style.color=d.fanduel==='configured'?'#22c55e':'#555';f.textContent=d.fanduel==='configured'?'● FanDuel: Ready':'● FanDuel: Not set';}
+  }catch(e){}
 }
+document.addEventListener('DOMContentLoaded',checkStatus);
 
 // STEP 2: Run picks
 async function runPicks(){
@@ -1157,7 +1241,7 @@ function buildPtsTable(picks, startNum){
 
 function buildTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
-    '<th>AVG VS OPP</th><th>L10 H/A AVG</th><th>EST LINE</th>' +
+    '<th>LINE</th><th>AVG VS OPP</th><th>L10 H/A AVG</th>' +
     '<th>CAREER VS OPP 1.5S</th><th>LAST 10 H/A 1.5S</th><th>SCORE</th><th>OPP SA/G</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
@@ -1169,9 +1253,9 @@ function buildTable(picks, startNum){
       '<td><span class="tbadge">' + p.team + '</span></td>' +
       '<td><span class="tbadge">' + p.opponent + '</span></td>' +
       '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
+      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.estLine + '</span>') + '</td>' +
       '<td><span class="gold">' + p.oppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ha10avg + '</span></td>' +
-      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.estLine + '</span>') + '</td>' +
       '<td><span class="' + rateClass(p.step2Rate) + '">' + p.step2Hits + '/' + p.step2Total + ' (' + p.step2Rate + '%)</span></td>' +
       '<td><span class="' + rateClass(p.step3Rate) + '">' + p.step3Hits + '/' + p.step3Total + ' (' + p.step3Rate + '%)</span></td>' +
       '<td><span class="score">' + p.score + '</span></td>' +
@@ -1253,21 +1337,14 @@ async def api_picks(target_date: str = None, _: str = Depends(verify_user)):
 
 @app.get("/api/status")
 async def api_status(_: str = Depends(verify_user)):
-    """Check StatMuse + FanDuel connection status."""
-    global _sm_cookie
-    sm_ok = _sm_cookie is not None
-    if not sm_ok:
-        try:
-            await get_sm_cookie()
-            sm_ok = True
-        except Exception:
-            sm_ok = False
-    fd_configured = bool(os.environ.get("FD_EMAIL"))
+    """Check connection status."""
+    fd_configured   = bool(os.environ.get("FD_EMAIL"))
+    odds_configured = bool(os.environ.get("ODDS_API_KEY"))
     return {
-        "statmuse":      "connected" if sm_ok else "disconnected",
-        "fanduel":       "configured" if fd_configured else "not configured",
-        "odds_api":      "configured" if os.environ.get("ODDS_API_KEY") else "not configured",
-        "time":          datetime.utcnow().isoformat(),
+        "statmuse":  "removed",
+        "fanduel":   "configured" if fd_configured else "not configured",
+        "odds_api":  "configured" if odds_configured else "not configured",
+        "time":      datetime.utcnow().isoformat(),
     }
 
 @app.get("/api/progress")
