@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 httpx
+beautifulsoup4
 curl_cffi
 playwright
-beautifulsoup4
 python-jose[cryptography]
