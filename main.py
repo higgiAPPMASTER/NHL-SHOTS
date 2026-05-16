@@ -781,7 +781,6 @@ nav{position:fixed;top:0;width:100%;background:rgba(10,10,10,.95);backdrop-filte
 .nav-app{font-size:13px;font-weight:600;color:#9ca3af;letter-spacing:.05em}
 .page{position:relative;z-index:1;max-width:1300px;margin:0 auto;padding:104px 24px 40px}
 .app-hdr{text-align:center;margin-bottom:36px}
-.app-hdr .app-icon{font-size:3.2rem;margin-bottom:10px;filter:drop-shadow(0 0 12px rgba(245,158,11,.5))}
 .app-hdr h1{font-family:'Playfair Display',serif;font-size:2.6rem;font-weight:900;color:#fff;margin-bottom:6px}
 .app-hdr h1 span{color:#f59e0b}
 .app-hdr p{font-size:.85rem;color:#6b7280;letter-spacing:.15em;text-transform:uppercase}
@@ -857,7 +856,6 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 
 <div class="page">
   <div class="app-hdr">
-    <div class="app-icon">🏒</div>
     <h1>NHL <span>Money Shots</span></h1>
     <p>Shots on Goal &nbsp;·&nbsp; Points</p>
   </div>
@@ -1051,7 +1049,7 @@ function renderResults(d){
   h += '</div>';
 
   // Top picks
-  h += '<div class="sec">🏒 Top ' + d.picks.length + ' Money Shots</div>';
+  h += '<div class="sec">Top ' + d.picks.length + ' Money Shots</div>';
   if(!d.picks.length){
     h += '<div class="no-picks">No players met the 80% hit rate threshold for this date.</div>';
   } else {
