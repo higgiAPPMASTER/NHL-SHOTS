@@ -761,176 +761,131 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>NHL Money Shots</title>
+<title>NHL Money Shots — Money Picks Arena</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=Source+Sans+Pro:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0a0a0a;color:#f0f0f0;font-family:Arial,Helvetica,sans-serif;min-height:100vh}
-
-/* HEADER */
-body::before{content:'';position:fixed;top:0;left:0;right:0;height:3px;
-  background:linear-gradient(90deg,#FDB827,#fff5cc,#FDB827,#C4901A,#FDB827);
-  background-size:300% 100%;animation:goldShimmer 4s linear infinite;z-index:999}
-@keyframes goldShimmer{0%{background-position:0% 50%}100%{background-position:300% 50%}}
-.hdr{background:#000;border-bottom:2px solid rgba(253,184,39,.3);
-  box-shadow:0 2px 20px rgba(253,184,39,.1);padding:36px 20px;text-align:center}
-.hdr .hdr-icon{font-size:4rem;filter:drop-shadow(0 0 16px rgba(253,184,39,.8));margin-bottom:10px}
-.hdr h1{font-size:2.5rem;font-weight:900;letter-spacing:4px;
-  background:linear-gradient(135deg,#FDB827,#fff5a0,#C4901A);
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-  background-clip:text}
-.hdr p{color:rgba(253,184,39,.6);font-size:.8rem;letter-spacing:3px;
-  text-transform:uppercase;margin-top:6px}
-
-/* LAYOUT */
-.wrap{max-width:1300px;margin:0 auto;padding:30px 20px}
-
-/* CONNECTION BOX */
-.conn-box{background:#111;border:2px solid #FDB827;border-radius:10px;
-  padding:30px;text-align:center;margin-bottom:20px}
-.conn-box h2{font-size:1rem;font-weight:700;color:#FDB827;letter-spacing:3px;
-  text-transform:uppercase;margin-bottom:8px}
-.conn-box p{color:#666;font-size:.85rem;margin-bottom:20px}
-.btn-connect{background:#FDB827;color:#000;border:none;border-radius:6px;
-  padding:16px 48px;font-size:1rem;font-weight:900;letter-spacing:2px;
-  text-transform:uppercase;cursor:pointer;transition:background .2s}
-.btn-connect:hover{background:#ffd060}
-.btn-connect:disabled{background:#444;color:#666;cursor:not-allowed}
-.conn-status{margin-top:16px;padding:12px 20px;border-radius:6px;
-  font-weight:700;font-size:.9rem;letter-spacing:1px;display:none}
-.conn-status.ok{background:#003300;border:1px solid #009900;color:#00cc00}
-.conn-status.fail{background:#330000;border:1px solid #990000;color:#cc0000}
-
-/* RUN BOX */
-.run-box{background:#111;border:2px solid #333;border-radius:10px;
-  padding:30px;text-align:center;margin-bottom:24px;transition:border-color .3s}
-.run-box.unlocked{border-color:#C8102E}
-.run-box h2{font-size:1rem;font-weight:700;color:#888;letter-spacing:3px;
-  text-transform:uppercase;margin-bottom:8px;transition:color .3s}
-.run-box.unlocked h2{color:#C8102E}
-.run-box p{color:#555;font-size:.85rem;margin-bottom:20px}
+body{background:#0f0f0f;color:#fff;font-family:'Source Sans Pro',sans-serif;min-height:100vh}
+.bg-glow{position:fixed;inset:0;background:radial-gradient(ellipse at 50% 20%,rgba(245,158,11,.05),transparent 65%);pointer-events:none;z-index:0}
+nav{position:fixed;top:0;width:100%;background:rgba(10,10,10,.95);backdrop-filter:blur(12px);border-bottom:1px solid #1c1c1c;z-index:100;padding:0 32px;height:80px;display:flex;align-items:center;justify-content:space-between}
+.logo{font-family:'Playfair Display',serif;font-size:28px;font-weight:900;color:#f59e0b;letter-spacing:.02em;line-height:1}
+.logo span{color:#fff}
+.nav-right{display:flex;align-items:center;gap:14px}
+.nav-sport{background:#15803d;color:#fff;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:3px 10px;border-radius:4px}
+.nav-app{font-size:13px;font-weight:600;color:#9ca3af;letter-spacing:.05em}
+.page{position:relative;z-index:1;max-width:1300px;margin:0 auto;padding:104px 24px 40px}
+.app-hdr{text-align:center;margin-bottom:36px}
+.app-hdr .app-icon{font-size:3.2rem;margin-bottom:10px;filter:drop-shadow(0 0 12px rgba(245,158,11,.5))}
+.app-hdr h1{font-family:'Playfair Display',serif;font-size:2.6rem;font-weight:900;color:#fff;margin-bottom:6px}
+.app-hdr h1 span{color:#f59e0b}
+.app-hdr p{font-size:.85rem;color:#6b7280;letter-spacing:.15em;text-transform:uppercase}
+.card{background:#161616;border:1px solid #262626;border-radius:20px;padding:24px;margin-bottom:16px}
+.status-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 20px;background:#161616;border:1px solid #262626;border-radius:14px;margin-bottom:20px}
+.sdot{display:inline-flex;align-items:center;gap:6px;font-size:.82rem;font-weight:600;color:#6b7280}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot-green{background:#4ade80;animation:pulse 2s infinite}
+.dot-amber{background:#f59e0b}
+.dot-red{background:#ef4444}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .date-row{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:20px}
-.date-row label{color:#fff;font-weight:700;font-size:.9rem;letter-spacing:1px}
-.date-row input{background:#1a1a1a;color:#f0f0f0;border:1px solid #333;
-  border-radius:6px;padding:10px 16px;font-size:.95rem;cursor:pointer;outline:none}
-.date-row input:focus{border-color:#FDB827}
-.btn-run{background:#C8102E;color:#fff;border:none;border-radius:6px;
-  padding:16px 56px;font-size:1rem;font-weight:900;letter-spacing:2px;
-  text-transform:uppercase;cursor:pointer;transition:background .2s}
-.btn-run:hover{background:#e01535}
-.btn-run:disabled{background:#333;color:#666;cursor:not-allowed}
-
-/* STATUS LINE */
-.status{text-align:center;color:#666;font-size:.85rem;margin-bottom:24px;min-height:20px}
-
-/* STAT CHIPS */
-.chips{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));
-  gap:12px;margin-bottom:28px}
-.chip{background:#111;border-top:3px solid #FDB827;border-radius:8px;
-  padding:16px 10px;text-align:center}
-.chip .val{font-size:1.9rem;font-weight:900;color:#FDB827}
-.chip .lbl{font-size:.65rem;color:#555;text-transform:uppercase;letter-spacing:1px;margin-top:4px}
-
-/* SECTION HEADER */
-.sec{background:#111;border-left:4px solid #FDB827;padding:10px 16px;
-  font-size:.85rem;font-weight:900;letter-spacing:2px;text-transform:uppercase;
-  color:#fff;margin:24px 0 12px;border-radius:0 6px 6px 0}
-
-/* GAMES */
-.games{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));
-  gap:10px;margin-bottom:24px}
-.gcard{background:#111;border:1px solid #222;border-radius:8px;
-  padding:14px;text-align:center}
-.gcard:hover{border-color:#FDB827}
+.date-row label{color:#9ca3af;font-weight:600;font-size:.85rem;letter-spacing:.08em;text-transform:uppercase}
+.date-row input{background:#0a0a0a;color:#fff;border:1px solid #2a2a2a;border-radius:10px;padding:10px 16px;font-size:.95rem;font-family:'Source Sans Pro',sans-serif;cursor:pointer;outline:none;transition:border .2s}
+.date-row input:focus{border-color:#f59e0b}
+.btn-run{background:#f59e0b;color:#000;border:none;border-radius:8px;padding:14px 52px;font-size:.95rem;font-weight:700;font-family:'Source Sans Pro',sans-serif;cursor:pointer;transition:all .2s}
+.btn-run:hover{background:#fbbf24;transform:translateY(-1px);box-shadow:0 4px 20px rgba(245,158,11,.35)}
+.btn-run:disabled{background:#2a2a2a;color:#4b5563;cursor:not-allowed;transform:none;box-shadow:none}
+.status-msg{text-align:center;color:#6b7280;font-size:.85rem;margin-bottom:24px;min-height:20px}
+.chips{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;margin-bottom:28px}
+.chip{background:#161616;border:1px solid #262626;border-top:3px solid #f59e0b;border-radius:14px;padding:16px 10px;text-align:center}
+.chip .val{font-size:1.8rem;font-weight:900;color:#f59e0b;font-family:'Playfair Display',serif}
+.chip .lbl{font-size:.65rem;color:#6b7280;text-transform:uppercase;letter-spacing:.1em;margin-top:4px;font-weight:600}
+.sec{display:flex;align-items:center;gap:10px;font-size:.78rem;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:.15em;margin:28px 0 12px}
+.sec::after{content:'';flex:1;height:1px;background:rgba(245,158,11,.15)}
+.games{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:24px}
+.gcard{background:#161616;border:1px solid #262626;border-radius:14px;padding:14px;text-align:center;transition:border-color .2s}
+.gcard:hover{border-color:#f59e0b}
 .gcard .mu{font-size:1rem;font-weight:700;color:#fff}
-.gcard .gt{font-size:.75rem;color:#555;margin-top:5px}
-
-/* SA RANKS */
+.gcard .gt{font-size:.75rem;color:#6b7280;margin-top:5px}
 .sa-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:24px}
-.sa-badge{background:#111;border:1px solid #222;border-radius:4px;
-  padding:5px 12px;font-size:.8rem}
-.sa-badge .rk{color:#FDB827;font-weight:700}
+.sa-badge{background:#161616;border:1px solid #262626;border-radius:6px;padding:5px 12px;font-size:.8rem}
+.sa-badge .rk{color:#f59e0b;font-weight:700}
 .sa-badge .sv{color:#C8102E;font-weight:700}
-
-/* TABLE */
-.tbl-wrap{overflow-x:auto;border-radius:8px;border:1px solid #222;margin-bottom:8px}
-table{width:100%;border-collapse:collapse;background:#0a0a0a}
-thead tr{border-bottom:2px solid #FDB827}
-th{background:#111;padding:12px 14px;text-align:left;font-size:.72rem;
-  font-weight:900;text-transform:uppercase;letter-spacing:1px;color:#FDB827;white-space:nowrap}
-td{padding:11px 14px;border-bottom:1px solid #1a1a1a;font-size:.88rem;white-space:nowrap}
-tr:nth-child(even) td{background:#0f0f0f}
-tr:hover td{background:#161616}
+.tbl-wrap{overflow-x:auto;border-radius:14px;border:1px solid #262626;margin-bottom:8px}
+table{width:100%;border-collapse:collapse;background:#161616}
+thead tr{border-bottom:1px solid rgba(245,158,11,.2)}
+th{background:#1a1a1a;padding:12px 14px;text-align:left;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#f59e0b;white-space:nowrap;font-family:'Source Sans Pro',sans-serif}
+td{padding:11px 14px;border-bottom:1px solid #1c1c1c;font-size:.88rem;white-space:nowrap}
+tr:nth-child(even) td{background:#141414}
+tr:hover td{background:#1c1c1c}
 tr:last-child td{border-bottom:none}
-
-.rk-num{font-weight:900;color:#FDB827;font-size:1.1rem}
-.rk-rest{color:#555;font-size:.9rem}
+.rk-num{font-weight:900;color:#f59e0b;font-size:1.1rem;font-family:'Playfair Display',serif}
+.rk-rest{color:#4b5563;font-size:.9rem}
 .pname{font-weight:700;color:#fff}
-.tbadge{background:#1a1a1a;color:#999;padding:2px 8px;border-radius:3px;
-  font-size:.74rem;border:1px solid #2a2a2a}
-.home{background:#0a1a0a;color:#00aa00;padding:3px 8px;border-radius:3px;
-  font-size:.74rem;font-weight:700;border:1px solid #004400}
-.away{background:#1a0a0a;color:#cc0000;padding:3px 8px;border-radius:3px;
-  font-size:.74rem;font-weight:700;border:1px solid #440000}
-.gold{color:#FDB827;font-weight:700}
-.green{color:#00aa00;font-weight:700}
-.red-txt{color:#cc0000;font-weight:700}
-.score{color:#FDB827;font-weight:900;font-size:1.05rem}
-.gray{color:#555;font-size:.8rem}
-.est{background:#1a1200;color:#FDB827;border:1px solid #332200;
-  padding:2px 8px;border-radius:3px;font-size:.78rem;font-weight:700}
-.real-line{color:#00cc44;font-weight:900;font-size:1rem}
-.odds-txt{color:#666;font-size:.78rem}
-
-/* LOADING */
+.tbadge{background:#1a1a1a;color:#9ca3af;padding:2px 8px;border-radius:4px;font-size:.74rem;border:1px solid #2a2a2a}
+.home{background:rgba(74,222,128,.08);color:#4ade80;padding:3px 8px;border-radius:4px;font-size:.74rem;font-weight:700;border:1px solid rgba(74,222,128,.2)}
+.away{background:rgba(239,68,68,.08);color:#f87171;padding:3px 8px;border-radius:4px;font-size:.74rem;font-weight:700;border:1px solid rgba(239,68,68,.2)}
+.gold{color:#f59e0b;font-weight:700}
+.green{color:#4ade80;font-weight:700}
+.red-txt{color:#f87171;font-weight:700}
+.score{color:#f59e0b;font-weight:900;font-size:1.05rem;font-family:'Playfair Display',serif}
+.gray{color:#6b7280;font-size:.8rem}
+.est{background:rgba(245,158,11,.08);color:#f59e0b;border:1px solid rgba(245,158,11,.2);padding:2px 8px;border-radius:4px;font-size:.78rem;font-weight:700}
+.real-line{color:#4ade80;font-weight:900;font-size:1rem}
+.odds-txt{color:#6b7280;font-size:.78rem}
 .loading{text-align:center;padding:70px 20px}
-.spin{width:50px;height:50px;border:4px solid #1a1a1a;
-  border-top:4px solid #FDB827;border-radius:50%;
-  animation:spin .8s linear infinite;margin:0 auto 18px}
+.spin{width:48px;height:48px;border:3px solid rgba(245,158,11,.15);border-top:3px solid #f59e0b;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 18px}
 @keyframes spin{to{transform:rotate(360deg)}}
-.err-box{background:#1a0000;border:1px solid #C8102E;border-radius:8px;
-  padding:20px;text-align:center;color:#cc0000;font-weight:700}
-.no-picks{text-align:center;padding:50px;color:#444}
-
-footer{text-align:center;padding:28px;color:#333;font-size:.75rem;
-  border-top:1px solid #1a1a1a;margin-top:24px}
-footer b{color:#FDB827}
+.err-box{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:12px;padding:20px;text-align:center;color:#f87171;font-weight:700}
+.no-picks{text-align:center;padding:50px;color:#4b5563}
+footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border-top:1px solid #1c1c1c;margin-top:24px;font-family:'Source Sans Pro',sans-serif}
+.ft-logo{font-family:'Playfair Display',serif;color:#f59e0b;font-weight:700;font-size:.95rem;margin-bottom:6px}
 </style>
 </head>
 <body>
+<div class="bg-glow"></div>
 
-<div class="hdr">
-  <div class="hdr-icon">🏒</div>
-  <h1>NHL Money Shots</h1>
-  <p>NHL Daily Picks</p>
-</div>
+<nav>
+  <div class="logo">Money <span>Picks</span> Arena</div>
+  <div class="nav-right">
+    <span class="nav-sport">HOCKEY</span>
+    <span class="nav-app">🏒 NHL Money Shots</span>
+  </div>
+</nav>
 
-<div class="wrap">
-
-  <!-- Status bar (no login needed) -->
-  <div style="background:#111;border:1px solid #222;border-radius:10px;padding:12px 20px;margin-bottom:16px;display:flex;align-items:center;gap:20px;flex-wrap:wrap">
-    <span id="odds-status" style="font-size:.82rem;font-weight:700;color:#555">● Checking Odds API...</span>
-    <span id="fd-status"   style="font-size:.82rem;font-weight:700;color:#555">● FanDuel</span>
-    <span style="font-size:.78rem;color:#333;margin-left:auto">NHL Stats API · No login required</span>
+<div class="page">
+  <div class="app-hdr">
+    <div class="app-icon">🏒</div>
+    <h1>NHL <span>Money Shots</span></h1>
+    <p>Shots on Goal &nbsp;·&nbsp; Daily Picks</p>
   </div>
 
-  <!-- Run Picks -->
-  <div class="run-box unlocked" id="step2box">
-    <div class="step-label">RUN PICKS</div>
-    <p class="step-desc">Select a date and run — NHL Stats API powers all hit rates</p>
+  <div class="status-bar">
+    <span id="odds-status" class="sdot"><span class="dot dot-amber"></span>Checking Odds API...</span>
+    <span id="fd-status" class="sdot"><span class="dot dot-amber"></span>FanDuel</span>
+    <span style="font-size:.75rem;color:#374151;margin-left:auto">NHL Stats API</span>
+  </div>
+
+  <div class="card" style="text-align:center">
+    <h2 style="font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:700;color:#fff;margin-bottom:6px">Run Today\'s Picks</h2>
+    <p style="color:#6b7280;font-size:.88rem;margin-bottom:22px">Select a date — NHL Stats API powers all hit rates</p>
     <div class="date-row">
-      <label>DATE</label>
+      <label>Date</label>
       <input type="date" id="datePicker" max=""/>
     </div>
-    <button class="btn-run" id="runBtn" onclick="runPicks()">
-      RUN PICKS
-    </button>
+    <button class="btn-run" id="runBtn" onclick="runPicks()">Run Picks</button>
   </div>
 
-  <div class="status" id="statusMsg"></div>
+  <div class="status-msg" id="statusMsg"></div>
   <div id="out"></div>
 </div>
 
-<footer><b>NHL Money Shots</b> &nbsp;&middot;&nbsp; Money Picks Arena &nbsp;&middot;&nbsp; NHL Stats API + Sportsbook Lines</footer>
+<footer>
+  <div class="ft-logo">Money Picks Arena</div>
+  <div>NHL Money Shots &nbsp;·&nbsp; NHL Stats API + Sportsbook Lines</div>
+  <div style="margin-top:8px;font-size:.7rem">For entertainment and informational purposes only. We do not accept bets or guarantee results. Please gamble responsibly. Must be 18+.</div>
+</footer>
 
 <script>
 // Set date to today
@@ -966,8 +921,8 @@ async function checkStatus(){
     var r=await fetch('/api/status'); var d=await r.json();
     var o=document.getElementById('odds-status');
     var f=document.getElementById('fd-status');
-    if(o){o.style.color=d.odds_api==='configured'?'#22c55e':'#cc0000';o.textContent=d.odds_api==='configured'?'● Odds API: Ready':'● Odds API: Not configured';}
-    if(f){f.style.color=d.fanduel==='configured'?'#22c55e':'#555';f.textContent=d.fanduel==='configured'?'● FanDuel: Ready':'● FanDuel: Not set';}
+    if(o){var od=o.querySelector('.dot');if(od)od.className='dot '+(d.odds_api==='configured'?'dot-green':'dot-red');o.lastChild.textContent=d.odds_api==='configured'?' Odds API: Ready':' Odds API: Not configured';}
+    if(f){var fd=f.querySelector('.dot');if(fd)fd.className='dot '+(d.fanduel==='configured'?'dot-green':'dot-amber');f.lastChild.textContent=d.fanduel==='configured'?' FanDuel: Ready':' FanDuel: Not set';}
   }catch(e){}
 }
 document.addEventListener('DOMContentLoaded',checkStatus);
@@ -979,13 +934,13 @@ async function runPicks(){
   var out = document.getElementById('out');
   var dt = document.getElementById('datePicker').value;
   btn.disabled = true;
-  btn.textContent = 'RUNNING...';
+  btn.textContent = 'Running...';
   st.textContent = 'Fetching games and analyzing players for ' + dt + '...';
   out.innerHTML = '<div class="loading"><div class="spin"></div>' +
-    '<p style="color:#888;margin-bottom:16px" id="prog-stage">Starting...</p>' +
-    '<div style="background:#1a1a1a;border-radius:6px;height:18px;width:280px;margin:0 auto 8px;overflow:hidden">' +
-    '<div id="prog-bar" style="height:100%;width:5%;background:#FDB827;border-radius:6px;transition:width .5s"></div></div>' +
-    '<p style="color:#555;font-size:.8rem" id="prog-pct">5%</p></div>';
+    '<p style="color:#9ca3af;margin-bottom:16px" id="prog-stage">Starting...</p>' +
+    '<div style="background:rgba(245,158,11,.1);border-radius:6px;height:8px;width:280px;margin:0 auto 8px;overflow:hidden">' +
+    '<div id="prog-bar" style="height:100%;width:5%;background:#f59e0b;border-radius:6px;transition:width .5s"></div></div>' +
+    '<p style="color:#6b7280;font-size:.8rem" id="prog-pct">5%</p></div>';
 
   // Poll progress every 2 seconds
   var pollTimer = setInterval(async function(){
@@ -1009,14 +964,14 @@ async function runPicks(){
       st.textContent = '';
     } else {
       renderResults(data);
-      st.textContent = data.qualified + ' players qualified — ' + data.picks.length + ' top picks — ' + dt;
+      if(st) st.textContent = data.qualified + ' players qualified — ' + data.picks.length + ' top picks — ' + dt;
     }
   } catch(e) {
     out.innerHTML = '<div class="err-box">Error: ' + e.message + '</div>';
   } finally {
     clearInterval(pollTimer);
     btn.disabled = false;
-    btn.textContent = 'RUN PICKS';
+    btn.textContent = 'Run Picks';
   }
 }
 
@@ -1086,7 +1041,7 @@ function renderResults(d){
     '</div>';
 
   // Games
-  h += '<div class="sec">Games — ' + (d.targetDate || '') + '</div><div class="games">';
+  h += '<div class="sec">📅 Games — ' + (d.targetDate || '') + '</div><div class="games">';
   d.games.forEach(function(g){
     var t = g.startTime ? new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}) : '';
     h += '<div class="gcard"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + '</div><div class="gt">' + t + '</div></div>';
@@ -1094,14 +1049,14 @@ function renderResults(d){
   h += '</div>';
 
   // SA Rankings
-  h += '<div class="sec">Shots Against / Game Rankings</div><div class="sa-list">';
+  h += '<div class="sec">📊 Shots Against / Game Rankings</div><div class="sa-list">';
   (d.sa_ranks || []).forEach(function(item, i){
     h += '<div class="sa-badge"><span class="rk">#' + (i+1) + ' ' + item[0] + '</span> <span class="sv">' + item[1].toFixed(1) + '</span></div>';
   });
   h += '</div>';
 
   // Top picks
-  h += '<div class="sec">Top ' + d.picks.length + ' Money Shots</div>';
+  h += '<div class="sec">🏒 Top ' + d.picks.length + ' Money Shots</div>';
   if(!d.picks.length){
     h += '<div class="no-picks">No players met the 80% hit rate threshold for this date.</div>';
   } else {
@@ -1110,16 +1065,16 @@ function renderResults(d){
 
   // Also qualified
   if(d.rest && d.rest.length){
-    h += '<div class="sec" style="margin-top:28px">Also Qualified — ' + d.rest.length + ' More Players</div>';
+    h += '<div class="sec">Also Qualified — ' + d.rest.length + ' More Players</div>';
     h += buildTable(d.rest, d.picks.length + 1);
   }
 
   // POINTS SECTION
   if(d.ptsPicks && d.ptsPicks.length){
-    h += '<div class="sec" style="margin-top:40px;border-left-color:#C8102E">&#127944; Top ' + d.ptsPicks.length + ' Points Picks (1+ Point)</div>';
+    h += '<div class="sec">🎤 Top ' + d.ptsPicks.length + ' Points Picks (1+ Point)</div>';
     h += buildPtsTable(d.ptsPicks, 1);
     if(d.ptsRest && d.ptsRest.length){
-      h += '<div class="sec" style="margin-top:20px;border-left-color:#C8102E">Also Qualified for Points — ' + d.ptsRest.length + ' More</div>';
+      h += '<div class="sec">Also Qualified for Points — ' + d.ptsRest.length + ' More</div>';
       h += buildPtsTable(d.ptsRest, d.ptsPicks.length + 1);
     }
   }
