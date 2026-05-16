@@ -15,8 +15,7 @@ from typing import List, Dict, Optional, Tuple
 import httpx
 from curl_cffi.requests import AsyncSession as CFSession
 from playwright.async_api import async_playwright
-from fastapi import FastAPI, Depends, HTTPException, status, Request
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from jose import jwt as jose_jwt
 
@@ -44,7 +43,6 @@ def _verify_hub_token(token: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 app      = FastAPI(title="NHL Shots Picks")
-security = HTTPBasic()
 
 NHL_API      = "https://api-web.nhle.com/v1"
 NHL_STATS    = "https://api.nhle.com/stats/rest/en"
@@ -68,16 +66,7 @@ SEM_NHL     = 8      # concurrent NHL API calls
 #  HTTP Basic Auth
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _parse_users() -> Dict[str, str]:
-    raw = os.environ.get("USERS", "admin:changeme")
-    out = {}
-    for entry in raw.split(","):
-        parts = entry.strip().split(":", 1)
-        if len(parts) == 2:
-            out[parts[0].strip()] = parts[1].strip()
-    return out
-
-def verify_user(creds: HTTPBasicCredentials = Depends(security)) -> str:
+def verify_user() -> str:
     return "higgi"   # auth handled by hub JWT token gate
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1155,16 +1144,16 @@ async def verify_token_nhl(request: Request):
     return {"ok": True}
 
 @app.get("/", response_class=HTMLResponse)
-async def index(_: str = Depends(verify_user)):
+async def index():
     return HTML
 
 @app.get("/api/picks")
-async def api_picks(target_date: str = None, _: str = Depends(verify_user)):
+async def api_picks(target_date: str = None):
     result = await run_picks(target_date)
     return JSONResponse(result)
 
 @app.get("/api/status")
-async def api_status(_: str = Depends(verify_user)):
+async def api_status():
     """Check sportsbook connection status."""
     fd_configured   = bool(os.environ.get("FD_EMAIL"))
     odds_configured = bool(os.environ.get("ODDS_API_KEY"))
@@ -1175,7 +1164,7 @@ async def api_status(_: str = Depends(verify_user)):
     }
 
 @app.get("/api/progress")
-async def api_progress(_: str = Depends(verify_user)):
+async def api_progress():
     return JSONResponse(_progress)
 
 @app.get("/health")
