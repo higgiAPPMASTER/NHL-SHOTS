@@ -242,7 +242,7 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                     for ev in events:
                         r2 = await c.get(
                             f"{ODDS_API}/sports/icehockey_nhl/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2",
+                            params={"apiKey": api_key, "regions": "us,us2,eu,uk",
                                     "markets": "player_shots_on_goal",
                                     "oddsFormat": "american"})
                         if r2.status_code != 200:
@@ -393,11 +393,17 @@ async def _lines_from_draftkings() -> Dict[str, Dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _match_odds_name(odds_name: str, roster: List[Dict]) -> Optional[Dict]:
-    """Match Odds API player name to NHL roster player."""
-    def norm(n): return n.lower().replace(".","").replace("-"," ").replace("'","").strip()
+    """Match Odds API player name to NHL roster player — handles accents & initials."""
+    def norm(n):
+        # Strip accents: Slafkovský → slafkovsky
+        nfd = unicodedata.normalize("NFD", n)
+        ascii_ = nfd.encode("ascii", "ignore").decode("ascii")
+        return ascii_.lower().replace(".","").replace("-"," ").replace("'","").strip()
     on = norm(odds_name)
+    # 1. Exact match
     for p in roster:
         if norm(p["name"]) == on: return p
+    # 2. First initial + last name
     parts = on.split()
     if len(parts) >= 2:
         fi, last = parts[0][0], parts[-1]
@@ -405,6 +411,11 @@ def _match_odds_name(odds_name: str, roster: List[Dict]) -> Optional[Dict]:
             pp = norm(p["name"]).split()
             if len(pp) >= 2 and pp[0][0] == fi and pp[-1] == last:
                 return p
+    # 3. Last name only (for single-name odds entries)
+    if parts:
+        last = parts[-1]
+        matches = [p for p in roster if norm(p["name"]).split()[-1] == last]
+        if len(matches) == 1: return matches[0]
     return None
 
 
@@ -999,8 +1010,8 @@ function buildPtsTable(picks, startNum){
 
 function buildTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
-    '<th>LINE</th><th>AVG VS OPP</th><th>L10 H/A AVG</th>' +
-    '<th>CAREER VS OPP 1.5S</th><th>LAST 10 H/A 1.5S</th><th>SCORE</th><th>OPP SA/G</th></tr></thead>';
+    '<th>LINE</th><th>AVG VS OPP H/A</th><th>L10 H/A AVG</th>' +
+    '<th>CAREER VS OPP 1.5S H/A</th><th>LAST 10 H/A 1.5S</th><th>SCORE</th><th>OPP SA/G</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha = p.homeRoad === 'H';
