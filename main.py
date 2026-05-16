@@ -8,7 +8,7 @@ Step 4 : Rank & top 10
 Deployed on Render (FastAPI + Playwright + curl_cffi)
 """
 
-import os, hmac, asyncio, re, unicodedata, time
+import os, hmac, asyncio, re, unicodedata, time, json
 from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -69,20 +69,38 @@ SEM_NHL     = 8      # concurrent NHL API calls
 def verify_user() -> str:
     return "higgi"   # auth handled by hub JWT token gate
 
-# ── Picks Cache — keyed by date, TTL 6 hours ──────────────────────────────────
-_picks_cache: Dict[str, Dict] = {}
-_CACHE_TTL   = 6 * 3600
+# ── File-based Picks Cache ────────────────────────────────────────────────────
+import pathlib
+_CACHE_DIR = pathlib.Path("/tmp/mpa_cache")
+_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_CACHE_TTL = 6 * 3600  # 6 hours
 
-def _cache_get(date_key: str) -> Optional[Dict]:
-    entry = _picks_cache.get(date_key)
-    if entry and (time.time() - entry["ts"]) < _CACHE_TTL:
-        print(f"[Cache] HIT {date_key}")
-        return entry["result"]
+def _cache_path(app: str, date_key: str) -> pathlib.Path:
+    return _CACHE_DIR / f"{app}_{date_key}.json"
+
+def _cache_get(app: str, date_key: str):
+    p = _cache_path(app, date_key)
+    try:
+        if p.exists() and (time.time() - p.stat().st_mtime) < _CACHE_TTL:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            print(f"[Cache] FILE HIT {app}/{date_key}")
+            return data
+    except Exception as e:
+        print(f"[Cache] Read error: {e}")
     return None
 
-def _cache_set(date_key: str, result: Dict):
-    _picks_cache[date_key] = {"result": result, "ts": time.time()}
-    print(f"[Cache] SET {date_key}")
+def _cache_set(app: str, date_key: str, result: dict):
+    try:
+        _cache_path(app, date_key).write_text(
+            json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        print(f"[Cache] FILE SET {app}/{date_key}")
+    except Exception as e:
+        print(f"[Cache] Write error: {e}")
+
+def _cache_clear(app: str = None):
+    for p in _CACHE_DIR.glob("*.json"):
+        if app is None or p.name.startswith(app + "_"):
+            p.unlink(missing_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -885,7 +903,7 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 <script>
 // Set date to today
 document.addEventListener('DOMContentLoaded', function(){
-// ── Hub Token Gate ────────────────────────────────────────────────────
+// -- Hub Token Gate ----------------------------------------------------
 (function() {
   const HUB = 'https://www.moneypicksarena.com';
   const STORAGE_KEY = '__mpa_token';
@@ -959,7 +977,7 @@ async function runPicks(){
       st.textContent = '';
     } else {
       renderResults(data);
-      if(st) st.textContent = data.qualified + ' players qualified — ' + data.picks.length + ' top picks — ' + dt;
+      if(st) st.textContent = data.qualified + ' players qualified -- ' + data.picks.length + ' top picks -- ' + dt;
     }
   } catch(e) {
     out.innerHTML = '<div class="err-box">Error: ' + e.message + '</div>';
@@ -1036,7 +1054,7 @@ function renderResults(d){
     '</div>';
 
   // Games
-  h += '<div class="sec">📅 Games — ' + (d.targetDate || '') + '</div><div class="games">';
+  h += '<div class="sec">- Games -- ' + (d.targetDate || '') + '</div><div class="games">';
   d.games.forEach(function(g){
     var t = g.startTime ? new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}) : '';
     h += '<div class="gcard"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + '</div><div class="gt">' + t + '</div></div>';
@@ -1044,7 +1062,7 @@ function renderResults(d){
   h += '</div>';
 
   // SA Rankings
-  h += '<div class="sec">📊 Shots Against / Game Rankings</div><div class="sa-list">';
+  h += '<div class="sec">- Shots Against / Game Rankings</div><div class="sa-list">';
   (d.sa_ranks || []).forEach(function(item, i){
     h += '<div class="sa-badge"><span class="rk">#' + (i+1) + ' ' + item[0] + '</span> <span class="sv">' + item[1].toFixed(1) + '</span></div>';
   });
@@ -1060,21 +1078,65 @@ function renderResults(d){
 
   // Also qualified
   if(d.rest && d.rest.length){
-    h += '<div class="sec">Also Qualified — ' + d.rest.length + ' More Players</div>';
+    h += '<div class="sec">Also Qualified -- ' + d.rest.length + ' More Players</div>';
     h += buildTable(d.rest, d.picks.length + 1);
   }
 
   // POINTS SECTION
   if(d.ptsPicks && d.ptsPicks.length){
-    h += '<div class="sec">🎤 Top ' + d.ptsPicks.length + ' Points Picks (1+ Point)</div>';
+    h += '<div class="sec">- Top ' + d.ptsPicks.length + ' Points Picks (1+ Point)</div>';
     h += buildPtsTable(d.ptsPicks, 1);
     if(d.ptsRest && d.ptsRest.length){
-      h += '<div class="sec">Also Qualified for Points — ' + d.ptsRest.length + ' More</div>';
+      h += '<div class="sec">Also Qualified for Points -- ' + d.ptsRest.length + ' More</div>';
       h += buildPtsTable(d.ptsRest, d.ptsPicks.length + 1);
     }
   }
 
+  // All Plays by Game - collapsible
+  var allPlays = (d.picks||[]).concat(d.rest||[])
+    .concat(d.ptsPicks||[]).concat(d.ptsRest||[]);
+  if(allPlays.length && d.games && d.games.length){
+    h += '<div class="sec" style="margin-top:32px">All Plays by Game</div>';
+    d.games.forEach(function(g, gi){
+      var gameName = g.awayTeam + ' @ ' + g.homeTeam;
+      var gamePlays = allPlays.filter(function(p){
+        return p.team===g.homeTeam || p.team===g.awayTeam ||
+               p.opponent===g.homeTeam || p.opponent===g.awayTeam;
+      });
+      if(!gamePlays.length) return;
+      var shots = gamePlays.filter(function(p){return p.step2Hits!=null;});
+      var pts   = gamePlays.filter(function(p){return p.pts2Hits!=null;});
+      h += '<div style="margin-bottom:10px">';
+      h += '<div onclick="nhlToggle('+gi+')" style="background:#161616;border:1px solid #262626;border-radius:12px;padding:12px 18px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">';
+      h += '<span style="font-weight:700;color:#fff;font-size:.92rem">' + gameName + '</span>';
+      h += '<div style="display:flex;align-items:center;gap:10px">';
+      h += '<span style="background:rgba(245,158,11,.1);color:#f59e0b;padding:3px 12px;border-radius:999px;font-size:.75rem;font-weight:700">';
+      h += shots.length + ' shots | ' + pts.length + ' pts</span>';
+      h += '<button id="nhltoggle_btn_'+gi+'" onclick="event.stopPropagation();nhlToggle('+gi+')" style="background:none;border:1px solid #374151;color:#9ca3af;border-radius:6px;padding:3px 12px;font-size:.72rem;cursor:pointer">Expand</button>';
+      h += '</div></div>';
+      h += '<div id="nhltoggle_'+gi+'" style="display:none;margin-top:6px">';
+      if(shots.length){
+        h += '<div style="font-size:.72rem;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;padding:8px 12px 4px">Shots on Goal</div>';
+        h += buildTable(shots, 1);
+      }
+      if(pts.length){
+        h += '<div style="font-size:.72rem;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;padding:8px 12px 4px">Points</div>';
+        h += buildPtsTable(pts, 1);
+      }
+      h += '</div></div>';
+    });
+  }
+
   document.getElementById('out').innerHTML = h;
+}
+
+function nhlToggle(n){
+  var el=document.getElementById('nhltoggle_'+n);
+  var btn=document.getElementById('nhltoggle_btn_'+n);
+  if(!el) return;
+  var hidden=el.style.display==='none';
+  el.style.display=hidden?'block':'none';
+  if(btn) btn.textContent=hidden?'Collapse':'Expand';
 }
 </script>
 </body>
@@ -1100,18 +1162,33 @@ async def index():
 @app.get("/api/picks")
 async def api_picks(target_date: str = None):
     key = target_date or date.today().isoformat()
-    cached = _cache_get(key)
+    cached = _cache_get("nhl", key)
     if cached:
         return JSONResponse(cached)
     result = await run_picks(target_date)
     if "error" not in result:
-        _cache_set(key, result)
+        _cache_set("nhl", key, result)
     return JSONResponse(result)
+
+
+@app.get("/api/warm")
+async def api_warm():
+    """Pre-compute today's picks — called by cron-job.org at 10 AM."""
+    today = date.today().isoformat()
+    cached = _cache_get("nhl", today)
+    if cached:
+        return JSONResponse({"ok": True, "source": "cache", "date": today,
+                             "picks": len(cached.get("picks", []))})
+    result = await run_picks(today)
+    if "error" not in result:
+        _cache_set("nhl", today, result)
+    return JSONResponse({"ok": "error" not in result, "source": "computed",
+                         "date": today, "picks": len(result.get("picks", []))})
 
 @app.post("/api/clear-cache")
 async def api_clear_cache():
-    _picks_cache.clear()
-    return {"ok": True, "msg": "Cache cleared"}
+    _cache_clear("nhl")
+    return {"ok": True, "msg": "NHL cache cleared"}
 
 @app.get("/api/status")
 async def api_status():
