@@ -8,7 +8,7 @@ Step 4 : Rank & top 10
 Deployed on Render (FastAPI + Playwright + curl_cffi)
 """
 
-import os, hmac, asyncio, re, unicodedata
+import os, hmac, asyncio, re, unicodedata, time
 from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -68,6 +68,22 @@ SEM_NHL     = 8      # concurrent NHL API calls
 
 def verify_user() -> str:
     return "higgi"   # auth handled by hub JWT token gate
+
+# ── Picks Cache — keyed by date, TTL 6 hours ──────────────────────────────────
+_picks_cache: Dict[str, Dict] = {}
+_CACHE_TTL   = 6 * 3600
+
+def _cache_get(date_key: str) -> Optional[Dict]:
+    entry = _picks_cache.get(date_key)
+    if entry and (time.time() - entry["ts"]) < _CACHE_TTL:
+        print(f"[Cache] HIT {date_key}")
+        return entry["result"]
+    return None
+
+def _cache_set(date_key: str, result: Dict):
+    _picks_cache[date_key] = {"result": result, "ts": time.time()}
+    print(f"[Cache] SET {date_key}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  FanDuel Session (Playwright login — cached for the process lifetime)
@@ -1083,8 +1099,19 @@ async def index():
 
 @app.get("/api/picks")
 async def api_picks(target_date: str = None):
+    key = target_date or date.today().isoformat()
+    cached = _cache_get(key)
+    if cached:
+        return JSONResponse(cached)
     result = await run_picks(target_date)
+    if "error" not in result:
+        _cache_set(key, result)
     return JSONResponse(result)
+
+@app.post("/api/clear-cache")
+async def api_clear_cache():
+    _picks_cache.clear()
+    return {"ok": True, "msg": "Cache cleared"}
 
 @app.get("/api/status")
 async def api_status():
