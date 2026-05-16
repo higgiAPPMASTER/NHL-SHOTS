@@ -54,8 +54,7 @@ MIN_SPG       = 1.5   # shots/game season average to qualify
 MIN_GP        = 10    # minimum games played for valid average
 
 MIN_GAMES     = 2     # min games required for hit-rate calc
-HIT_THRESH         = 70.0  # % hit rate to qualify (shots)
-HIT_THRESH_FALLBACK= 70.0  # % hit rate to qualify (shots) — fallback when no sportsbook line
+HIT_THRESH         = 70.0  # % hit rate to qualify (shots always vs 1.5 base line)
 HIT_THRESH_PTS     = 70.0  # % hit rate to qualify (points)
 PTS_LINE      = 0.5   # 1+ point = hit
 SEASONS       = ["20252026","20242025","20232024"]  # for points game logs
@@ -424,9 +423,10 @@ async def get_shot_qualified_players(
     sa_map: Dict[str, float],
     sem: asyncio.Semaphore,
     season: str = "20252026",
-    lines_map: Dict = None,   # {player_name: {line, odds}} from Odds API
+    lines_map: Dict = None,
 ) -> List[Dict]:
-    """Build player pool from Odds API lines (primary) or season averages (fallback)."""
+    """Build pool from ALL roster players using 1.5 as the algorithm line.
+    Real sportsbook lines (from lines_map) are attached for display only."""
     if lines_map is None:
         lines_map = {}
 
@@ -444,66 +444,39 @@ async def get_shot_qualified_players(
     pool: List[Dict] = []
     seen: set = set()
 
-    # PRIMARY: build from Odds API lines (sportsbook line = threshold)
-    if lines_map:
-        for odds_name, sb_info in lines_map.items():
-            line     = sb_info["line"]
-            real_odds = sb_info.get("odds", "")
-            matched  = None
-            team     = None
-            for t, roster in rosters.items():
-                p = _match_odds_name(odds_name, roster)
-                if p:
-                    matched = p
-                    team    = t
-                    break
-            if not matched or team not in team_ctx or matched["id"] in seen:
+    # Always use ALL roster players — line=1.5 is the algorithm base
+    for team, players in rosters.items():
+        ctx = team_ctx.get(team, {})
+        opp = ctx.get("opponent", "")
+        hr  = ctx.get("homeRoad", "")
+        for p in players:
+            if p["id"] in seen:
                 continue
-            seen.add(matched["id"])
-            opp = team_ctx[team]["opponent"]
+            seen.add(p["id"])
+            # Look up real sportsbook line for display only
+            real_line, real_odds, line_source = None, "", "Est"
+            for odds_name, sb_info in lines_map.items():
+                if _match_odds_name(odds_name, [p]):
+                    real_line   = sb_info["line"]
+                    real_odds   = sb_info.get("odds", "")
+                    line_source = sb_info.get("source", "OddsAPI")
+                    break
             pool.append({
-                "name":      odds_name,
-                "pid":       matched["id"],
-                "team":      team,
-                "opponent":  opp,
-                "homeRoad":  team_ctx[team]["homeRoad"],
-                "line":      line,           # REAL sportsbook line as threshold
-                "realLine":  line,
-                "realOdds":  real_odds,
-                "lineSource": "OddsAPI",
-                "estLine":   line,
-                "spg":       line,           # use line as display value
-                "oppSA":     sa_map.get(opp, 0.0),
+                "name":       p["name"],
+                "pid":        p["id"],
+                "team":       team,
+                "opponent":   opp,
+                "homeRoad":   hr,
+                "line":       1.5,        # ALWAYS 1.5 for the algorithm
+                "realLine":   real_line,  # Sportsbook line — display only
+                "realOdds":   real_odds,
+                "lineSource": line_source,
+                "estLine":    1.5,
+                "spg":        0,
+                "oppSA":      sa_map.get(opp, 0.0),
             })
-        print(f"[NHL] {len(pool)} players with Odds API shot lines")
 
-    # FALLBACK: use full rosters — game log analysis filters by hit rate
-    if not pool:
-        print("[NHL] No sportsbook lines — building pool from rosters")
-        for team, players in rosters.items():
-            ctx = team_ctx.get(team, {})
-            opp = ctx.get("opponent", "")
-            hr  = ctx.get("homeRoad", "")
-            for p in players:
-                if p["id"] in seen:
-                    continue
-                seen.add(p["id"])
-                pool.append({
-                    "name":      p["name"],
-                    "pid":       p["id"],
-                    "team":      team,
-                    "opponent":  opp,
-                    "homeRoad":  hr,
-                    "line":      1.5,
-                    "realLine":  None,
-                    "realOdds": "",
-                    "lineSource": "Est",
-                    "estLine":   1.5,
-                    "spg":       0,
-                    "oppSA":     sa_map.get(opp, 0.0),
-                })
-        print(f"[NHL] {len(pool)} roster players in pool (fallback)")
-
+    print(f"[NHL] {len(pool)} roster players in pool | {len(lines_map)} real lines for display")
     pool.sort(key=lambda x: x["oppSA"], reverse=True)
     return pool
 
