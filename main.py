@@ -464,32 +464,32 @@ async def get_shot_qualified_players(
             })
         print(f"[NHL] {len(pool)} players with Odds API shot lines")
 
-    # FALLBACK: use season averages if no Odds API lines
+    # FALLBACK: use full rosters — game log analysis filters by hit rate
     if not pool:
-        print("[NHL] No Odds API lines — falling back to season averages")
-        async def _fetch_team(team: str):
-            async with sem:
-                async with httpx.AsyncClient(timeout=20) as c:
-                    r = await c.get(f"{NHL_STATS}/skater/summary",
-                                    params={"limit":100,"start":0,
-                                            "cayenneExp":f"gameTypeId=2 and seasonId={season} and teamAbbrevs='{team}'"})
-            if r.status_code != 200: return
+        print("[NHL] No sportsbook lines — building pool from rosters")
+        for team, players in rosters.items():
             ctx = team_ctx.get(team, {})
-            opp, hr = ctx.get("opponent",""), ctx.get("homeRoad","")
-            for p in r.json().get("data",[]):
-                pid, gp, shots = p.get("playerId"), p.get("gamesPlayed",0), p.get("shots",0)
-                if p.get("positionCode") == "G" or gp < MIN_GP: continue
-                spg = shots / gp
-                if spg < MIN_SPG or pid in seen: continue
-                seen.add(pid)
-                name = p["skaterFullName"]
-                est  = _est_line(spg)
-                pool.append({"name":name,"pid":pid,"team":team,"opponent":opp,
-                             "homeRoad":hr,"line":1.5,"realLine":None,"realOdds":"",
-                             "lineSource":"Est","estLine":est,"spg":round(spg,2),
-                             "oppSA":sa_map.get(opp,0.0)})
-        await asyncio.gather(*[_fetch_team(t) for t in team_ctx], return_exceptions=True)
-        print(f"[NHL] {len(pool)} skaters from season averages (fallback)")
+            opp = ctx.get("opponent", "")
+            hr  = ctx.get("homeRoad", "")
+            for p in players:
+                if p["id"] in seen:
+                    continue
+                seen.add(p["id"])
+                pool.append({
+                    "name":      p["name"],
+                    "pid":       p["id"],
+                    "team":      team,
+                    "opponent":  opp,
+                    "homeRoad":  hr,
+                    "line":      1.5,
+                    "realLine":  None,
+                    "realOdds": "",
+                    "lineSource": "Est",
+                    "estLine":   1.5,
+                    "spg":       0,
+                    "oppSA":     sa_map.get(opp, 0.0),
+                })
+        print(f"[NHL] {len(pool)} roster players in pool (fallback)")
 
     pool.sort(key=lambda x: x["oppSA"], reverse=True)
     return pool
