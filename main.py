@@ -9,7 +9,7 @@ Deployed on Render (FastAPI + Playwright + curl_cffi)
 """
 
 import os, hmac, asyncio, re, unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
 import httpx
@@ -233,8 +233,10 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                     f"{ODDS_API}/sports/icehockey_nhl/events",
                     params={"apiKey": api_key, "dateFormat": "iso"})
                 if r.status_code == 200:
+                    # Check today + tomorrow (UTC) — evening games cross midnight UTC
+                    tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
                     events = [e for e in r.json()
-                              if e.get("commence_time", "")[:10] == target_date]
+                              if e.get("commence_time", "")[:10] in (target_date, tomorrow)]
                     print(f"[OddsAPI] {len(events)} NHL games for {target_date}")
                     seen: set = set()
                     for ev in events:
