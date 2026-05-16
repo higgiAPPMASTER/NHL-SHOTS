@@ -54,8 +54,9 @@ MIN_SPG       = 1.5   # shots/game season average to qualify
 MIN_GP        = 10    # minimum games played for valid average
 
 MIN_GAMES     = 2     # min games required for hit-rate calc
-HIT_THRESH    = 80.0  # % hit rate to qualify (shots)
-HIT_THRESH_PTS= 70.0  # % hit rate to qualify (points)
+HIT_THRESH         = 70.0  # % hit rate to qualify (shots)
+HIT_THRESH_FALLBACK= 70.0  # % hit rate to qualify (shots) — fallback when no sportsbook line
+HIT_THRESH_PTS     = 70.0  # % hit rate to qualify (points)
 PTS_LINE      = 0.5   # 1+ point = hit
 SEASONS       = ["20252026","20242025","20232024"]  # for points game logs
 TOP_N       = 10     # final picks count
@@ -498,19 +499,21 @@ async def get_shot_qualified_players(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _pts_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[Dict]:
-    data = await _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/2", c)
-    if not data:
-        return []
+    """Fetch both regular season (2) and playoff (3) game logs."""
     logs = []
-    for g in data.get("gameLog", []):
-        goals   = int(g.get("goals",   0) or 0)
-        assists = int(g.get("assists", 0) or 0)
-        logs.append({
-            "date":     g.get("gameDate",     ""),
-            "points":   goals + assists,
-            "homeRoad": g.get("homeRoadFlag", ""),
-            "opponent": g.get("opponentAbbrev", ""),
-        })
+    for gtype in (2, 3):  # regular season + playoffs
+        data = await _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/{gtype}", c)
+        if not data:
+            continue
+        for g in data.get("gameLog", []):
+            goals   = int(g.get("goals",   0) or 0)
+            assists = int(g.get("assists", 0) or 0)
+            logs.append({
+                "date":     g.get("gameDate",     ""),
+                "points":   goals + assists,
+                "homeRoad": g.get("homeRoadFlag", ""),
+                "opponent": g.get("opponentAbbrev", ""),
+            })
     return logs
 
 
@@ -619,7 +622,7 @@ async def _nhl_player_logs(pid: int, sem: asyncio.Semaphore) -> List[Dict]:
     async with sem:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30) as c:
             results = await asyncio.gather(
-                *[_fetch(f"{NHL_API}/player/{pid}/game-log/{s}/2", c) for s in SEASONS],
+                *[_fetch(f"{NHL_API}/player/{pid}/game-log/{s}/{gt}", c) for s in SEASONS for gt in (2, 3)],
                 return_exceptions=True
             )
     for data in results:
@@ -706,6 +709,7 @@ async def run_picks(target_date: str = None) -> Dict:
 
         if t3 < MIN_GAMES:
             return None
+        # Use lower threshold when no real sportsbook line (season avg fallback)
         s2_ok = (t2 < MIN_GAMES) or (r2 >= HIT_THRESH)
         s3_ok = r3 >= HIT_THRESH
         if not s2_ok or not s3_ok:
@@ -848,23 +852,14 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 
 <nav>
   <div class="logo">Money <span>Picks</span> Arena</div>
-  <div class="nav-right">
-    <span class="nav-sport">HOCKEY</span>
-    <span class="nav-app">🏒 NHL Money Shots</span>
-  </div>
+
 </nav>
 
 <div class="page">
   <div class="app-hdr">
     <div class="app-icon">🏒</div>
     <h1>NHL <span>Money Shots</span></h1>
-    <p>Shots on Goal &nbsp;·&nbsp; Daily Picks</p>
-  </div>
-
-  <div class="status-bar">
-    <span id="odds-status" class="sdot"><span class="dot dot-amber"></span>Checking Odds API...</span>
-    <span id="fd-status" class="sdot"><span class="dot dot-amber"></span>FanDuel</span>
-    <span style="font-size:.75rem;color:#374151;margin-left:auto">NHL Stats API</span>
+    <p>Shots on Goal &nbsp;·&nbsp; Points</p>
   </div>
 
   <div class="card" style="text-align:center">
@@ -1037,7 +1032,7 @@ function renderResults(d){
     '<div class="chip"><div class="val">' + d.poolSize + '</div><div class="lbl">Pool</div></div>' +
     '<div class="chip"><div class="val">' + d.qualified + '</div><div class="lbl">Qualified</div></div>' +
     '<div class="chip"><div class="val">' + d.picks.length + '</div><div class="lbl">Top Picks</div></div>' +
-    '<div class="chip"><div class="val">80%</div><div class="lbl">Min Rate</div></div>' +
+    '<div class="chip"><div class="val">70%</div><div class="lbl">Min Rate</div></div>' +
     '</div>';
 
   // Games
