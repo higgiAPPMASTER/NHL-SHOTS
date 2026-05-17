@@ -4,3 +4,4 @@ httpx
 python-multipart
 curl_cffi
 playwright
+python-jose[cryptography]
