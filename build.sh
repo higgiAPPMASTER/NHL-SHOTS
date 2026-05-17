@@ -1,2 +1,4 @@
-#!/usr/bin/env bash
-pip install --no-cache-dir -r requirements.txt
+#!/bin/bash
+set -e
+pip install -r requirements.txt
+python -m playwright install chromium
