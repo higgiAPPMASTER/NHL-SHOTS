@@ -903,7 +903,7 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 <script>
 // Set date to today
 document.addEventListener('DOMContentLoaded', function(){
-// Hub Access Gate - no server fetch, no cold start issues
+// Hub Access Gate - client side only, no server round-trip
 (function(){
   var HUB='https://www.moneypicksarena.com';
   var KEY='__mpa_token';
