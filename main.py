@@ -885,7 +885,7 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
     <p style="color:#6b7280;font-size:.88rem;margin-bottom:22px">Select a date — NHL Stats API powers all hit rates</p>
     <div class="date-row">
       <label>Date</label>
-      <input type="date" id="datePicker" max=""/>
+      <input type="date" id="datePicker"/>
     </div>
     <button class="btn-run" id="runBtn" onclick="runPicks()">Run Picks</button>
   </div>
@@ -908,7 +908,7 @@ document.addEventListener('DOMContentLoaded', function(){
   var dp = document.getElementById('datePicker');
   var today = new Date().toISOString().split('T')[0];
   dp.value = today;
-  dp.max = today;
+  
 });
 
 // STEP 1: Connect
