@@ -903,7 +903,24 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 <script>
 // Set date to today
 document.addEventListener('DOMContentLoaded', function(){
-// No redirect gate
+// -- Hub Token Gate ----------------------------------------------------
+(function() {
+  const HUB = 'https://www.moneypicksarena.com';
+  const STORAGE_KEY = '__mpa_token';
+  const params = new URLSearchParams(window.location.search);
+  const urlTok = params.get('token');
+  if (urlTok) {
+    localStorage.setItem(STORAGE_KEY, urlTok);
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+  const tok = localStorage.getItem(STORAGE_KEY);
+  if (!tok) { window.location.href = HUB; }
+  else {
+    fetch('/api/verify-token', { headers: { 'Authorization': 'Bearer ' + tok } })
+      .then(r => { if (!r.ok) { localStorage.removeItem(STORAGE_KEY); window.location.href = HUB; } })
+      .catch(() => { localStorage.removeItem(STORAGE_KEY); window.location.href = HUB; });
+  }
+})();
 
   var dp = document.getElementById('datePicker');
   var today = new Date().toISOString().split('T')[0];
