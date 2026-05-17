@@ -903,23 +903,15 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 <script>
 // Set date to today
 document.addEventListener('DOMContentLoaded', function(){
-// -- Hub Token Gate ----------------------------------------------------
-(function() {
-  const HUB = 'https://www.moneypicksarena.com';
-  const STORAGE_KEY = '__mpa_token';
-  const params = new URLSearchParams(window.location.search);
-  const urlTok = params.get('token');
-  if (urlTok) {
-    localStorage.setItem(STORAGE_KEY, urlTok);
-    window.history.replaceState({}, '', window.location.pathname);
-  }
-  const tok = localStorage.getItem(STORAGE_KEY);
-  if (!tok) { window.location.href = HUB; }
-  else {
-    fetch('/api/verify-token', { headers: { 'Authorization': 'Bearer ' + tok } })
-      .then(r => { if (!r.ok) { localStorage.removeItem(STORAGE_KEY); window.location.href = HUB; } })
-      .catch(() => { localStorage.removeItem(STORAGE_KEY); window.location.href = HUB; });
-  }
+// Hub Access Gate - no server fetch, no cold start issues
+(function(){
+  var HUB='https://www.moneypicksarena.com';
+  var KEY='__mpa_token';
+  var p=new URLSearchParams(window.location.search);
+  var t=p.get('token');
+  if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
+  var tok=localStorage.getItem(KEY);
+  if(!tok||tok.split('.').length!==3){window.location.href=HUB;}
 })();
 
   var dp = document.getElementById('datePicker');
