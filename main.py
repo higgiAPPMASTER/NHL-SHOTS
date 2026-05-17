@@ -903,16 +903,7 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 <script>
 // Set date to today
 document.addEventListener('DOMContentLoaded', function(){
-// Hub Access Gate - no server fetch, no cold start issues
-(function(){
-  var HUB='https://www.moneypicksarena.com';
-  var KEY='__mpa_token';
-  var p=new URLSearchParams(window.location.search);
-  var t=p.get('token');
-  if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
-  var tok=localStorage.getItem(KEY);
-  if(!tok||tok.split('.').length!==3){window.location.href=HUB;}
-})();
+
 
   var dp = document.getElementById('datePicker');
   var today = new Date().toISOString().split('T')[0];
