@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-NHL Money Shots — main.py
-Step 1 : Sportsbook lines (Odds API → FanDuel → DraftKings → season avg estimates)
-Step 2 : NHL Stats API — career H/A game logs vs today's opponent (≥ 80%)
+NHL Money Shots - main.py
+Step 1 : Sportsbook lines (Odds API → season avg estimates)
+Step 2 : NHL Stats API — career H/A game logs vs today’s opponent (≥ 80%)
 Step 3 : NHL Stats API — last 10 H/A games, any opponent (≥ 80%)
 Step 4 : Rank & top 10
-Deployed on Render (FastAPI + Playwright + curl_cffi)
+Deployed on Render (FastAPI + httpx)
 """
 
 import os, hmac, asyncio, re, unicodedata, time, json
@@ -13,8 +13,6 @@ from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
 import httpx
-from curl_cffi.requests import AsyncSession as CFSession
-from playwright.async_api import async_playwright
 from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from jose import jwt as jose_jwt
@@ -28,13 +26,13 @@ def _verify_hub_token(token: str) -> bool:
     if not token:
         return False
     if not JWT_SECRET:
-        # No secret configured yet — accept any well-formed JWT
+        # No secret configured yet - accept any well-formed JWT
         return len(token.split(".")) == 3
     try:
         jose_jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return True
     except Exception:
-        # Secret mismatch — still accept well-formed token so app doesn't break
+        # Secret mismatch - still accept well-formed token so app doesn't break
         return len(token.split(".")) == 3
 
 
@@ -47,8 +45,6 @@ app      = FastAPI(title="NHL Shots Picks")
 NHL_API      = "https://api-web.nhle.com/v1"
 NHL_STATS    = "https://api.nhle.com/stats/rest/en"
 ODDS_API     = "https://api.the-odds-api.com/v4"
-DK_BASE      = "https://sportsbook.draftkings.com/sites/US-NJ-SB/api/v5"
-NHL_EG_ID    = 42648
 
 MIN_SPG       = 1.5   # shots/game season average to qualify
 MIN_GP        = 10    # minimum games played for valid average
@@ -103,63 +99,6 @@ def _cache_clear(app: str = None):
             p.unlink(missing_ok=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  FanDuel Session (Playwright login — cached for the process lifetime)
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def get_fd_cookie() -> str:
-    global _fd_cookie
-    async with _fd_lock:
-        if not _fd_cookie:
-            _fd_cookie = await _fanduel_login()
-    return _fd_cookie
-
-async def _fanduel_login() -> str:
-    """Login to FanDuel with Playwright, return cookie string."""
-    email    = os.environ.get("FD_EMAIL", "")
-    password = os.environ.get("FD_PASSWORD", "")
-    if not email or not password:
-        print("[FanDuel] No FD_EMAIL/FD_PASSWORD set")
-        return ""
-    print("[FanDuel] Logging in...")
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        ctx  = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
-        page = await ctx.new_page()
-        try:
-            await page.goto("https://sportsbook.fanduel.com/",
-                            wait_until="domcontentloaded", timeout=30_000)
-            # Click Sign In button
-            try:
-                await page.click("text=Sign In", timeout=8_000)
-            except:
-                await page.goto("https://sportsbook.fanduel.com/login",
-                                wait_until="domcontentloaded", timeout=20_000)
-            await asyncio.sleep(2)
-            # Fill credentials
-            await page.fill("input[type='email'], input[name='username'], input[placeholder*='email' i]",
-                            email, timeout=10_000)
-            await asyncio.sleep(0.5)
-            await page.fill("input[type='password']", password, timeout=10_000)
-            await page.click("button[type='submit']", timeout=8_000)
-            await page.wait_for_load_state("networkidle", timeout=25_000)
-        except Exception as e:
-            print(f"[FanDuel] Login warning: {e}")
-        cookies = await ctx.cookies()
-        await browser.close()
-    cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-    print(f"[FanDuel] Login done — {len(cookies)} cookies")
-    return cookie_str
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  NHL API helpers
@@ -204,8 +143,8 @@ async def get_today_games(target_date: str = None) -> List[Dict]:
     return games
 
 
-async def get_team_sa_map(season: str = "20242025") -> Dict[str, float]:
-    """Shots Against Per Game — joins /standings (abbrev) + /team/summary (SA/G)."""
+async def get_team_sa_map(season: str = "20252026") -> Dict[str, float]:
+    """Shots Against Per Game - joins /standings (abbrev) + /team/summary (SA/G)."""
     import urllib.parse
     sort_p = urllib.parse.quote('[{"property":"shotsAgainstPerGame","direction":"DESC"}]')
     summary_url = (
@@ -248,185 +187,95 @@ async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
     return players
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Sportsbook Lines — tries Odds API, then DraftKings, then estimates
+#  Sportsbook Lines - tries Odds API, then DraftKings, then estimates
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
-    """Fetch real shots on goal lines.
-    Full fallback chain: 1) The Odds API  2) FanDuel  3) DraftKings  4) Estimates
+    """Fetch real shots on goal lines from The Odds API.
+    Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
+    Falls back to empty dict (algorithm still runs using 1.5 baseline).
     """
-    # 1 — The Odds API (if key is set)
     api_key = os.environ.get("ODDS_API_KEY", "")
-    if api_key:
-        try:
-            lines: Dict[str, Dict] = {}
-            async with httpx.AsyncClient(timeout=20) as c:
-                r = await c.get(
-                    f"{ODDS_API}/sports/icehockey_nhl/events",
-                    params={"apiKey": api_key, "dateFormat": "iso"})
-                if r.status_code == 200:
-                    # Check today + tomorrow (UTC) — evening games cross midnight UTC
-                    tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
-                    events = [e for e in r.json()
-                              if e.get("commence_time", "")[:10] in (target_date, tomorrow)]
-                    print(f"[OddsAPI] {len(events)} NHL games for {target_date}")
-                    seen: set = set()
-                    for ev in events:
-                        r2 = await c.get(
-                            f"{ODDS_API}/sports/icehockey_nhl/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2,eu,uk",
-                                    "markets": "player_shots_on_goal",
-                                    "oddsFormat": "american"})
-                        if r2.status_code != 200:
-                            continue
-                        for book in r2.json().get("bookmakers", []):
-                            for mkt in book.get("markets", []):
-                                if mkt.get("key") != "player_shots_on_goal":
-                                    continue
-                                for oc in mkt.get("outcomes", []):
-                                    if oc.get("name") != "Over":
-                                        continue
-                                    player = oc.get("description", "").strip()
-                                    line   = float(oc.get("point") or 0)
-                                    if player and line > 0 and player not in seen:
-                                        seen.add(player)
-                                        lines[player] = {
-                                            "line":   line,
-                                            "odds":   str(oc.get("price", "")),
-                                            "source": "OddsAPI",
-                                        }
-                            break  # first bookmaker per event
-            if lines:
-                print(f"[Lines] {len(lines)} lines from The Odds API")
-                return lines
-        except Exception as e:
-            print(f"[Lines] Odds API error: {e}")
+    if not api_key:
+        print("[Lines] ODDS_API_KEY not set — using 1.5 baseline estimates")
+        return {}
 
-    # 2 — FanDuel (via Playwright login)
-    if os.environ.get("FD_EMAIL"):
-        try:
-            lines = await _lines_from_fanduel()
-            if lines:
-                print(f"[Lines] {len(lines)} lines from FanDuel")
-                return lines
-        except Exception as e:
-            print(f"[Lines] FanDuel error: {e}")
+    tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
+    SPORT_KEYS = ["icehockey_nhl", "icehockey_nhl_championship"]
 
-    # 3 — DraftKings (public endpoint)
     try:
-        lines = await _lines_from_draftkings()
-        if lines:
-            print(f"[Lines] {len(lines)} lines from DraftKings")
-            return lines
-    except Exception as e:
-        print(f"[Lines] DraftKings error: {e}")
+        lines: Dict[str, Dict] = {}
+        async with httpx.AsyncClient(timeout=20) as c:
+            for sport_key in SPORT_KEYS:
+                r = await c.get(
+                    f"{ODDS_API}/sports/{sport_key}/events",
+                    params={"apiKey": api_key, "dateFormat": "iso"})
+                if r.status_code != 200:
+                    continue
+                events = [e for e in r.json()
+                          if e.get("commence_time", "")[:10] in (target_date, tomorrow)]
+                print(f"[OddsAPI] {sport_key}: {len(events)} games for {target_date}")
+                if not events:
+                    continue
 
-    print("[Lines] No sportsbook lines — falling back to season avg estimates")
-    return {}
+                seen: set = set()
+                for ev in events:
+                    r2 = await c.get(
+                        f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
+                        params={"apiKey": api_key, "regions": "us,us2,eu,uk",
+                                "markets": "player_shots_on_goal",
+                                "oddsFormat": "american"})
+                    if r2.status_code != 200:
+                        continue
+                    for book in r2.json().get("bookmakers", []):
+                        for mkt in book.get("markets", []):
+                            if mkt.get("key") != "player_shots_on_goal":
+                                continue
+                            for oc in mkt.get("outcomes", []):
+                                if oc.get("name") != "Over":
+                                    continue
+                                player = oc.get("description", "").strip()
+                                line   = float(oc.get("point") or 0)
+                                if player and line > 0 and player not in seen:
+                                    seen.add(player)
+                                    lines[player] = {
+                                        "line":   line,
+                                        "odds":   str(oc.get("price", "")),
+                                        "source": "OddsAPI",
+                                    }
+                        break  # first bookmaker per event
+
+                if lines:
+                    break  # found lines — no need to try next sport key
+
+        if lines:
+            print(f"[Lines] {len(lines)} lines from The Odds API")
+        else:
+            print("[Lines] No shot props found — using 1.5 baseline estimates")
+        return lines
+    except Exception as e:
+        print(f"[Lines] Odds API error: {e}")
+        return {}
 
 
 
 async def _lines_from_fanduel() -> Dict[str, Dict]:
-    """Scrape FanDuel NHL shots on goal lines using cached login session."""
-    cookie = await get_fd_cookie()
-    if not cookie:
-        return {}
-    hdrs = {
-        "Cookie":     cookie,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
-        "Referer":    "https://sportsbook.fanduel.com/",
-        "Accept":     "application/json",
-        "x-fanduel-api-key": "FhMFpcPWXMeyZxOx",
-    }
-    lines = {}
-    try:
-        async with CFSession(impersonate="chrome120") as s:
-            # Get today's NHL events
-            r = await s.get(
-                "https://sbapi.tn.sportsbook.fanduel.com/api/content-managed-page",
-                params={"page": "SPORT", "sport": "NHL", "_ak": "FhMFpcPWXMeyZxOx"},
-                headers=hdrs, timeout=20
-            )
-            if r.status_code != 200:
-                print(f"[FanDuel] NHL page status: {r.status_code}")
-                return {}
-            data = r.json()
-            # Walk the event table to find shots on goal markets
-            events = data.get("attachments", {}).get("events", {}).values()
-            markets = data.get("attachments", {}).get("markets", {})
-            runners = data.get("attachments", {}).get("runners", {})
-            for mkt in markets.values():
-                mkt_name = mkt.get("marketName", "").lower()
-                if "shot" not in mkt_name:
-                    continue
-                for runner_id in mkt.get("runnerIds", []):
-                    runner = runners.get(str(runner_id), {})
-                    rname  = runner.get("runnerName", "")
-                    # FanDuel format: "Player Name (Over 2.5)" or "Player Name"
-                    handicap = runner.get("handicap", 0)
-                    if "over" in rname.lower() or handicap:
-                        # Extract player name
-                        player = rname.split(" - ")[0].strip()
-                        player = player.split(" Over")[0].strip()
-                        line_val = float(handicap or 0)
-                        if line_val >= 1.5 and player:
-                            odds_info = runner.get("winRunnerOdds", {}).get("americanDisplayOdds", {})
-                            odds = odds_info.get("americanOdds", "")
-                            lines[player] = {"line": line_val, "odds": str(odds), "source": "FanDuel"}
-    except Exception as e:
-        print(f"[FanDuel] Parse error: {e}")
-        return {}
-    return lines
+    """DEPRECATED — removed. Odds API is the only source."""
+    return {}
 
 
-async def _lines_from_draftkings() -> Dict[str, Dict]:
-    hdrs = {"Accept": "application/json",
-            "Referer": "https://sportsbook.draftkings.com/leagues/hockey/nhl"}
-    lines = {}
-    async with CFSession(impersonate="chrome120") as s:
-        r = await s.get(f"{DK_BASE}/eventgroups/{NHL_EG_ID}?format=json", headers=hdrs)
-        if r.status_code != 200:
-            return {}
-        eg = r.json().get("eventGroup", {})
-        cat_id = sub_id = None
-        for cat in eg.get("offerCategories", []):
-            for sub in cat.get("offerSubcategoryDescriptors", []):
-                if "shot" in sub.get("name", "").lower():
-                    cat_id, sub_id = cat["id"], sub["subcategoryId"]
-                    break
-            if cat_id:
-                break
-        if not cat_id:
-            return {}
-        r2 = await s.get(
-            f"{DK_BASE}/eventgroups/{NHL_EG_ID}/categories/{cat_id}/subcategories/{sub_id}?format=json",
-            headers=hdrs)
-        if r2.status_code != 200:
-            return {}
-        for cat in r2.json().get("eventGroup", {}).get("offerCategories", []):
-            for sub_desc in cat.get("offerSubcategoryDescriptors", []):
-                for event_offers in sub_desc.get("offerSubcategory", {}).get("offers", []):
-                    for offer in event_offers:
-                        player = offer.get("label", "").strip()
-                        for outcome in offer.get("outcomes", []):
-                            if outcome.get("label", "").lower() == "over":
-                                line_val = float(outcome.get("line") or 0)
-                                if line_val >= 1.5 and player:
-                                    lines[player] = {
-                                        "line":   line_val,
-                                        "odds":   outcome.get("oddsAmerican", ""),
-                                        "source": "DraftKings",
-                                    }
-    return lines
+async def _lines_from_draftkings() -> Dict[str, Dict]:  # kept for reference — not called
+    """DEPRECATED — DraftKings scraper removed. Odds API is the only source."""
+    return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  NHL Skater Stats — season shot averages (replaces sportsbook props)
+#  NHL Skater Stats - season shot averages (replaces sportsbook props)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _match_odds_name(odds_name: str, roster: List[Dict]) -> Optional[Dict]:
-    """Match Odds API player name to NHL roster player — handles accents & initials."""
+    """Match Odds API player name to NHL roster player - handles accents & initials."""
     def norm(n):
         # Strip accents: Slafkovský → slafkovsky
         nfd = unicodedata.normalize("NFD", n)
@@ -478,7 +327,7 @@ async def get_shot_qualified_players(
     pool: List[Dict] = []
     seen: set = set()
 
-    # Always use ALL roster players — line=1.5 is the algorithm base
+    # Always use ALL roster players - line=1.5 is the algorithm base
     for team, players in rosters.items():
         ctx = team_ctx.get(team, {})
         opp = ctx.get("opponent", "")
@@ -502,7 +351,7 @@ async def get_shot_qualified_players(
                 "opponent":   opp,
                 "homeRoad":   hr,
                 "line":       1.5,        # ALWAYS 1.5 for the algorithm
-                "realLine":   real_line,  # Sportsbook line — display only
+                "realLine":   real_line,  # Sportsbook line - display only
                 "realOdds":   real_odds,
                 "lineSource": line_source,
                 "estLine":    1.5,
@@ -515,7 +364,7 @@ async def get_shot_qualified_players(
     return pool
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Points picks — NHL Stats API game logs (independent of shots)
+#  Points picks - NHL Stats API game logs (independent of shots)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _pts_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[Dict]:
@@ -684,7 +533,7 @@ async def run_picks(target_date: str = None) -> Dict:
 
     _progress = {"stage": "Fetching games & sportsbook lines...", "done": 0, "total": 0, "pct": 10}
 
-    # ── Step 1 — fetch games, SA map, and sportsbook lines in parallel ─────────────
+    # ── Step 1 - fetch games, SA map, and sportsbook lines in parallel ─────────────
     games, sa_map, lines_map = await asyncio.gather(
         get_today_games(target_date),
         get_team_sa_map(season),
@@ -717,7 +566,7 @@ async def run_picks(target_date: str = None) -> Dict:
 
     _progress = {"stage": "Analyzing hit rates...", "done": 0, "total": len(pool), "pct": 70}
 
-    # ── Steps 2 & 3 — NHL Stats API hit-rate analysis ────────────────────────────
+    # ── Steps 2 & 3 - NHL Stats API hit-rate analysis ────────────────────────────
     async def analyze(p: Dict) -> Optional[Dict]:
         logs = logs_map.get(p["pid"], [])
         hr, opp, line = p["homeRoad"], p["opponent"], p["line"]
@@ -756,7 +605,7 @@ async def run_picks(target_date: str = None) -> Dict:
     picks = [r for r in results_raw if r is not None]
 
     _progress = {"stage": "Analyzing points...", "done": len(pool), "total": len(pool), "pct": 96}
-    # ── Step 4 — rank shots & run independent points picks ───────────────────
+    # ── Step 4 - rank shots & run independent points picks ───────────────────
     picks.sort(key=lambda x: (x["score"], x["oppSA"]), reverse=True)
 
     pts_all = await get_pts_picks(games, sa_map, sem_nhl, season)
@@ -785,7 +634,7 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>NHL Money Shots — Money Picks Arena</title>
+<title>NHL Money Shots - Money Picks Arena</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=Source+Sans+Pro:wght@300;400;600;700&display=swap" rel="stylesheet">
@@ -882,7 +731,7 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 
   <div class="card" style="text-align:center">
     <h2 style="font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:700;color:#fff;margin-bottom:6px">Run Today\'s Picks</h2>
-    <p style="color:#6b7280;font-size:.88rem;margin-bottom:22px">Select a date — NHL Stats API powers all hit rates</p>
+    <p style="color:#6b7280;font-size:.88rem;margin-bottom:22px">Select a date - NHL Stats API powers all hit rates</p>
     <div class="date-row">
       <label>Date</label>
       <input type="date" id="datePicker"/>
@@ -908,7 +757,7 @@ document.addEventListener('DOMContentLoaded', function(){
   var dp = document.getElementById('datePicker');
   var today = new Date().toISOString().split('T')[0];
   dp.value = today;
-  
+
 });
 
 // STEP 1: Connect
@@ -1156,7 +1005,7 @@ async def api_picks(target_date: str = None):
 
 @app.get("/api/warm")
 async def api_warm():
-    """Pre-compute today's picks — called by cron-job.org at 10 AM."""
+    """Pre-compute today's picks - called by cron-job.org at 10 AM."""
     today = date.today().isoformat()
     cached = _cache_get("nhl", today)
     if cached:
