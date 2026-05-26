@@ -53,7 +53,7 @@ MIN_GAMES     = 2     # min games required for hit-rate calc
 HIT_THRESH         = 70.0  # % hit rate to qualify (shots always vs 1.5 base line)
 HIT_THRESH_PTS     = 70.0  # % hit rate to qualify (points)
 PTS_LINE      = 0.5   # 1+ point = hit
-SEASONS       = ["20252026","20242025","20232024"]  # for points game logs
+SEASONS       = ["20252026","20242025","20232024","20222023","20212022"]  # for points game logs
 TOP_N       = 10     # final picks count
 SEM_NHL     = 8      # concurrent NHL API calls
 
@@ -572,7 +572,7 @@ async def run_picks(target_date: str = None) -> Dict:
         hr, opp, line = p["homeRoad"], p["opponent"], p["line"]
 
         # Step 2: career H/A vs today's opponent
-        h2, t2, r2, avg2 = _calc_hit_rate_from_logs(logs, line, hr, opponent=opp)
+        h2, t2, r2, avg2 = _calc_hit_rate_from_logs(logs, line, hr, opponent=opp, last_n=10)
         # Step 3: last 10 H/A games any opponent
         h3, t3, r3, avg3 = _calc_hit_rate_from_logs(logs, line, hr, last_n=10)
 
