@@ -1,6 +1,4 @@
 fastapi
 uvicorn
 httpx
-curl_cffi
-playwright
 python-jose[cryptography]
