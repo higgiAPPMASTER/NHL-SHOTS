@@ -191,6 +191,20 @@ async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _book_tag(real_line, ha10avg, vs_line_rate):
+    """Tag a pick relative to sportsbook line.
+       SUGGESTED if avg clearly beats line + recent hit rate is strong.
+       FADE if avg is clearly under line + recent hit rate is weak."""
+    if real_line is None or ha10avg is None:
+        return ""
+    edge = ha10avg - real_line
+    if edge >= 0.3 and vs_line_rate >= 60:
+        return "SUGGESTED"
+    if edge <= -0.3 and vs_line_rate <= 40:
+        return "FADE"
+    return ""
+
+
 async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     """Fetch real shots on goal lines from The Odds API.
     Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
@@ -199,13 +213,14 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     api_key = os.environ.get("ODDS_API_KEY", "")
     if not api_key:
         print("[Lines] ODDS_API_KEY not set — using 1.5 baseline estimates")
-        return {}
+        return {}, {}
 
     tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
     SPORT_KEYS = ["icehockey_nhl", "icehockey_nhl_championship"]
 
     try:
         lines: Dict[str, Dict] = {}
+        pts_lines: Dict[str, Dict] = {}
         async with httpx.AsyncClient(timeout=20) as c:
             for sport_key in SPORT_KEYS:
                 r = await c.get(
@@ -219,44 +234,50 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                 if not events:
                     continue
 
-                seen: set = set()
                 for ev in events:
                     r2 = await c.get(
                         f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
                         params={"apiKey": api_key, "regions": "us",
-                                "markets": "player_shots_on_goal",
+                                "markets": "player_shots_on_goal,player_points",
                                 "oddsFormat": "american"})
                     if r2.status_code != 200:
                         continue
+                    # Track which markets we've already taken from first available bookmaker
+                    got_shots, got_pts = False, False
                     for book in r2.json().get("bookmakers", []):
                         for mkt in book.get("markets", []):
-                            if mkt.get("key") != "player_shots_on_goal":
+                            mkey = mkt.get("key")
+                            target = None
+                            if mkey == "player_shots_on_goal" and not got_shots:
+                                target = lines
+                            elif mkey == "player_points" and not got_pts:
+                                target = pts_lines
+                            else:
                                 continue
                             for oc in mkt.get("outcomes", []):
                                 if oc.get("name") != "Over":
                                     continue
                                 player = oc.get("description", "").strip()
                                 line   = float(oc.get("point") or 0)
-                                if player and line > 0 and player not in seen:
-                                    seen.add(player)
-                                    lines[player] = {
+                                if player and line > 0 and player not in target:
+                                    target[player] = {
                                         "line":   line,
                                         "odds":   str(oc.get("price", "")),
                                         "source": "OddsAPI",
                                     }
-                        break  # first bookmaker per event
+                            if mkey == "player_shots_on_goal": got_shots = True
+                            elif mkey == "player_points":      got_pts = True
+                        if got_shots and got_pts:
+                            break
 
-                if lines:
+                if lines or pts_lines:
                     break  # found lines — no need to try next sport key
 
-        if lines:
-            print(f"[Lines] {len(lines)} lines from The Odds API")
-        else:
-            print("[Lines] No shot props found — using 1.5 baseline estimates")
-        return lines
+        print(f"[Lines] {len(lines)} shot lines | {len(pts_lines)} point lines from The Odds API")
+        return lines, pts_lines
     except Exception as e:
         print(f"[Lines] Odds API error: {e}")
-        return {}
+        return {}, {}
 
 
 
@@ -391,8 +412,11 @@ async def get_pts_picks(
     sa_map: Dict[str, float],
     sem: asyncio.Semaphore,
     season: str = "20252026",
+    pts_lines_map: Dict[str, Dict] = None,
 ) -> List[Dict]:
     """Independent points picks using NHL Stats API game logs."""
+
+    pts_lines_map = pts_lines_map or {}
 
     # Build team context
     team_ctx: Dict[str, Dict] = {}
@@ -466,6 +490,23 @@ async def get_pts_picks(
 
         score = round((r2 + r3) / 2 if c_logs else r3, 1)
 
+        # NEW: real sportsbook line (player_points market) — fuzzy name match
+        real_line, real_odds = None, ""
+        for odds_name, sb_info in pts_lines_map.items():
+            if _match_odds_name(odds_name, [{"name": player["name"]}]):
+                real_line = sb_info.get("line")
+                real_odds = sb_info.get("odds", "")
+                break
+
+        vsl_hits, vsl_total, vsl_rate = 0, 0, 0.0
+        gap, tag = None, ""
+        if real_line is not None and r_logs:
+            vsl_hits = sum(1 for g in r_logs if g["points"] > real_line)
+            vsl_total = len(r_logs)
+            vsl_rate = round(vsl_hits / vsl_total * 100, 1) if vsl_total else 0.0
+            gap = round(avg3 - real_line, 2)
+            tag = _book_tag(real_line, avg3, vsl_rate)
+
         picks.append({
             "name":     player["name"],
             "pid":      player["id"],
@@ -473,6 +514,10 @@ async def get_pts_picks(
             "opponent": opp,
             "homeRoad": hr,
             "oppSA":    sa_map.get(opp, 0.0),
+            "realLine": real_line,
+            "realOdds": real_odds,
+            "vsLineHits": vsl_hits, "vsLineTotal": vsl_total, "vsLineRate": vsl_rate,
+            "gap": gap, "tag": tag,
             "ptsOppAvg":  avg2,
             "ptsHa10avg": avg3,
             "pts2Hits":  h2, "pts2Total": len(c_logs), "pts2Rate": r2,
@@ -539,11 +584,12 @@ async def run_picks(target_date: str = None) -> Dict:
     _progress = {"stage": "Fetching games & sportsbook lines...", "done": 0, "total": 0, "pct": 10}
 
     # ── Step 1 - fetch games, SA map, and sportsbook lines in parallel ─────────────
-    games, sa_map, lines_map = await asyncio.gather(
+    games, sa_map, _lines_tuple = await asyncio.gather(
         get_today_games(target_date),
         get_team_sa_map(season),
         get_shot_lines(target_date),
     )
+    lines_map, pts_lines_map = _lines_tuple
     _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
 
     if not games:
@@ -590,11 +636,24 @@ async def run_picks(target_date: str = None) -> Dict:
             return None
         score = round((r2 + r3) / 2 if t2 >= MIN_GAMES else r3, 1)
 
+        # NEW: hit rate vs real sportsbook line (last 10 H/A) + gap + tag
+        real_line = p.get("realLine")
+        vsl_hits, vsl_total, vsl_rate = 0, 0, 0.0
+        gap = None
+        tag = ""
+        if real_line is not None:
+            vsl_hits, vsl_total, vsl_rate, _ = _calc_hit_rate_from_logs(
+                logs, real_line, hr, last_n=10)
+            gap = round(avg3 - real_line, 2)
+            tag = _book_tag(real_line, avg3, vsl_rate)
+
         return {
             **p,
             "step2Hits": h2, "step2Total": t2, "step2Rate": r2,
             "step3Hits": h3, "step3Total": t3, "step3Rate": r3,
             "oppAvg": avg2, "ha10avg": avg3, "score": score,
+            "vsLineHits": vsl_hits, "vsLineTotal": vsl_total, "vsLineRate": vsl_rate,
+            "gap": gap, "tag": tag,
         }
 
     completed = [0]
@@ -613,7 +672,7 @@ async def run_picks(target_date: str = None) -> Dict:
     # ── Step 4 - rank shots & run independent points picks ───────────────────
     picks.sort(key=lambda x: (x["score"], x["oppSA"]), reverse=True)
 
-    pts_all = await get_pts_picks(games, sa_map, sem_nhl, season)
+    pts_all = await get_pts_picks(games, sa_map, sem_nhl, season, pts_lines_map)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
 
     _result = {
@@ -717,7 +776,7 @@ tr:last-child td{border-bottom:none}
 .gray{color:#6b7280;font-size:.8rem}
 .est{background:rgba(245,158,11,.08);color:#f59e0b;border:1px solid rgba(245,158,11,.2);padding:2px 8px;border-radius:4px;font-size:.78rem;font-weight:700}
 .real-line{color:#4ade80;font-weight:900;font-size:1rem}
-.odds-txt{color:#6b7280;font-size:.78rem}
+.odds-txt{color:#6b7280;font-size:.78rem}.tag-sug{background:#065f46;color:#d1fae5;padding:2px 6px;border-radius:4px;font-size:.72rem;font-weight:700}.tag-fade{background:#7f1d1d;color:#fecaca;padding:2px 6px;border-radius:4px;font-size:.72rem;font-weight:700}.gap-pos{color:#10b981;font-weight:600}.gap-neg{color:#ef4444;font-weight:600}.gap-zero{color:#6b7280}
 .loading{text-align:center;padding:70px 20px}
 .spin{width:48px;height:48px;border:3px solid rgba(245,158,11,.15);border-top:3px solid #f59e0b;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 18px}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -834,10 +893,26 @@ async function runPicks(){
 
 function rateClass(r){ return r >= 90 ? 'green' : r >= 80 ? 'gold' : 'red-txt'; }
 
+function fmtTag(t){
+  if(t==='SUGGESTED') return '<span class="tag-sug">⭐ PICK</span>';
+  if(t==='FADE')      return '<span class="tag-fade">⚠ FADE</span>';
+  return '';
+}
+function fmtGap(g){
+  if(g===null||g===undefined) return '<span class="gap-zero">—</span>';
+  var cls = g>0?'gap-pos':(g<0?'gap-neg':'gap-zero');
+  var sign = g>0?'+':'';
+  return '<span class="'+cls+'">'+sign+g+'</span>';
+}
+function fmtVsLine(p){
+  if(!p.realLine) return '<span class="gray">—</span>';
+  return '<span class="'+rateClass(p.vsLineRate)+'">'+p.vsLineHits+'/'+p.vsLineTotal+' ('+p.vsLineRate+'%)</span>';
+}
+
 function buildPtsTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
-    '<th>AVG PTS vs OPP</th><th>L10 H/A AVG PTS</th>' +
-    '<th>CAREER vs OPP 0.5P</th><th>LAST 10 H/A 0.5P</th><th>SCORE</th><th>OPP SA/G</th></tr></thead>';
+    '<th>BOOK LINE</th><th>AVG PTS vs OPP</th><th>L10 H/A AVG PTS</th><th>GAP</th>' +
+    '<th>VS LINE (L10)</th><th>CAREER vs OPP 0.5P</th><th>LAST 10 H/A 0.5P</th><th>SCORE</th><th>TAG</th><th>OPP SA/G</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha  = p.homeRoad === 'H';
@@ -848,11 +923,15 @@ function buildPtsTable(picks, startNum){
       '<td><span class="tbadge">' + p.team + '</span></td>' +
       '<td><span class="tbadge">' + p.opponent + '</span></td>' +
       '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
+      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~0.5</span>') + '</td>' +
       '<td><span class="gold">' + p.ptsOppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ptsHa10avg + '</span></td>' +
+      '<td>' + fmtGap(p.gap) + '</td>' +
+      '<td>' + fmtVsLine(p) + '</td>' +
       '<td><span class="' + rateClass(p.pts2Rate) + '">' + p.pts2Hits + '/' + p.pts2Total + ' (' + p.pts2Rate + '%)</span></td>' +
       '<td><span class="' + rateClass(p.pts3Rate) + '">' + p.pts3Hits + '/' + p.pts3Total + ' (' + p.pts3Rate + '%)</span></td>' +
       '<td><span class="score">' + p.ptsScore + '</span></td>' +
+      '<td>' + fmtTag(p.tag) + '</td>' +
       '<td><span class="gray">' + p.oppSA.toFixed(1) + '</span></td>' +
       '</tr>';
   });
@@ -861,8 +940,8 @@ function buildPtsTable(picks, startNum){
 
 function buildTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
-    '<th>LINE</th><th>AVG VS OPP H/A</th><th>L10 H/A AVG</th>' +
-    '<th>CAREER VS OPP 1.5S H/A</th><th>LAST 10 H/A 1.5S</th><th>SCORE</th><th>OPP SA/G</th></tr></thead>';
+    '<th>BOOK LINE</th><th>AVG VS OPP H/A</th><th>L10 H/A AVG</th><th>GAP</th>' +
+    '<th>VS LINE (L10)</th><th>CAREER VS OPP 1.5S H/A</th><th>LAST 10 H/A 1.5S</th><th>SCORE</th><th>TAG</th><th>OPP SA/G</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha = p.homeRoad === 'H';
@@ -876,9 +955,12 @@ function buildTable(picks, startNum){
       '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.estLine + '</span>') + '</td>' +
       '<td><span class="gold">' + p.oppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ha10avg + '</span></td>' +
+      '<td>' + fmtGap(p.gap) + '</td>' +
+      '<td>' + fmtVsLine(p) + '</td>' +
       '<td><span class="' + rateClass(p.step2Rate) + '">' + p.step2Hits + '/' + p.step2Total + ' (' + p.step2Rate + '%)</span></td>' +
       '<td><span class="' + rateClass(p.step3Rate) + '">' + p.step3Hits + '/' + p.step3Total + ' (' + p.step3Rate + '%)</span></td>' +
       '<td><span class="score">' + p.score + '</span></td>' +
+      '<td>' + fmtTag(p.tag) + '</td>' +
       '<td><span class="gray">' + p.oppSA.toFixed(1) + '</span></td>' +
       '</tr>';
   });
