@@ -23,13 +23,17 @@ import httpx
 log = logging.getLogger(__name__)
 
 
-def push_picks_to_replit(sport: str, result: dict) -> None:
+def push_picks_to_replit(sport: str, result: dict, html: str = "") -> None:
     """
     Push the result of run_analysis() to the Replit picks cache.
     Silently logs errors — never crashes the Render app if Replit is down.
 
     sport:  "mlb" | "nhl" | "nba" | "nfl"
     result: the dict returned by run_analysis() — must have a 'date' key
+    html:   (optional) the fully-rendered HTML page for this sport. When
+            provided, the Replit hub serves it directly at
+            moneypicksarena.com/dashboard/<sport> — users get instant
+            picks without ever waking up this Render app.
     """
     base_url = os.environ.get("REPLIT_API_URL", "").rstrip("/")
     token = os.environ.get("INTERNAL_API_TOKEN", "")
@@ -49,6 +53,10 @@ def push_picks_to_replit(sport: str, result: dict) -> None:
         "pickCount": len(result.get("picks") or []),
         "propCount": len(result.get("all_picks") or []),
     }
+    # Only include html when actually provided — otherwise the API leaves the
+    # previously-stored snapshot intact (instead of blanking it).
+    if html:
+        body["html"] = html
 
     url = f"{base_url}/api/picks/{sport}"
     try:
