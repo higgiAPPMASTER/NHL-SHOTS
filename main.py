@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
 import httpx
+from replit_push import push_picks_to_replit  # pushes daily picks to Replit DB
 from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from jose import jwt as jose_jwt
@@ -1000,6 +1001,7 @@ async def api_picks(target_date: str = None):
     result = await run_picks(target_date)
     if "error" not in result:
         _cache_set("nhl", key, result)
+        push_picks_to_replit("nhl", {**result, "date": key})  # push to Replit DB
     return JSONResponse(result)
 
 
@@ -1014,6 +1016,7 @@ async def api_warm():
     result = await run_picks(today)
     if "error" not in result:
         _cache_set("nhl", today, result)
+        push_picks_to_replit("nhl", {**result, "date": today})  # push to Replit DB
     return JSONResponse({"ok": "error" not in result, "source": "computed",
                          "date": today, "picks": len(result.get("picks", []))})
 
