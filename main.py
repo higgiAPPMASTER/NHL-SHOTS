@@ -13,7 +13,6 @@ from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
 import httpx
-from replit_push import push_picks_to_replit  # pushes daily picks to Replit DB
 from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from jose import jwt as jose_jwt
@@ -224,7 +223,7 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                 for ev in events:
                     r2 = await c.get(
                         f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                        params={"apiKey": api_key, "regions": "us,us2,eu,uk",
+                        params={"apiKey": api_key, "regions": "us",
                                 "markets": "player_shots_on_goal",
                                 "oddsFormat": "american"})
                     if r2.status_code != 200:
@@ -612,7 +611,7 @@ async def run_picks(target_date: str = None) -> Dict:
     pts_all = await get_pts_picks(games, sa_map, sem_nhl, season)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
 
-    return {
+    _result = {
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:],
         "ptsPicks":      pts_all[:TOP_N],
@@ -624,7 +623,14 @@ async def run_picks(target_date: str = None) -> Dict:
         "ptsQualified":  len(pts_all),
         "targetDate":    target_date,
         "runTime":       datetime.utcnow().isoformat() + "Z",
+        "date":          target_date,
     }
+    try:
+        from replit_push import push_picks_to_replit
+        push_picks_to_replit("nhl", _result)
+    except Exception as _e:
+        print(f"[replit_push] nhl push failed: {_e}")
+    return _result
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HTML
@@ -1001,7 +1007,6 @@ async def api_picks(target_date: str = None):
     result = await run_picks(target_date)
     if "error" not in result:
         _cache_set("nhl", key, result)
-        push_picks_to_replit("nhl", {**result, "date": key})  # push to Replit DB
     return JSONResponse(result)
 
 
@@ -1016,7 +1021,6 @@ async def api_warm():
     result = await run_picks(today)
     if "error" not in result:
         _cache_set("nhl", today, result)
-        push_picks_to_replit("nhl", {**result, "date": today})  # push to Replit DB
     return JSONResponse({"ok": "error" not in result, "source": "computed",
                          "date": today, "picks": len(result.get("picks", []))})
 
