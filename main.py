@@ -756,10 +756,11 @@ nav{position:fixed;top:0;width:100%;background:rgba(10,10,10,.95);backdrop-filte
 .sa-badge .rk{color:#f59e0b;font-weight:700}
 .sa-badge .sv{color:#C8102E;font-weight:700}
 .tbl-wrap{overflow-x:auto;border-radius:14px;border:1px solid #262626;margin-bottom:8px}
-table{width:100%;border-collapse:collapse;background:#161616}
+table{width:100%;border-collapse:collapse;background:#161616;table-layout:auto}
 thead tr{border-bottom:1px solid rgba(245,158,11,.2)}
-th{background:#1a1a1a;padding:12px 14px;text-align:left;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#f59e0b;white-space:nowrap;font-family:'Source Sans Pro',sans-serif}
-td{padding:11px 14px;border-bottom:1px solid #1c1c1c;font-size:.88rem;white-space:nowrap}
+th{background:#1a1a1a;padding:8px 6px;text-align:center;font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#f59e0b;white-space:nowrap;font-family:'Source Sans Pro',sans-serif;line-height:1.15}
+td{padding:7px 6px;border-bottom:1px solid #1c1c1c;font-size:.78rem;white-space:nowrap;text-align:center}
+.pname{font-size:.82rem}
 tr:nth-child(even) td{background:#141414}
 tr:hover td{background:#1c1c1c}
 tr:last-child td{border-bottom:none}
@@ -911,8 +912,8 @@ function fmtVsLine(p){
 
 function buildPtsTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
-    '<th>BOOK LINE</th><th>AVG PTS vs OPP</th><th>L10 H/A AVG PTS</th><th>GAP</th>' +
-    '<th>VS LINE (L10)</th><th>CAREER vs OPP 0.5P</th><th>LAST 10 H/A 0.5P</th><th>SCORE</th><th>TAG</th><th>OPP SA/G</th></tr></thead>';
+    '<th>BOOK</th><th>OPP AVG</th><th>L10 AVG</th><th>GAP</th>' +
+    '<th>VS LINE L10</th><th>CAREER 0.5+</th><th>L10 0.5+</th><th>SCORE</th><th>TAG</th><th>SA/G</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha  = p.homeRoad === 'H';
@@ -940,8 +941,8 @@ function buildPtsTable(picks, startNum){
 
 function buildTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
-    '<th>BOOK LINE</th><th>AVG VS OPP H/A</th><th>L10 H/A AVG</th><th>GAP</th>' +
-    '<th>VS LINE (L10)</th><th>CAREER VS OPP 1.5S H/A</th><th>LAST 10 H/A 1.5S</th><th>SCORE</th><th>TAG</th><th>OPP SA/G</th></tr></thead>';
+    '<th>BOOK</th><th>OPP AVG</th><th>L10 AVG</th><th>GAP</th>' +
+    '<th>VS LINE L10</th><th>CAREER 1.5+</th><th>L10 1.5+</th><th>SCORE</th><th>TAG</th><th>SA/G</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha = p.homeRoad === 'H';
