@@ -51,7 +51,7 @@ MIN_GP        = 10    # minimum games played for valid average
 
 MIN_GAMES     = 2     # min games required for hit-rate calc
 HIT_THRESH         = 70.0  # % hit rate to qualify (shots always vs 1.5 base line)
-HIT_THRESH_PTS     = 70.0  # % hit rate to qualify (points)
+HIT_THRESH_PTS     = 65.0  # % hit rate to qualify (points)
 PTS_LINE      = 0.5   # 1+ point = hit
 SEASONS       = ["20252026","20242025","20232024","20222023","20212022"]  # for points game logs
 TOP_N       = 10     # final picks count
@@ -454,9 +454,14 @@ async def get_pts_picks(
         r2 = round(h2 / len(c_logs) * 100, 1) if c_logs else 0
         avg2 = round(sum(g["points"] for g in c_logs) / len(c_logs), 2) if c_logs else 0
 
-        s2_ok = (len(c_logs) < MIN_GAMES) or (r2 >= HIT_THRESH_PTS)
-        s3_ok = r3 >= HIT_THRESH_PTS
-        if not s2_ok or not s3_ok:
+        # Qualifier: career H/A vs this opponent at HIT_THRESH_PTS.
+        # If no opponent history, fall back to last-10 H/A hit rate.
+        # (r3/avg3 are kept as reference columns regardless — cold/hot indicator)
+        if len(c_logs) >= MIN_GAMES:
+            qualifies = r2 >= HIT_THRESH_PTS
+        else:
+            qualifies = r3 >= HIT_THRESH_PTS
+        if not qualifies:
             continue
 
         score = round((r2 + r3) / 2 if c_logs else r3, 1)
