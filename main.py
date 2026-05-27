@@ -691,7 +691,16 @@ async def run_picks(target_date: str = None) -> Dict:
     }
     try:
         from replit_push import push_picks_to_replit
-        push_picks_to_replit("nhl", _result)
+        # Bake the picks into the page HTML so the Replit hub can serve an
+        # instant, no-cold-start snapshot at moneypicksarena.com/dashboard/nhl.
+        import json as _json
+        _inject = (
+            '<script>window.__INITIAL_PICKS__ = '
+            + _json.dumps(_result).replace('</', '<\\/')
+            + ';</script></head>'
+        )
+        _snapshot_html = HTML.replace('</head>', _inject, 1)
+        push_picks_to_replit("nhl", _result, html=_snapshot_html)
     except Exception as _e:
         print(f"[replit_push] nhl push failed: {_e}")
     return _result
@@ -829,6 +838,22 @@ document.addEventListener('DOMContentLoaded', function(){
   var dp = document.getElementById('datePicker');
   var today = new Date().toISOString().split('T')[0];
   dp.value = today;
+
+  // Snapshot mode: hub serves this page with picks baked in as
+  // window.__INITIAL_PICKS__ — skip the /api/picks fetch and render
+  // straight from the snapshot.
+  if (window.__INITIAL_PICKS__) {
+    try {
+      var data = window.__INITIAL_PICKS__;
+      if (dp && data.date) dp.value = data.date;
+      renderResults(data);
+      var st = document.getElementById('statusMsg');
+      if (st && data.picks) {
+        st.textContent = (data.qualified || 0) + ' players qualified -- ' +
+                         data.picks.length + ' top picks -- ' + (data.date || '');
+      }
+    } catch (e) { console.error('snapshot render failed', e); }
+  }
 
 });
 
