@@ -462,8 +462,8 @@ async def get_pts_picks(
     for player, team, opp, hr in all_players:
         logs = logs_map.get(player["id"], [])
 
-        # Career H/A vs today's opponent
-        c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp]
+        # Career H/A vs today's opponent — cap at last 10 for consistency w/ shots
+        c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
         # Last 10 H/A any opponent
         r_logs = [g for g in logs if g["homeRoad"] == hr][:10]
 
@@ -912,8 +912,8 @@ function fmtVsLine(p){
 
 function buildPtsTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
-    '<th>BOOK</th><th>OPP AVG</th><th>L10 AVG</th><th>GAP</th>' +
-    '<th>VS LINE L10</th><th>CAREER 0.5+</th><th>L10 0.5+</th><th>SCORE</th><th>TAG</th><th>SA/G</th></tr></thead>';
+    '<th>BOOK</th><th>AVG vs OPP (L10)</th><th>AVG L10 H/A</th><th>HITS BOOK L10</th>' +
+    '<th>GAP vs BOOK</th><th>HITS 1+ Career vs OPP</th><th>HITS 1+ L10 H/A</th><th>SCORE</th><th>TAG</th><th>SA/G</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha  = p.homeRoad === 'H';
@@ -927,8 +927,8 @@ function buildPtsTable(picks, startNum){
       '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~0.5</span>') + '</td>' +
       '<td><span class="gold">' + p.ptsOppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ptsHa10avg + '</span></td>' +
-      '<td>' + fmtGap(p.gap) + '</td>' +
       '<td>' + fmtVsLine(p) + '</td>' +
+      '<td>' + fmtGap(p.gap) + '</td>' +
       '<td><span class="' + rateClass(p.pts2Rate) + '">' + p.pts2Hits + '/' + p.pts2Total + ' (' + p.pts2Rate + '%)</span></td>' +
       '<td><span class="' + rateClass(p.pts3Rate) + '">' + p.pts3Hits + '/' + p.pts3Total + ' (' + p.pts3Rate + '%)</span></td>' +
       '<td><span class="score">' + p.ptsScore + '</span></td>' +
@@ -941,8 +941,8 @@ function buildPtsTable(picks, startNum){
 
 function buildTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
-    '<th>BOOK</th><th>OPP AVG</th><th>L10 AVG</th><th>GAP</th>' +
-    '<th>VS LINE L10</th><th>CAREER 1.5+</th><th>L10 1.5+</th><th>SCORE</th><th>TAG</th><th>SA/G</th></tr></thead>';
+    '<th>BOOK</th><th>AVG vs OPP (L10)</th><th>AVG L10 H/A</th><th>HITS BOOK L10</th>' +
+    '<th>GAP vs BOOK</th><th>HITS 2+ Career vs OPP</th><th>HITS 2+ L10 H/A</th><th>SCORE</th><th>TAG</th><th>SA/G</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha = p.homeRoad === 'H';
@@ -956,8 +956,8 @@ function buildTable(picks, startNum){
       '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.estLine + '</span>') + '</td>' +
       '<td><span class="gold">' + p.oppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ha10avg + '</span></td>' +
-      '<td>' + fmtGap(p.gap) + '</td>' +
       '<td>' + fmtVsLine(p) + '</td>' +
+      '<td>' + fmtGap(p.gap) + '</td>' +
       '<td><span class="' + rateClass(p.step2Rate) + '">' + p.step2Hits + '/' + p.step2Total + ' (' + p.step2Rate + '%)</span></td>' +
       '<td><span class="' + rateClass(p.step3Rate) + '">' + p.step3Hits + '/' + p.step3Total + ' (' + p.step3Rate + '%)</span></td>' +
       '<td><span class="score">' + p.score + '</span></td>' +
