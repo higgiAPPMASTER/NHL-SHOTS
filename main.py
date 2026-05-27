@@ -913,7 +913,7 @@ function fmtVsLine(p){
 function buildPtsTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
     '<th>BOOK</th><th>AVG vs OPP (L10)</th><th>AVG L10 H/A</th><th>HITS BOOK L10</th>' +
-    '<th>GAP vs BOOK</th><th>HITS 1+ Career vs OPP</th><th>HITS 1+ L10 H/A</th><th>SCORE</th><th>TAG</th><th>SA/G</th></tr></thead>';
+    '<th>GAP vs BOOK</th><th>HITS 1+ Career vs OPP</th><th>HITS 1+ L10 H/A</th><th>SCORE</th><th>TAG</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha  = p.homeRoad === 'H';
@@ -933,7 +933,6 @@ function buildPtsTable(picks, startNum){
       '<td><span class="' + rateClass(p.pts3Rate) + '">' + p.pts3Hits + '/' + p.pts3Total + ' (' + p.pts3Rate + '%)</span></td>' +
       '<td><span class="score">' + p.ptsScore + '</span></td>' +
       '<td>' + fmtTag(p.tag) + '</td>' +
-      '<td><span class="gray">' + p.oppSA.toFixed(1) + '</span></td>' +
       '</tr>';
   });
   return '<div class="tbl-wrap"><table>' + thead + '<tbody>' + rows + '</tbody></table></div>';
@@ -942,7 +941,7 @@ function buildPtsTable(picks, startNum){
 function buildTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
     '<th>BOOK</th><th>AVG vs OPP (L10)</th><th>AVG L10 H/A</th><th>HITS BOOK L10</th>' +
-    '<th>GAP vs BOOK</th><th>HITS 2+ Career vs OPP</th><th>HITS 2+ L10 H/A</th><th>SCORE</th><th>TAG</th><th>SA/G</th></tr></thead>';
+    '<th>GAP vs BOOK</th><th>HITS 2+ Career vs OPP</th><th>HITS 2+ L10 H/A</th><th>SCORE</th><th>TAG</th></tr></thead>';
   var rows = '';
   picks.forEach(function(p, i){
     var ha = p.homeRoad === 'H';
@@ -962,7 +961,6 @@ function buildTable(picks, startNum){
       '<td><span class="' + rateClass(p.step3Rate) + '">' + p.step3Hits + '/' + p.step3Total + ' (' + p.step3Rate + '%)</span></td>' +
       '<td><span class="score">' + p.score + '</span></td>' +
       '<td>' + fmtTag(p.tag) + '</td>' +
-      '<td><span class="gray">' + p.oppSA.toFixed(1) + '</span></td>' +
       '</tr>';
   });
   return '<div class="tbl-wrap"><table>' + thead + '<tbody>' + rows + '</tbody></table></div>';
