@@ -579,17 +579,20 @@ async def run_picks(target_date: str = None) -> Dict:
 
     _progress = {"stage": "Fetching games & sportsbook lines...", "done": 0, "total": 0, "pct": 10}
 
-    # ── Step 1 - fetch games, SA map, and sportsbook lines in parallel ─────────────
-    games, sa_map, _lines_tuple = await asyncio.gather(
-        get_today_games(target_date),
+    # ── Step 1 - games first; bail out on an off-day before any other fetch ────────
+    games = await get_today_games(target_date)
+    if not games:
+        return {"no_games": True,
+                "message": f"No NHL games scheduled for {target_date}.",
+                "picks": [], "games": []}
+
+    # Games exist — now fetch SA map + sportsbook lines in parallel.
+    sa_map, _lines_tuple = await asyncio.gather(
         get_team_sa_map(season),
         get_shot_lines(target_date),
     )
     lines_map, pts_lines_map = _lines_tuple
     _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
-
-    if not games:
-        return {"error": f"No NHL games found for {target_date}.", "picks": [], "games": []}
 
     # SA rankings for display
     playing = list({g["homeTeam"] for g in games} | {g["awayTeam"] for g in games})
@@ -906,7 +909,10 @@ async function runPicks(){
     var _nhlTok=localStorage.getItem('__mpa_token')||'';
     var res = await fetch('/api/picks?target_date=' + dt + '&token=' + encodeURIComponent(_nhlTok));
     var data = await res.json();
-    if(data.error){
+    if(data.no_games){
+      out.innerHTML = '<div style="text-align:center;padding:40px 20px;color:#9ca3af"><h2 style="color:#f59e0b;margin-bottom:8px">No Games Today</h2><p>' + (data.message || ('No NHL games scheduled for ' + dt + '.')) + ' Check back on game day.</p></div>';
+      st.textContent = '';
+    } else if(data.error){
       out.innerHTML = '<div class="err-box">' + data.error + '</div>';
       st.textContent = '';
     } else {
