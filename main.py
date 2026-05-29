@@ -873,7 +873,7 @@ document.addEventListener('DOMContentLoaded',checkStatus);
   var p=new URLSearchParams(window.location.search);
   var t=p.get('token');
   if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
-  if(!localStorage.getItem(KEY)){window.location.href='https://www.moneypicksarena.com';}
+  if(!localStorage.getItem(KEY)){window.location.href='https://moneypicksarena.com';}
 })();
 
 // STEP 2: Run picks
