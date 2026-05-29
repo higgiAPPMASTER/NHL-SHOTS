@@ -21,19 +21,15 @@ from jose import jwt as jose_jwt
 JWT_SECRET = os.environ.get("JWT_SECRET", "")
 
 def _verify_hub_token(token: str) -> bool:
-    """Check token exists and looks like a JWT (3 dot-separated parts).
-    Full signature verification enabled once JWT_SECRET is set on all services."""
-    if not token:
+    if not token or len(token.split(".")) != 3:
         return False
     if not JWT_SECRET:
-        # No secret configured yet - accept any well-formed JWT
-        return len(token.split(".")) == 3
+        return False
     try:
         jose_jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return True
     except Exception:
-        # Secret mismatch - still accept well-formed token so app doesn't break
-        return len(token.split(".")) == 3
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -869,6 +865,14 @@ async function checkStatus(){
 }
 document.addEventListener('DOMContentLoaded',checkStatus);
 
+(function(){
+  var KEY='__mpa_token';
+  var p=new URLSearchParams(window.location.search);
+  var t=p.get('token');
+  if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
+  if(!localStorage.getItem(KEY)){window.location.href='https://www.moneypicksarena.com';}
+})();
+
 // STEP 2: Run picks
 async function runPicks(){
   var btn = document.getElementById('runBtn');
@@ -899,7 +903,8 @@ async function runPicks(){
   }, 2000);
 
   try {
-    var res = await fetch('/api/picks?target_date=' + dt);
+    var _nhlTok=localStorage.getItem('__mpa_token')||'';
+    var res = await fetch('/api/picks?target_date=' + dt + '&token=' + encodeURIComponent(_nhlTok));
     var data = await res.json();
     if(data.error){
       out.innerHTML = '<div class="err-box">' + data.error + '</div>';
@@ -1110,7 +1115,10 @@ async def index():
     return HTML
 
 @app.get("/api/picks")
-async def api_picks(target_date: str = None):
+async def api_picks(request: Request, target_date: str = None, token: str = ""):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not _verify_hub_token(tok):
+        raise HTTPException(status_code=401, detail="Subscription required — please log in via moneypicksarena.com")
     key = target_date or date.today().isoformat()
     cached = _cache_get("nhl", key)
     if cached:
