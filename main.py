@@ -832,7 +832,8 @@ body.is-admin .admin-only{display:inline-block !important}
       <label>Date</label>
       <input type="date" id="datePicker"/>
     </div>
-    <button class="btn-run admin-only" id="runBtn" onclick="runPicks()">Run Picks</button>
+    <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
+    <button class="btn-run admin-only" id="runBtn" onclick="runPicks()" style="margin-left:10px">Run Picks</button>
   </div>
 
   <div class="status-msg" id="statusMsg"></div>
@@ -893,6 +894,27 @@ document.addEventListener('DOMContentLoaded',checkStatus);
 })();
 function _applyAdmin(){if(window.IS_ADMIN){document.body&&document.body.classList.add('is-admin');}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;document.body&&document.body.classList.add('is-admin');}}).catch(function(){});}}}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_applyAdmin);}else{_applyAdmin();}
+
+// Get Picks: load saved picks for the chosen date (read-only, never runs the pipeline).
+async function getPicks(){
+  var btn=document.getElementById('getBtn');
+  var st=document.getElementById('statusMsg');
+  var out=document.getElementById('out');
+  var dt=document.getElementById('datePicker').value;
+  var orig=btn.textContent;
+  btn.disabled=true; btn.textContent='Loading...';
+  if(st) st.textContent='Loading saved picks for '+dt+'...';
+  try{
+    var _nhlTok=localStorage.getItem('__mpa_token')||'';
+    var res=await fetch('/api/cached?target_date='+dt+'&token='+encodeURIComponent(_nhlTok));
+    if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
+    if(!res.ok){ throw new Error('Could not load picks.'); }
+    var data=await res.json();
+    renderResults(data);
+    if(st && data.picks){ st.textContent=(data.qualified||0)+' players qualified -- '+data.picks.length+' top picks -- '+(data.date||''); }
+  }catch(e){ if(st) st.textContent=''; alert(e.message||'Could not load picks. Please try again.'); }
+  finally{ btn.disabled=false; btn.textContent=orig; }
+}
 
 // STEP 2: Run picks
 async function runPicks(){
@@ -1158,6 +1180,20 @@ async def api_picks(request: Request, target_date: str = None, token: str = ""):
     if "error" not in result:
         _cache_set("nhl", key, result)
     return JSONResponse(result)
+
+
+@app.get("/api/cached")
+async def api_cached(request: Request, target_date: str = None, token: str = ""):
+    # Read-only: serve picks already saved on file. Never runs the pipeline, so any
+    # logged-in member can pull the latest saved picks without triggering a fresh run.
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not _verify_hub_token(tok):
+        raise HTTPException(status_code=401, detail="Subscription required — please log in via moneypicksarena.com")
+    key = target_date or date.today().isoformat()
+    cached = _cache_get("nhl", key)
+    if cached:
+        return JSONResponse(cached)
+    raise HTTPException(status_code=404, detail="No saved picks for this date.")
 
 
 @app.get("/api/warm")
