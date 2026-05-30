@@ -31,6 +31,20 @@ def _verify_hub_token(token: str) -> bool:
     except Exception:
         return False
 
+_ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "higgi117711@gmail.com").strip().lower()
+
+def _token_email(token: str) -> str:
+    if not token or len(token.split(".")) != 3 or not JWT_SECRET:
+        return ""
+    try:
+        payload = jose_jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return str(payload.get("sub", "")).strip().lower()
+    except Exception:
+        return ""
+
+def _is_admin_token(token: str) -> bool:
+    return bool(_ADMIN_EMAIL) and _token_email(token) == _ADMIN_EMAIL
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config
@@ -793,6 +807,8 @@ tr:last-child td{border-bottom:none}
 .no-picks{text-align:center;padding:50px;color:#4b5563}
 footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border-top:1px solid #1c1c1c;margin-top:24px;font-family:'Source Sans Pro',sans-serif}
 .ft-logo{font-family:'Playfair Display',serif;color:#f59e0b;font-weight:700;font-size:.95rem;margin-bottom:6px}
+.admin-only{display:none !important}
+body.is-admin .admin-only{display:inline-block !important}
 </style>
 </head>
 <body>
@@ -816,7 +832,7 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
       <label>Date</label>
       <input type="date" id="datePicker"/>
     </div>
-    <button class="btn-run" id="runBtn" onclick="runPicks()">Run Picks</button>
+    <button class="btn-run admin-only" id="runBtn" onclick="runPicks()">Run Picks</button>
   </div>
 
   <div class="status-msg" id="statusMsg"></div>
@@ -875,6 +891,8 @@ document.addEventListener('DOMContentLoaded',checkStatus);
   if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
   if(!localStorage.getItem(KEY)){window.location.href='https://moneypicksarena.com';}
 })();
+function _applyAdmin(){if(window.IS_ADMIN){document.body&&document.body.classList.add('is-admin');}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;document.body&&document.body.classList.add('is-admin');}}).catch(function(){});}}}
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_applyAdmin);}else{_applyAdmin();}
 
 // STEP 2: Run picks
 async function runPicks(){
@@ -1116,9 +1134,16 @@ async def verify_token_nhl(request: Request):
         raise HTTPException(status_code=401, detail="Invalid token")
     return {"ok": True}
 
+@app.get("/api/whoami")
+async def whoami(request: Request, token: str = ""):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    return {"is_admin": _is_admin_token(tok)}
+
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    return HTML
+async def index(admin: str = "", token: str = ""):
+    is_admin = (bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__")) or _is_admin_token(token)
+    js_flag = "true" if is_admin else "false"
+    return HTMLResponse(HTML.replace("</head>", f"<script>window.IS_ADMIN = {js_flag};</script></head>", 1))
 
 @app.get("/api/picks")
 async def api_picks(request: Request, target_date: str = None, token: str = ""):
