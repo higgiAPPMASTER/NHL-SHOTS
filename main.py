@@ -1182,6 +1182,33 @@ async def api_picks(request: Request, target_date: str = None, token: str = ""):
     return JSONResponse(result)
 
 
+_CRON_BUSY_NHL = False
+
+@app.api_route("/api/cron-run", methods=["GET", "POST"])
+async def cron_run_nhl(request: Request, date_str: str = ""):
+    # Cron-friendly trigger: authed by the static INTERNAL_API_TOKEN secret sent
+    # as a header (kept out of the URL so it isn't logged). No expiring hub login
+    # needed. Runs the pipeline + caches it so members can pull the picks, and
+    # wakes the free-tier app on Render. An in-flight guard blocks overlapping runs.
+    global _CRON_BUSY_NHL
+    import hmac
+    secret = os.environ.get("INTERNAL_API_TOKEN", "")
+    tok = request.headers.get("X-Internal-Token", "") or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not secret or not hmac.compare_digest(tok or "", secret):
+        raise HTTPException(status_code=401, detail="Invalid cron token")
+    ds = date_str or date.today().isoformat()
+    if _CRON_BUSY_NHL:
+        return {"ran": False, "cached": bool(_cache_get("nhl", ds)), "date": ds, "reason": "already running"}
+    _CRON_BUSY_NHL = True
+    try:
+        result = await run_picks(ds)
+        if isinstance(result, dict) and "error" not in result:
+            _cache_set("nhl", ds, result)
+    finally:
+        _CRON_BUSY_NHL = False
+    return {"ran": True, "cached": bool(_cache_get("nhl", ds)), "date": ds}
+
+
 @app.get("/api/cached")
 async def api_cached(request: Request, target_date: str = None, token: str = ""):
     # Read-only: serve picks already saved on file. Never runs the pipeline, so any
