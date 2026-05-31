@@ -63,6 +63,10 @@ MIN_GAMES     = 2     # min games required for hit-rate calc
 HIT_THRESH         = 70.0  # % hit rate to qualify (shots always vs 1.5 base line)
 HIT_THRESH_PTS     = 65.0  # % hit rate to qualify (points)
 PTS_LINE      = 0.5   # 1+ point = hit
+AST_LINE      = 0.5   # 1+ assist = hit
+SAVES_LINE    = 24.5  # baseline goalie saves line when no book line posted
+HIT_THRESH_AST     = 60.0  # % hit rate to qualify (assists)
+HIT_THRESH_SAVES   = 55.0  # % hit rate to qualify (goalie saves)
 SEASONS       = ["20252026","20242025","20232024","20222023","20212022"]  # for points game logs
 TOP_N       = 10     # final picks count
 SEM_NHL     = 8      # concurrent NHL API calls
@@ -107,6 +111,32 @@ def _cache_clear(app: str = None):
     for p in _CACHE_DIR.glob("*.json"):
         if app is None or p.name.startswith(app + "_"):
             p.unlink(missing_ok=True)
+
+
+# Odds-layer cache: stores the raw Odds API lines per date so re-runs (cron,
+# forced re-rank, runs after the result cache expires) reuse the odds already
+# pulled instead of hitting the Odds API again. Shorter TTL than the result
+# cache so lines still refresh over the day. Cleared by _cache_clear (same
+# "<app>_" prefix), so a true fresh run still re-pulls.
+_ODDS_TTL = 3 * 3600  # 3 hours
+
+def _odds_cache_get(app: str, date_key: str):
+    p = _CACHE_DIR / f"{app}_odds_{date_key}.json"
+    try:
+        if p.exists() and (time.time() - p.stat().st_mtime) < _ODDS_TTL:
+            print(f"[OddsCache] HIT {app}/{date_key}")
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[OddsCache] read error: {e}")
+    return None
+
+def _odds_cache_set(app: str, date_key: str, data):
+    try:
+        (_CACHE_DIR / f"{app}_odds_{date_key}.json").write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        print(f"[OddsCache] SET {app}/{date_key}")
+    except Exception as e:
+        print(f"[OddsCache] write error: {e}")
 
 
 
@@ -196,6 +226,22 @@ async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
             })
     return players
 
+
+async def get_goalies(team: str, sem: asyncio.Semaphore) -> List[Dict]:
+    """Goalies for a team — separate pool from skaters (saves market)."""
+    async with sem:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
+            data = await _fetch(f"{NHL_API}/roster/{team}/current", c)
+    if not data:
+        return []
+    goalies = []
+    for p in data.get("goalies", []):
+        goalies.append({
+            "id":   p["id"],
+            "name": f"{p['firstName']['default']} {p['lastName']['default']}",
+        })
+    return goalies
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Sportsbook Lines - tries Odds API, then DraftKings, then estimates
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,7 +269,12 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     api_key = os.environ.get("ODDS_API_KEY", "")
     if not api_key:
         print("[Lines] ODDS_API_KEY not set — using 1.5 baseline estimates")
-        return {}, {}
+        return {}, {}, {}, {}
+
+    _oc = _odds_cache_get("nhl", target_date)
+    if _oc is not None:
+        return (_oc.get("lines", {}), _oc.get("pts", {}),
+                _oc.get("ast", {}), _oc.get("sv", {}))
 
     tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
     SPORT_KEYS = ["icehockey_nhl", "icehockey_nhl_championship"]
@@ -231,6 +282,8 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     try:
         lines: Dict[str, Dict] = {}
         pts_lines: Dict[str, Dict] = {}
+        ast_lines: Dict[str, Dict] = {}
+        sv_lines: Dict[str, Dict] = {}
         async with httpx.AsyncClient(timeout=20) as c:
             for sport_key in SPORT_KEYS:
                 r = await c.get(
@@ -248,46 +301,59 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                     r2 = await c.get(
                         f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
                         params={"apiKey": api_key, "regions": "us",
-                                "markets": "player_shots_on_goal,player_points",
+                                "markets": ("player_shots_on_goal,player_points,"
+                                            "player_assists,player_total_saves"),
                                 "oddsFormat": "american"})
                     if r2.status_code != 200:
                         continue
-                    # Track which markets we've already taken from first available bookmaker
-                    got_shots, got_pts = False, False
+                    # Map each market key to its destination dict. We take the first
+                    # bookmaker that posts a given market (Over AND Under come together
+                    # in one market response, so the Under side is free).
+                    targets = {
+                        "player_shots_on_goal": lines,
+                        "player_points":        pts_lines,
+                        "player_assists":       ast_lines,
+                        "player_total_saves":   sv_lines,
+                    }
+                    got = {k: False for k in targets}
                     for book in r2.json().get("bookmakers", []):
                         for mkt in book.get("markets", []):
                             mkey = mkt.get("key")
-                            target = None
-                            if mkey == "player_shots_on_goal" and not got_shots:
-                                target = lines
-                            elif mkey == "player_points" and not got_pts:
-                                target = pts_lines
-                            else:
+                            if mkey not in targets or got[mkey]:
                                 continue
+                            target = targets[mkey]
                             for oc in mkt.get("outcomes", []):
-                                if oc.get("name") != "Over":
+                                nm = oc.get("name")
+                                if nm not in ("Over", "Under"):
                                     continue
                                 player = oc.get("description", "").strip()
                                 line   = float(oc.get("point") or 0)
-                                if player and line > 0 and player not in target:
-                                    target[player] = {
-                                        "line":   line,
-                                        "odds":   str(oc.get("price", "")),
-                                        "source": "OddsAPI",
-                                    }
-                            if mkey == "player_shots_on_goal": got_shots = True
-                            elif mkey == "player_points":      got_pts = True
-                        if got_shots and got_pts:
+                                if not player or line <= 0:
+                                    continue
+                                rec = target.setdefault(player, {
+                                    "line": line, "odds": "",
+                                    "under_odds": "", "source": "OddsAPI"})
+                                if nm == "Over" and not rec["odds"]:
+                                    rec["odds"] = str(oc.get("price", ""))
+                                elif nm == "Under" and not rec["under_odds"]:
+                                    rec["under_odds"] = str(oc.get("price", ""))
+                            got[mkey] = True
+                        if all(got.values()):
                             break
 
-                if lines or pts_lines:
+                if lines or pts_lines or ast_lines or sv_lines:
                     break  # found lines — no need to try next sport key
 
-        print(f"[Lines] {len(lines)} shot lines | {len(pts_lines)} point lines from The Odds API")
-        return lines, pts_lines
+        print(f"[Lines] {len(lines)} shot | {len(pts_lines)} point | "
+              f"{len(ast_lines)} assist | {len(sv_lines)} saves lines from The Odds API")
+        if lines or pts_lines or ast_lines or sv_lines:
+            _odds_cache_set("nhl", target_date, {
+                "lines": lines, "pts": pts_lines,
+                "ast": ast_lines, "sv": sv_lines})
+        return lines, pts_lines, ast_lines, sv_lines
     except Exception as e:
         print(f"[Lines] Odds API error: {e}")
-        return {}, {}
+        return {}, {}, {}, {}
 
 
 
@@ -369,11 +435,13 @@ async def get_shot_qualified_players(
             seen.add(p["id"])
             # Look up real sportsbook line for display only
             real_line, real_odds, line_source = None, "", "Est"
+            real_under_odds = ""
             for odds_name, sb_info in lines_map.items():
                 if _match_odds_name(odds_name, [p]):
-                    real_line   = sb_info["line"]
-                    real_odds   = sb_info.get("odds", "")
-                    line_source = sb_info.get("source", "OddsAPI")
+                    real_line       = sb_info["line"]
+                    real_odds       = sb_info.get("odds", "")
+                    real_under_odds = sb_info.get("under_odds", "")
+                    line_source     = sb_info.get("source", "OddsAPI")
                     break
             pool.append({
                 "name":       p["name"],
@@ -384,6 +452,7 @@ async def get_shot_qualified_players(
                 "line":       1.5,        # ALWAYS 1.5 for the algorithm
                 "realLine":   real_line,  # Sportsbook line - display only
                 "realOdds":   real_odds,
+                "realUnderOdds": real_under_odds,
                 "lineSource": line_source,
                 "estLine":    1.5,
                 "spg":        0,
@@ -411,6 +480,29 @@ async def _pts_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[
             logs.append({
                 "date":     g.get("gameDate",     ""),
                 "points":   goals + assists,
+                "assists":  assists,
+                "homeRoad": g.get("homeRoadFlag", ""),
+                "opponent": g.get("opponentAbbrev", ""),
+            })
+    return logs
+
+
+async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[Dict]:
+    """Goalie game logs — saves = shotsAgainst - goalsAgainst."""
+    logs = []
+    for gtype in (2, 3):  # regular season + playoffs
+        data = await _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/{gtype}", c)
+        if not data:
+            continue
+        for g in data.get("gameLog", []):
+            sa = int(g.get("shotsAgainst", 0) or 0)
+            ga = int(g.get("goalsAgainst", 0) or 0)
+            saves = sa - ga
+            if saves < 0:
+                saves = 0
+            logs.append({
+                "date":     g.get("gameDate",     ""),
+                "saves":    saves,
                 "homeRoad": g.get("homeRoadFlag", ""),
                 "opponent": g.get("opponentAbbrev", ""),
             })
@@ -423,10 +515,13 @@ async def get_pts_picks(
     sem: asyncio.Semaphore,
     season: str = "20252026",
     pts_lines_map: Dict[str, Dict] = None,
-) -> List[Dict]:
-    """Independent points picks using NHL Stats API game logs."""
+    ast_lines_map: Dict[str, Dict] = None,
+):
+    """Independent points + assists picks using NHL Stats API game logs.
+    Returns a (points_picks, assist_picks) tuple."""
 
     pts_lines_map = pts_lines_map or {}
+    ast_lines_map = ast_lines_map or {}
 
     # Build team context
     team_ctx: Dict[str, Dict] = {}
@@ -468,7 +563,7 @@ async def get_pts_picks(
     log_results = await asyncio.gather(*log_tasks.values(), return_exceptions=True)
     logs_map = {pid: (r if isinstance(r, list) else []) for pid, r in zip(log_tasks.keys(), log_results)}
 
-    picks = []
+    pts_picks, ast_picks = [], []
     for player, team, opp, hr in all_players:
         logs = logs_map.get(player["id"], [])
 
@@ -480,63 +575,191 @@ async def get_pts_picks(
         if len(r_logs) < MIN_GAMES:
             continue
 
-        h3 = sum(1 for g in r_logs if g["points"] > PTS_LINE)
-        r3 = round(h3 / len(r_logs) * 100, 1)
-        avg3 = round(sum(g["points"] for g in r_logs) / len(r_logs), 2)
+        def build_pick(stat_key, base_line, thresh, lines_map, mkt_label):
+            """Normalized pick for one market (points or assists). Returns None
+            if the player doesn't clear the threshold."""
+            h3 = sum(1 for g in r_logs if g[stat_key] > base_line)
+            r3 = round(h3 / len(r_logs) * 100, 1)
+            avg3 = round(sum(g[stat_key] for g in r_logs) / len(r_logs), 2)
+            h2 = sum(1 for g in c_logs if g[stat_key] > base_line) if c_logs else 0
+            r2 = round(h2 / len(c_logs) * 100, 1) if c_logs else 0
+            avg2 = round(sum(g[stat_key] for g in c_logs) / len(c_logs), 2) if c_logs else 0
+            # Qualify on career H/A vs opp if we have it, else last-10 H/A
+            qualifies = (r2 >= thresh) if len(c_logs) >= MIN_GAMES else (r3 >= thresh)
+            if not qualifies:
+                return None
+            score = round((r2 + r3) / 2 if c_logs else r3, 1)
+            real_line, real_odds, under_odds = None, "", ""
+            for odds_name, sb_info in (lines_map or {}).items():
+                if _match_odds_name(odds_name, [{"name": player["name"]}]):
+                    real_line = sb_info.get("line")
+                    real_odds = sb_info.get("odds", "")
+                    under_odds = sb_info.get("under_odds", "")
+                    break
+            vsl_hits, vsl_total, vsl_rate = 0, 0, 0.0
+            gap, tag = None, ""
+            if real_line is not None and r_logs:
+                vsl_hits = sum(1 for g in r_logs if g[stat_key] > real_line)
+                vsl_total = len(r_logs)
+                vsl_rate = round(vsl_hits / vsl_total * 100, 1) if vsl_total else 0.0
+                gap = round(avg3 - real_line, 2)
+                tag = _book_tag(real_line, avg3, vsl_rate)
+            # Under track — value below the line (same L10 H/A sample, free data)
+            uline = real_line if real_line is not None else base_line
+            u_hits = sum(1 for g in r_logs if g[stat_key] < uline)
+            u_total = len(r_logs)
+            u_rate = round(u_hits / u_total * 100, 1) if u_total else 0.0
+            # Game log for the per-card dropdown (vs opp if available, else L10 H/A)
+            g_src = ([g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
+                     or [g for g in logs if g["homeRoad"] == hr][:10])
+            glog = [{"d": g["date"], "v": g[stat_key]} for g in g_src]
+            return {
+                "name": player["name"], "pid": player["id"], "team": team,
+                "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
+                "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
+                "mkt": mkt_label,
+                "dispLine": (real_line if real_line is not None else base_line),
+                "avg": avg3, "avgA": avg2,
+                "rateA": r2, "hitsA": h2, "totA": len(c_logs),
+                "rateB": r3, "hitsB": h3, "totB": len(r_logs),
+                "dispScore": score,
+                "vsLineHits": vsl_hits, "vsLineTotal": vsl_total, "vsLineRate": vsl_rate,
+                "gap": gap, "tag": tag,
+                "underHits": u_hits, "underTotal": u_total,
+                "underRate": u_rate, "underLine": uline,
+                "glog": glog,
+            }
 
-        h2 = sum(1 for g in c_logs if g["points"] > PTS_LINE) if c_logs else 0
-        r2 = round(h2 / len(c_logs) * 100, 1) if c_logs else 0
-        avg2 = round(sum(g["points"] for g in c_logs) / len(c_logs), 2) if c_logs else 0
+        pp = build_pick("points", PTS_LINE, HIT_THRESH_PTS, pts_lines_map, "Points (1+)")
+        if pp:
+            # Keep legacy point keys so the existing table + parlay code still works
+            pp.update({
+                "ptsOppAvg": pp["avgA"], "ptsHa10avg": pp["avg"],
+                "pts2Hits": pp["hitsA"], "pts2Total": pp["totA"], "pts2Rate": pp["rateA"],
+                "pts3Hits": pp["hitsB"], "pts3Total": pp["totB"], "pts3Rate": pp["rateB"],
+                "ptsScore": pp["dispScore"],
+            })
+            pts_picks.append(pp)
 
-        # Qualifier: career H/A vs this opponent at HIT_THRESH_PTS.
-        # If no opponent history, fall back to last-10 H/A hit rate.
-        # (r3/avg3 are kept as reference columns regardless — cold/hot indicator)
-        if len(c_logs) >= MIN_GAMES:
-            qualifies = r2 >= HIT_THRESH_PTS
-        else:
-            qualifies = r3 >= HIT_THRESH_PTS
-        if not qualifies:
+        ap = build_pick("assists", AST_LINE, HIT_THRESH_AST, ast_lines_map, "Assists (1+)")
+        if ap:
+            ast_picks.append(ap)
+
+    pts_picks.sort(key=lambda x: (x["ptsScore"], x["oppSA"]), reverse=True)
+    ast_picks.sort(key=lambda x: (x["dispScore"], x["oppSA"]), reverse=True)
+    print(f"[PTS] {len(pts_picks)} points | {len(ast_picks)} assists qualifying")
+    return pts_picks, ast_picks
+
+
+async def get_saves_picks(
+    games: List[Dict],
+    sa_map: Dict[str, float],
+    sem: asyncio.Semaphore,
+    season: str = "20252026",
+    sv_lines_map: Dict[str, Dict] = None,
+) -> List[Dict]:
+    """Goalie saves picks using NHL Stats API goalie game logs."""
+    sv_lines_map = sv_lines_map or {}
+
+    team_ctx: Dict[str, Dict] = {}
+    for g in games:
+        team_ctx[g["homeTeam"]] = {"opponent": g["awayTeam"], "homeRoad": "H"}
+        team_ctx[g["awayTeam"]] = {"opponent": g["homeTeam"],  "homeRoad": "R"}
+
+    roster_vals = await asyncio.gather(
+        *[get_goalies(t, sem) for t in team_ctx], return_exceptions=True)
+    rosters = {t: (r if isinstance(r, list) else [])
+               for t, r in zip(team_ctx.keys(), roster_vals)}
+
+    all_goalies = []
+    seen = set()
+    for team, players in rosters.items():
+        ctx = team_ctx[team]
+        for p in players:
+            if p["id"] not in seen:
+                seen.add(p["id"])
+                all_goalies.append((p, team, ctx["opponent"], ctx["homeRoad"]))
+
+    async def fetch_logs(pid):
+        async with sem:
+            async with httpx.AsyncClient(timeout=30) as c:
+                results = await asyncio.gather(
+                    *[_goalie_season_logs(pid, s, c) for s in SEASONS],
+                    return_exceptions=True)
+        logs = []
+        for r in results:
+            if isinstance(r, list):
+                logs.extend(r)
+        logs.sort(key=lambda x: x["date"], reverse=True)
+        return logs
+
+    log_tasks = {p["id"]: fetch_logs(p["id"]) for p, *_ in all_goalies}
+    log_results = await asyncio.gather(*log_tasks.values(), return_exceptions=True)
+    logs_map = {pid: (r if isinstance(r, list) else [])
+                for pid, r in zip(log_tasks.keys(), log_results)}
+
+    picks = []
+    for goalie, team, opp, hr in all_goalies:
+        logs = logs_map.get(goalie["id"], [])
+        c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
+        r_logs = [g for g in logs if g["homeRoad"] == hr][:10]
+        if len(r_logs) < MIN_GAMES:
             continue
 
+        # Real book line (player_total_saves) — fuzzy name match
+        real_line, real_odds, under_odds = None, "", ""
+        for odds_name, sb_info in sv_lines_map.items():
+            if _match_odds_name(odds_name, [{"name": goalie["name"]}]):
+                real_line  = sb_info.get("line")
+                real_odds  = sb_info.get("odds", "")
+                under_odds = sb_info.get("under_odds", "")
+                break
+        base_line = real_line if real_line is not None else SAVES_LINE
+
+        h3 = sum(1 for g in r_logs if g["saves"] > base_line)
+        r3 = round(h3 / len(r_logs) * 100, 1)
+        avg3 = round(sum(g["saves"] for g in r_logs) / len(r_logs), 2)
+        h2 = sum(1 for g in c_logs if g["saves"] > base_line) if c_logs else 0
+        r2 = round(h2 / len(c_logs) * 100, 1) if c_logs else 0
+        avg2 = round(sum(g["saves"] for g in c_logs) / len(c_logs), 2) if c_logs else 0
+
+        qualifies = (r2 >= HIT_THRESH_SAVES) if len(c_logs) >= MIN_GAMES else (r3 >= HIT_THRESH_SAVES)
+        if not qualifies:
+            continue
         score = round((r2 + r3) / 2 if c_logs else r3, 1)
 
-        # NEW: real sportsbook line (player_points market) — fuzzy name match
-        real_line, real_odds = None, ""
-        for odds_name, sb_info in pts_lines_map.items():
-            if _match_odds_name(odds_name, [{"name": player["name"]}]):
-                real_line = sb_info.get("line")
-                real_odds = sb_info.get("odds", "")
-                break
-
-        vsl_hits, vsl_total, vsl_rate = 0, 0, 0.0
         gap, tag = None, ""
-        if real_line is not None and r_logs:
-            vsl_hits = sum(1 for g in r_logs if g["points"] > real_line)
-            vsl_total = len(r_logs)
-            vsl_rate = round(vsl_hits / vsl_total * 100, 1) if vsl_total else 0.0
+        if real_line is not None:
             gap = round(avg3 - real_line, 2)
-            tag = _book_tag(real_line, avg3, vsl_rate)
+            tag = _book_tag(real_line, avg3, r3)
+
+        uline = base_line
+        u_hits = sum(1 for g in r_logs if g["saves"] < uline)
+        u_rate = round(u_hits / len(r_logs) * 100, 1) if r_logs else 0.0
+
+        g_src = c_logs or r_logs
+        glog = [{"d": g["date"], "v": g["saves"]} for g in g_src]
 
         picks.append({
-            "name":     player["name"],
-            "pid":      player["id"],
-            "team":     team,
-            "opponent": opp,
-            "homeRoad": hr,
-            "oppSA":    sa_map.get(opp, 0.0),
-            "realLine": real_line,
-            "realOdds": real_odds,
-            "vsLineHits": vsl_hits, "vsLineTotal": vsl_total, "vsLineRate": vsl_rate,
+            "name": goalie["name"], "pid": goalie["id"], "team": team,
+            "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
+            "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
+            "mkt": "Goalie Saves", "dispLine": base_line,
+            "avg": avg3, "avgA": avg2,
+            "rateA": r2, "hitsA": h2, "totA": len(c_logs),
+            "rateB": r3, "hitsB": h3, "totB": len(r_logs),
+            "dispScore": score,
+            "vsLineHits": (h3 if real_line is not None else 0),
+            "vsLineTotal": (len(r_logs) if real_line is not None else 0),
+            "vsLineRate": (r3 if real_line is not None else 0.0),
             "gap": gap, "tag": tag,
-            "ptsOppAvg":  avg2,
-            "ptsHa10avg": avg3,
-            "pts2Hits":  h2, "pts2Total": len(c_logs), "pts2Rate": r2,
-            "pts3Hits":  h3, "pts3Total": len(r_logs), "pts3Rate": r3,
-            "ptsScore":  score,
+            "underHits": u_hits, "underTotal": len(r_logs),
+            "underRate": u_rate, "underLine": uline,
+            "glog": glog,
         })
 
-    picks.sort(key=lambda x: (x["ptsScore"], x["oppSA"]), reverse=True)
-    print(f"[PTS] {len(picks)} players qualifying at {HIT_THRESH_PTS}%+ hit rate")
+    picks.sort(key=lambda x: (x["dispScore"], x["avg"]), reverse=True)
+    print(f"[SAVES] {len(picks)} goalies qualifying at {HIT_THRESH_SAVES}%+")
     return picks
 
 
@@ -605,7 +828,7 @@ async def run_picks(target_date: str = None) -> Dict:
         get_team_sa_map(season),
         get_shot_lines(target_date),
     )
-    lines_map, pts_lines_map = _lines_tuple
+    lines_map, pts_lines_map, ast_lines_map, sv_lines_map = _lines_tuple
     _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
 
     # SA rankings for display
@@ -660,6 +883,15 @@ async def run_picks(target_date: str = None) -> Dict:
             gap = round(avg3 - real_line, 2)
             tag = _book_tag(real_line, avg3, vsl_rate)
 
+        # Under track + game log for the per-card dropdown
+        uline = real_line if real_line is not None else line
+        _ha = [g for g in logs if g["homeRoad"] == hr][:10]
+        u_total = len(_ha)
+        u_hits = sum(1 for g in _ha if g["shots"] < uline)
+        u_rate = round(u_hits / u_total * 100, 1) if u_total else 0.0
+        _gsrc = ([g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10] or _ha)
+        glog = [{"d": g["date"], "v": g["shots"]} for g in _gsrc]
+
         return {
             **p,
             "step2Hits": h2, "step2Total": t2, "step2Rate": r2,
@@ -667,6 +899,16 @@ async def run_picks(target_date: str = None) -> Dict:
             "oppAvg": avg2, "ha10avg": avg3, "score": score,
             "vsLineHits": vsl_hits, "vsLineTotal": vsl_total, "vsLineRate": vsl_rate,
             "gap": gap, "tag": tag,
+            "mkt": "Shots on Goal",
+            "dispLine": (real_line if real_line is not None else line),
+            "avg": avg3, "avgA": avg2,
+            "rateA": r2, "hitsA": h2, "totA": t2,
+            "rateB": r3, "hitsB": h3, "totB": t3,
+            "dispScore": score,
+            "realUnderOdds": p.get("realUnderOdds", ""),
+            "underHits": u_hits, "underTotal": u_total,
+            "underRate": u_rate, "underLine": uline,
+            "glog": glog,
         }
 
     completed = [0]
@@ -685,7 +927,10 @@ async def run_picks(target_date: str = None) -> Dict:
     # ── Step 4 - rank shots & run independent points picks ───────────────────
     picks.sort(key=lambda x: (x["score"], x["oppSA"]), reverse=True)
 
-    pts_all = await get_pts_picks(games, sa_map, sem_nhl, season, pts_lines_map)
+    pts_all, ast_all = await get_pts_picks(
+        games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map)
+    _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
+    saves_all = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
 
     _result = {
@@ -693,11 +938,18 @@ async def run_picks(target_date: str = None) -> Dict:
         "rest":          picks[TOP_N:],
         "ptsPicks":      pts_all[:TOP_N],
         "ptsRest":       pts_all[TOP_N:],
+        "astPicks":      ast_all[:TOP_N],
+        "astRest":       ast_all[TOP_N:],
+        "savesPicks":    saves_all[:TOP_N],
+        "savesRest":     saves_all[TOP_N:],
         "games":         games,
         "sa_ranks":      sa_ranks,
         "poolSize":      len(pool),
         "qualified":     len(picks),
         "ptsQualified":  len(pts_all),
+        "astQualified":  len(ast_all),
+        "savesQualified": len(saves_all),
+        "season":        season,
         "targetDate":    target_date,
         "runTime":       datetime.utcnow().isoformat() + "Z",
         "date":          target_date,
@@ -816,6 +1068,68 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 body.is-admin .admin-only{display:inline-block !important}
 #parlayCard{display:none}
 body.is-admin #parlayCard{display:block}
+/* ===== NBA-style trading cards ===== */
+.picks-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:10px}
+.pick-card{position:relative;background:linear-gradient(160deg,#1a1a1a,#121212);border:1px solid #2a2a2a;border-radius:18px;padding:18px 16px 14px;overflow:hidden;transition:border-color .2s,transform .2s}
+.pick-card:hover{border-color:#f59e0b;transform:translateY(-2px)}
+.pick-card.acc-pts{border-top:3px solid #60a5fa}
+.pick-card.acc-shots{border-top:3px solid #f59e0b}
+.pick-card.acc-ast{border-top:3px solid #a78bfa}
+.pick-card.acc-sv{border-top:3px solid #34d399}
+.pc-rank{position:absolute;top:10px;right:14px;font-family:'Playfair Display',serif;font-weight:900;font-size:1.6rem;color:rgba(245,158,11,.35)}
+.pc-top{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.hs-wrap{position:relative;width:58px;height:58px;border-radius:50%;flex:0 0 auto;background:#222;border:2px solid #333;overflow:visible;display:flex;align-items:center;justify-content:center}
+.hs-img{width:100%;height:100%;object-fit:cover;position:absolute;inset:0;z-index:2;border-radius:50%}
+.hs-ini{font-family:'Playfair Display',serif;font-weight:800;font-size:1.2rem;color:#9ca3af;z-index:1}
+.pc-logo{width:22px;height:22px;position:absolute;bottom:-3px;right:-3px;z-index:3;background:#0f0f0f;border-radius:50%;padding:1px}
+.pc-id{flex:1;min-width:0}
+.pc-name{font-weight:800;color:#fff;font-size:1.02rem;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-meta{font-size:.74rem;color:#9ca3af;margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.pc-mkt{display:inline-block;font-size:.6rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;margin-top:4px}
+.pc-tagrow{min-height:1px;margin-bottom:8px}
+.pc-line-row{display:flex;align-items:center;justify-content:space-between;background:#0e0e0e;border:1px solid #242424;border-radius:10px;padding:8px 12px;margin-bottom:10px}
+.pc-line-row .ln{font-weight:900;color:#4ade80;font-size:1.05rem}
+.pc-line-row .od{color:#6b7280;font-size:.76rem}
+.pc-line-row .est{background:rgba(245,158,11,.08);color:#f59e0b;border:1px solid rgba(245,158,11,.2);padding:2px 8px;border-radius:5px;font-size:.82rem;font-weight:700}
+.pc-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.pc-stat{background:#141414;border:1px solid #222;border-radius:9px;padding:8px;text-align:center}
+.pc-stat .k{font-size:.56rem;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;font-weight:700}
+.pc-stat .v{font-weight:800;font-size:.92rem;margin-top:3px}
+.pc-foot{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pc-score{font-family:'Playfair Display',serif;font-weight:900;color:#f59e0b;font-size:1.15rem}
+.pc-tap{background:none;border:1px solid #333;color:#9ca3af;border-radius:8px;padding:6px 10px;font-size:.7rem;font-weight:700;cursor:pointer;transition:all .2s}
+.pc-tap:hover{border-color:#f59e0b;color:#f59e0b}
+.uplays{background:#141414;border:1px solid #242424;border-radius:14px;padding:4px 4px;margin-bottom:10px}
+.uprow{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-bottom:1px solid #1c1c1c;cursor:pointer}
+.uprow:last-child{border-bottom:none}
+.uprow:hover{background:#1a1a1a}
+.uprow .nm{font-weight:700;color:#fff;font-size:.82rem}
+.uprow .mt{color:#6b7280;font-size:.72rem;margin-top:2px}
+.special-wrap{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:10px}
+@media(max-width:680px){.special-wrap{grid-template-columns:1fr}}
+.sp-col{background:#141414;border:1px solid #242424;border-radius:14px;padding:14px}
+.sp-col h4{font-size:.72rem;font-weight:800;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
+.sp-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 6px;border-bottom:1px solid #1c1c1c;cursor:pointer}
+.sp-row:last-child{border-bottom:none}
+.sp-row:hover{background:#1a1a1a}
+.sp-row .nm{font-weight:700;color:#fff;font-size:.82rem}
+.sp-row .mt{color:#6b7280;font-size:.72rem;margin-top:2px}
+.lad-ov{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:200;display:flex;align-items:center;justify-content:center;padding:18px}
+.lad-modal{background:#161616;border:1px solid #2a2a2a;border-radius:18px;max-width:460px;width:100%;max-height:86vh;overflow-y:auto;padding:22px}
+.lad-modal h3{font-family:'Playfair Display',serif;color:#fff;font-size:1.25rem;margin-bottom:2px}
+.lad-sub{color:#9ca3af;font-size:.8rem;margin-bottom:14px}
+.lad-close{float:right;background:none;border:1px solid #333;color:#9ca3af;border-radius:8px;padding:4px 10px;cursor:pointer;font-weight:700}
+.lad-glog{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 14px}
+.glchip{background:#0e0e0e;border:1px solid #242424;border-radius:8px;padding:6px 8px;text-align:center;min-width:44px}
+.glchip .d{font-size:.56rem;color:#6b7280}
+.glchip .v{font-weight:800;font-size:.95rem;margin-top:2px;color:#e5e7eb}
+.glchip.hit{border-color:rgba(74,222,128,.35)}
+.glchip.hit .v{color:#4ade80}
+.glchip.miss .v{color:#f87171}
+.lad-stat{display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:1px solid #1c1c1c;font-size:.85rem}
+.lad-stat:last-child{border-bottom:none}
+.lad-stat .k{color:#9ca3af}
+.lad-stat .v{font-weight:700}
 </style>
 </head>
 <body>
@@ -829,7 +1143,7 @@ body.is-admin #parlayCard{display:block}
 <div class="page">
   <div class="app-hdr">
     <h1>NHL <span>Money Shots</span></h1>
-    <p>Shots on Goal &nbsp;·&nbsp; Points</p>
+    <p>Shots &nbsp;·&nbsp; Points &nbsp;·&nbsp; Assists &nbsp;·&nbsp; Goalie Saves</p>
   </div>
 
   <div class="card" style="text-align:center">
@@ -849,7 +1163,7 @@ body.is-admin #parlayCard{display:block}
     <div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">
       <label style="color:#9ca3af;font-size:.85rem;font-weight:600">Legs
         <select id="parlayLegs" style="background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:8px;padding:8px 12px;font-size:.9rem;font-weight:700;margin-left:6px">
-          <option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option>
+          <option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
         </select>
       </label>
       <button class="btn-run" onclick="buildParlay()">Build Best Parlay</button>
@@ -924,10 +1238,9 @@ function _fmtOdds(o){if(o==null||o==='')return null;var s=String(o).trim();if(!s
 function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(odds);if(isNaN(a)||a===0)return true;return a>=-500;}
 function _legScore(c){return (c.hasOdds?1:0)*1e9+(c.rate||0)*1e4+(c.dec?Math.min(c.dec,11)*100:0);}
 function _nhlLeg(p){
-  var isPts=(p.pts2Hits!=null||p.pts3Hits!=null||p.ptsHa10avg!=null);
-  var market=isPts?'Points':'Shots on Goal';
-  var line=(p.realLine!=null?p.realLine:(isPts?null:1.5));
-  var rate=isPts?(p.vsLineRate||p.pts3Rate||p.pts2Rate||0):(p.vsLineRate||p.step3Rate||p.step2Rate||0);
+  var market=p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
+  var line=(p.realLine!=null?p.realLine:(p.dispLine!=null?p.dispLine:1.5));
+  var rate=(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
   var odds=p.realOdds||'';var dec=_amToDec(odds);
   return {player:p.name,team:p.team||'',opp:p.opponent||'',market:market,dir:'OVER',line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec};
 }
@@ -1057,6 +1370,119 @@ async function runPicks(){
 
 function rateClass(r){ return r >= 90 ? 'green' : r >= 80 ? 'gold' : 'red-txt'; }
 
+// ===== NBA-style cards (NHL) =====
+window.__NHLLAD__ = window.__NHLLAD__ || {};
+function _initials(name){
+  var parts=String(name||'').trim().split(/\s+/);
+  if(!parts.length||!parts[0]) return '?';
+  if(parts.length===1) return parts[0].slice(0,2).toUpperCase();
+  return (parts[0][0]+parts[parts.length-1][0]).toUpperCase();
+}
+function _accFor(mkt){
+  if(mkt==='Points (1+)') return 'acc-pts';
+  if(mkt==='Assists (1+)') return 'acc-ast';
+  if(mkt==='Goalie Saves') return 'acc-sv';
+  return 'acc-shots';
+}
+function _ladKey(p){ return 'nlad_'+p.pid+'_'+String(p.mkt||'').replace(/[^a-z]/gi,''); }
+function _rateHtml(rate,hits,tot){
+  if(!tot) return '<span class="gray">—</span>';
+  return '<span class="'+rateClass(rate)+'">'+hits+'/'+tot+' ('+rate+'%)</span>';
+}
+function nhlCard(p,i){
+  var season=(window.__NHL_SEASON__||'20252026');
+  var key=_ladKey(p); window.__NHLLAD__[key]=p;
+  var ha=p.homeRoad==='H';
+  var head='https://assets.nhle.com/mugs/nhl/'+season+'/'+p.team+'/'+p.pid+'.png';
+  var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
+  var lineHtml=(p.realLine!=null)
+    ? `<span class="ln">${p.dispLine}</span> <span class="od">${p.realOdds||''}</span>`
+    : `<span class="est">~${p.dispLine}</span>`;
+  var lastStat=(p.realLine!=null&&p.vsLineTotal)
+    ? `<div class="pc-stat"><div class="k">vs Book L10</div><div class="v ${rateClass(p.vsLineRate)}">${p.vsLineHits}/${p.vsLineTotal} (${p.vsLineRate}%)</div></div>`
+    : `<div class="pc-stat"><div class="k">Under L10</div><div class="v ${rateClass(p.underRate)}">${p.underHits}/${p.underTotal} (${p.underRate}%)</div></div>`;
+  return `
+   <div class="pick-card ${_accFor(p.mkt)}">
+     <div class="pc-rank">${i}</div>
+     <div class="pc-top">
+       <div class="hs-wrap"><span class="hs-ini">${_initials(p.name)}</span>
+         <img class="hs-img" src="${head}" onerror="this.style.display='none'"/>
+         <img class="pc-logo" src="${logo}" onerror="this.style.display='none'"/>
+       </div>
+       <div class="pc-id">
+         <div class="pc-name">${p.name}</div>
+         <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></div>
+         <div class="pc-mkt">${p.mkt||''}</div>
+       </div>
+     </div>
+     <div class="pc-tagrow">${fmtTag(p.tag)}</div>
+     <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Line</span></div>
+     <div class="pc-stats">
+       <div class="pc-stat"><div class="k">Career vs ${p.opponent}</div><div class="v">${_rateHtml(p.rateA,p.hitsA,p.totA)}</div></div>
+       <div class="pc-stat"><div class="k">L10 ${ha?'Home':'Away'}</div><div class="v">${_rateHtml(p.rateB,p.hitsB,p.totB)}</div></div>
+       <div class="pc-stat"><div class="k">Avg</div><div class="v gold">${p.avg}</div></div>
+       ${lastStat}
+     </div>
+     <div class="pc-foot"><span class="pc-score">${p.dispScore}</span>
+       <button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></div>
+   </div>`;
+}
+function nhlCardGrid(picks){
+  if(!picks||!picks.length) return '<div class="no-picks">No qualifying picks for this market.</div>';
+  return '<div class="picks-grid">'+picks.map(function(p,i){return nhlCard(p,i+1);}).join('')+'</div>';
+}
+function _spRow(p){
+  var key=_ladKey(p); window.__NHLLAD__[key]=p;
+  var best=Math.max(p.rateA||0,p.rateB||0);
+  return `<div class="sp-row" onclick="openNhlLadder('${key}')"><div><div class="nm">${p.name}</div><div class="mt">${p.team} vs ${p.opponent} · ${p.dispLine}</div></div><div class="${rateClass(best)}" style="font-weight:800">${best}%</div></div>`;
+}
+function _spCol(title,picks){
+  var rows=(picks||[]).slice(0,8).map(_spRow).join('')||'<div class="mt" style="color:#6b7280;padding:6px">None</div>';
+  return `<div class="sp-col"><h4>${title}</h4>${rows}</div>`;
+}
+function _underBox(picks){
+  var u=(picks||[]).filter(function(p){return p.underTotal>=2 && p.underRate>=60;})
+      .sort(function(a,b){return b.underRate-a.underRate;}).slice(0,8);
+  if(!u.length) return '';
+  var rows=u.map(function(p){
+    var key=_ladKey(p); window.__NHLLAD__[key]=p;
+    return `<div class="uprow" onclick="openNhlLadder('${key}')"><div><div class="nm">${p.name}</div><div class="mt">${p.team} vs ${p.opponent} · under ${p.underLine}</div></div><div class="${rateClass(p.underRate)}" style="font-weight:800">${p.underHits}/${p.underTotal} (${p.underRate}%)</div></div>`;
+  }).join('');
+  return '<div class="uplays">'+rows+'</div>';
+}
+function openNhlLadder(key){
+  var p=window.__NHLLAD__[key]; if(!p) return;
+  var line=p.dispLine;
+  var chips=(p.glog||[]).map(function(g){
+    var hit=g.v>line; var cls=hit?'hit':'miss';
+    var d=String(g.d||'').slice(5);
+    return `<div class="glchip ${cls}"><div class="d">${d}</div><div class="v">${g.v}</div></div>`;
+  }).join('');
+  if(!chips) chips='<span class="gray">No game log available.</span>';
+  var vslRow=(p.realLine!=null&&p.vsLineTotal)
+    ? `<div class="lad-stat"><span class="k">Hits vs Book Line (${p.realLine}) L10</span><span class="v ${rateClass(p.vsLineRate)}">${p.vsLineHits}/${p.vsLineTotal} (${p.vsLineRate}%)</span></div>`
+    : '';
+  var html=`
+    <div class="lad-modal" onclick="event.stopPropagation()">
+      <button class="lad-close" onclick="closeNhlLadder()">✕</button>
+      <h3>${p.name}</h3>
+      <div class="lad-sub">${p.mkt} · ${p.team} vs ${p.opponent} · Line ${p.dispLine}</div>
+      <div style="font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin-bottom:4px">Recent Games (green = over line)</div>
+      <div class="lad-glog">${chips}</div>
+      <div class="lad-stat"><span class="k">Career vs ${p.opponent}</span><span class="v">${_rateHtml(p.rateA,p.hitsA,p.totA)}</span></div>
+      <div class="lad-stat"><span class="k">L10 ${p.homeRoad==='H'?'Home':'Away'}</span><span class="v">${_rateHtml(p.rateB,p.hitsB,p.totB)}</span></div>
+      ${vslRow}
+      <div class="lad-stat"><span class="k">Under Line L10</span><span class="v ${rateClass(p.underRate)}">${p.underHits}/${p.underTotal} (${p.underRate}%)</span></div>
+      <div class="lad-stat"><span class="k">Average</span><span class="v gold">${p.avg}</span></div>
+      <div class="lad-stat"><span class="k">Score</span><span class="v" style="color:#f59e0b">${p.dispScore}</span></div>
+    </div>`;
+  var ov=document.createElement('div');
+  ov.className='lad-ov'; ov.id='nhlLadOv'; ov.onclick=closeNhlLadder;
+  ov.innerHTML=html;
+  document.body.appendChild(ov);
+}
+function closeNhlLadder(){var o=document.getElementById('nhlLadOv');if(o)o.remove();}
+
 function fmtTag(t){
   if(t==='SUGGESTED') return '<span class="tag-sug">⭐ PICK</span>';
   if(t==='FADE')      return '<span class="tag-fade">⚠ FADE</span>';
@@ -1129,16 +1555,45 @@ function buildTable(picks, startNum){
   return '<div class="tbl-wrap"><table>' + thead + '<tbody>' + rows + '</tbody></table></div>';
 }
 
+function buildNormTable(picks, startNum){
+  var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
+    '<th>BOOK</th><th>AVG vs OPP</th><th>AVG L10 H/A</th><th>HITS BOOK L10</th>' +
+    '<th>GAP vs BOOK</th><th>Career vs OPP</th><th>L10 H/A</th><th>SCORE</th><th>TAG</th></tr></thead>';
+  var rows = '';
+  picks.forEach(function(p, i){
+    var ha = p.homeRoad === 'H';
+    var num = startNum + i;
+    rows += '<tr>' +
+      '<td>' + (startNum === 1 ? '<span class="rk-num">' + num + '</span>' : '<span class="rk-rest">' + num + '</span>') + '</td>' +
+      '<td><span class="pname">' + p.name + '</span></td>' +
+      '<td><span class="tbadge">' + p.team + '</span></td>' +
+      '<td><span class="tbadge">' + p.opponent + '</span></td>' +
+      '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
+      '<td>' + (p.realLine!=null ? '<span class="real-line">' + p.dispLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.dispLine + '</span>') + '</td>' +
+      '<td><span class="gold">' + p.avgA + '</span></td>' +
+      '<td><span class="gold">' + p.avg + '</span></td>' +
+      '<td>' + fmtVsLine(p) + '</td>' +
+      '<td>' + fmtGap(p.gap) + '</td>' +
+      '<td>' + _rateHtml(p.rateA,p.hitsA,p.totA) + '</td>' +
+      '<td>' + _rateHtml(p.rateB,p.hitsB,p.totB) + '</td>' +
+      '<td><span class="score">' + p.dispScore + '</span></td>' +
+      '<td>' + fmtTag(p.tag) + '</td>' +
+      '</tr>';
+  });
+  return '<div class="tbl-wrap"><table>' + thead + '<tbody>' + rows + '</tbody></table></div>';
+}
+
 function renderResults(d){
+  window.__NHL_SEASON__ = d.season || '20252026';
   var h = '';
 
   // Chips
   h += '<div class="chips">' +
     '<div class="chip"><div class="val">' + d.games.length + '</div><div class="lbl">Games</div></div>' +
-    '<div class="chip"><div class="val">' + d.poolSize + '</div><div class="lbl">Pool</div></div>' +
-    '<div class="chip"><div class="val">' + d.qualified + '</div><div class="lbl">Qualified</div></div>' +
-    '<div class="chip"><div class="val">' + d.picks.length + '</div><div class="lbl">Top Picks</div></div>' +
-    '<div class="chip"><div class="val">70%</div><div class="lbl">Min Rate</div></div>' +
+    '<div class="chip"><div class="val">' + ((d.picks||[]).length) + '</div><div class="lbl">Shots</div></div>' +
+    '<div class="chip"><div class="val">' + ((d.ptsPicks||[]).length) + '</div><div class="lbl">Points</div></div>' +
+    '<div class="chip"><div class="val">' + ((d.astPicks||[]).length) + '</div><div class="lbl">Assists</div></div>' +
+    '<div class="chip"><div class="val">' + ((d.savesPicks||[]).length) + '</div><div class="lbl">Saves</div></div>' +
     '</div>';
 
   // Games
@@ -1156,33 +1611,42 @@ function renderResults(d){
   });
   h += '</div>';
 
-  // Top picks
-  h += '<div class="sec">Top ' + d.picks.length + ' Money Shots</div>';
-  if(!d.picks.length){
-    h += '<div class="no-picks">No players met the 80% hit rate threshold for this date.</div>';
-  } else {
-    h += buildTable(d.picks, 1);
+  // SHOTS cards (OVER)
+  h += '<div class="sec">🏒 Top ' + ((d.picks||[]).length) + ' Shots on Goal — OVER</div>';
+  h += nhlCardGrid(d.picks);
+
+  // Shots UNDER track
+  var ub = _underBox((d.picks||[]).concat(d.rest||[]));
+  if(ub){ h += '<div class="sec">⬇ Shots UNDER Track</div>' + ub; }
+
+  // POINTS cards
+  if((d.ptsPicks||[]).length){
+    h += '<div class="sec">🎯 Top ' + d.ptsPicks.length + ' Points (1+)</div>';
+    h += nhlCardGrid(d.ptsPicks);
+  }
+  // ASSISTS cards
+  if((d.astPicks||[]).length){
+    h += '<div class="sec">🅰️ Top ' + d.astPicks.length + ' Assists (1+)</div>';
+    h += nhlCardGrid(d.astPicks);
+  }
+  // SAVES cards
+  if((d.savesPicks||[]).length){
+    h += '<div class="sec">🧤 Top ' + d.savesPicks.length + ' Goalie Saves</div>';
+    h += nhlCardGrid(d.savesPicks);
   }
 
-  // Also qualified
-  if(d.rest && d.rest.length){
-    h += '<div class="sec">Also Qualified -- ' + d.rest.length + ' More Players</div>';
-    h += buildTable(d.rest, d.picks.length + 1);
+  // SPECIAL — best plays, NBA-style 2-col boxes
+  h += '<div class="sec">⭐ Special — Best Plays</div>';
+  h += '<div class="special-wrap">' + _spCol('Shot Plays', d.picks) + _spCol('Point Plays', d.ptsPicks||[]) + '</div>';
+  if(((d.astPicks||[]).length)||((d.savesPicks||[]).length)){
+    h += '<div class="special-wrap">' + _spCol('Assist Plays', d.astPicks||[]) + _spCol('Save Plays', d.savesPicks||[]) + '</div>';
   }
 
-  // POINTS SECTION
-  if(d.ptsPicks && d.ptsPicks.length){
-    h += '<div class="sec">- Top ' + d.ptsPicks.length + ' Points Picks (1+ Point)</div>';
-    h += buildPtsTable(d.ptsPicks, 1);
-    if(d.ptsRest && d.ptsRest.length){
-      h += '<div class="sec">Also Qualified for Points -- ' + d.ptsRest.length + ' More</div>';
-      h += buildPtsTable(d.ptsRest, d.ptsPicks.length + 1);
-    }
-  }
-
-  // All Plays by Game - collapsible
+  // All Plays by Game - collapsible (shots + points detail tables)
   var allPlays = (d.picks||[]).concat(d.rest||[])
-    .concat(d.ptsPicks||[]).concat(d.ptsRest||[]);
+    .concat(d.ptsPicks||[]).concat(d.ptsRest||[])
+    .concat(d.astPicks||[]).concat(d.astRest||[])
+    .concat(d.savesPicks||[]).concat(d.savesRest||[]);
   window.__NHL_PLAYS__=allPlays;
   if(allPlays.length && d.games && d.games.length){
     h += '<div class="sec" style="margin-top:32px">All Plays by Game</div>';
@@ -1193,14 +1657,16 @@ function renderResults(d){
                p.opponent===g.homeTeam || p.opponent===g.awayTeam;
       });
       if(!gamePlays.length) return;
-      var shots = gamePlays.filter(function(p){return p.step2Hits!=null;});
-      var pts   = gamePlays.filter(function(p){return p.pts2Hits!=null;});
+      var shots = gamePlays.filter(function(p){return p.mkt==='Shots on Goal';});
+      var pts   = gamePlays.filter(function(p){return p.mkt==='Points (1+)';});
+      var ast   = gamePlays.filter(function(p){return p.mkt==='Assists (1+)';});
+      var sv    = gamePlays.filter(function(p){return p.mkt==='Goalie Saves';});
       h += '<div style="margin-bottom:10px">';
       h += '<div onclick="nhlToggle('+gi+')" style="background:#161616;border:1px solid #262626;border-radius:12px;padding:12px 18px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">';
       h += '<span style="font-weight:700;color:#fff;font-size:.92rem">' + gameName + '</span>';
       h += '<div style="display:flex;align-items:center;gap:10px">';
       h += '<span style="background:rgba(245,158,11,.1);color:#f59e0b;padding:3px 12px;border-radius:999px;font-size:.75rem;font-weight:700">';
-      h += shots.length + ' shots | ' + pts.length + ' pts</span>';
+      h += shots.length + ' shots | ' + pts.length + ' pts | ' + ast.length + ' ast | ' + sv.length + ' sv</span>';
       h += '<button id="nhltoggle_btn_'+gi+'" onclick="event.stopPropagation();nhlToggle('+gi+')" style="background:none;border:1px solid #374151;color:#9ca3af;border-radius:6px;padding:3px 12px;font-size:.72rem;cursor:pointer">Expand</button>';
       h += '</div></div>';
       h += '<div id="nhltoggle_'+gi+'" style="display:none;margin-top:6px">';
@@ -1211,6 +1677,14 @@ function renderResults(d){
       if(pts.length){
         h += '<div style="font-size:.72rem;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;padding:8px 12px 4px">Points</div>';
         h += buildPtsTable(pts, 1);
+      }
+      if(ast.length){
+        h += '<div style="font-size:.72rem;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;padding:8px 12px 4px">Assists</div>';
+        h += buildNormTable(ast, 1);
+      }
+      if(sv.length){
+        h += '<div style="font-size:.72rem;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;padding:8px 12px 4px">Goalie Saves</div>';
+        h += buildNormTable(sv, 1);
       }
       h += '</div></div>';
     });
