@@ -814,6 +814,8 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 .ft-logo{font-family:'Playfair Display',serif;color:#f59e0b;font-weight:700;font-size:.95rem;margin-bottom:6px}
 .admin-only{display:none !important}
 body.is-admin .admin-only{display:inline-block !important}
+#parlayCard{display:none}
+body.is-admin #parlayCard{display:block}
 </style>
 </head>
 <body>
@@ -839,6 +841,21 @@ body.is-admin .admin-only{display:inline-block !important}
     </div>
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
     <button class="btn-run admin-only" id="runBtn" onclick="runPicks()" style="margin-left:10px">Run Picks</button>
+  </div>
+
+  <div class="card" id="parlayCard" style="text-align:center;max-width:600px;margin:20px auto 0">
+    <h2 style="font-family:'Playfair Display',serif;font-size:1.3rem;font-weight:700;color:#fff;margin-bottom:6px">🎰 Auto Parlay Builder <span style="font-size:.7rem;color:#777;font-family:sans-serif">admin only</span></h2>
+    <p style="font-size:.74rem;color:#888;margin-bottom:14px">Best available legs from today&#39;s board — priced odds combined</p>
+    <div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">
+      <label style="color:#9ca3af;font-size:.85rem;font-weight:600">Legs
+        <select id="parlayLegs" style="background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:8px;padding:8px 12px;font-size:.9rem;font-weight:700;margin-left:6px">
+          <option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option>
+        </select>
+      </label>
+      <button class="btn-run" onclick="buildParlay()">Build Best Parlay</button>
+      <button class="btn-run" onclick="generateParlay()" style="background:#1f2937">🎲 Generate New</button>
+    </div>
+    <div id="parlayResult" style="margin-top:16px;text-align:left"></div>
   </div>
 
   <div class="status-msg" id="statusMsg"></div>
@@ -899,6 +916,71 @@ document.addEventListener('DOMContentLoaded',checkStatus);
 })();
 function _applyAdmin(){if(window.IS_ADMIN){document.body&&document.body.classList.add('is-admin');}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;document.body&&document.body.classList.add('is-admin');}}).catch(function(){});}}}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_applyAdmin);}else{_applyAdmin();}
+
+// ===== Admin Auto Parlay Builder (NHL) =====
+function _amToDec(a){var s=String(a==null?'':a).replace('+','').trim();var n=parseFloat(s);if(!n||isNaN(n))return null;return n>0?1+n/100:1+100/Math.abs(n);}
+function _decToAm(d){if(!d||d<=1)return null;return d>=2?'+'+Math.round((d-1)*100):'-'+Math.round(100/(d-1));}
+function _fmtOdds(o){if(o==null||o==='')return null;var s=String(o).trim();if(!s||s==='0')return null;return (s.charAt(0)==='-'||s.charAt(0)==='+')?s:'+'+s;}
+function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(odds);if(isNaN(a)||a===0)return true;return a>=-500;}
+function _legScore(c){return (c.hasOdds?1:0)*1e9+(c.rate||0)*1e4+(c.dec?Math.min(c.dec,11)*100:0);}
+function _nhlLeg(p){
+  var isPts=(p.pts2Hits!=null||p.pts3Hits!=null||p.ptsHa10avg!=null);
+  var market=isPts?'Points':'Shots on Goal';
+  var line=(p.realLine!=null?p.realLine:(isPts?null:1.5));
+  var rate=isPts?(p.vsLineRate||p.pts3Rate||p.pts2Rate||0):(p.vsLineRate||p.step3Rate||p.step2Rate||0);
+  var odds=p.realOdds||'';var dec=_amToDec(odds);
+  return {player:p.name,team:p.team||'',opp:p.opponent||'',market:market,dir:'OVER',line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec};
+}
+function _parlayPool(){
+  var plays=window.__NHL_PLAYS__||[];var byP={};
+  plays.forEach(function(p){
+    if(!p||!p.name)return;
+    var c=_nhlLeg(p);
+    if(!_floorOk(c.odds))return;
+    var cur=byP[c.player];
+    if(!cur||_legScore(c)>_legScore(cur))byP[c.player]=c;
+  });
+  return Object.keys(byP).map(function(k){return byP[k];}).sort(function(a,b){return _legScore(b)-_legScore(a);});
+}
+function _shuffle(a){for(var i=a.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1));var t=a[i];a[i]=a[j];a[j]=t;}return a;}
+function closeParlay(){var o=document.getElementById('parlayResult');if(o)o.innerHTML='';}
+function buildParlay(){_renderParlay(false);}
+function generateParlay(){_renderParlay(true);}
+function _renderParlay(randomize){
+  var sel=document.getElementById('parlayLegs');
+  var n=parseInt(sel?sel.value:'3',10)||3;
+  var out=document.getElementById('parlayResult');
+  if(!out)return;
+  var cands=_parlayPool();
+  if(!cands.length){out.innerHTML='<div style="color:#888;padding:10px">Run today&#39;s picks first, then build a parlay.</div>';return;}
+  if(cands.length<n){out.innerHTML='<div style="color:#f87171;padding:10px">Only '+cands.length+' qualifying play'+(cands.length!==1?'s':'')+' on the board. Pick a smaller parlay.</div>';return;}
+  function _pick(ordered,avoid){var used={},picked=[],i,c;for(i=0;i<ordered.length&&picked.length<n;i++){c=ordered[i];if(used[c.player])continue;if(avoid&&avoid[c.player])continue;used[c.player]=1;picked.push(c);}for(i=0;i<ordered.length&&picked.length<n;i++){c=ordered[i];if(used[c.player])continue;used[c.player]=1;picked.push(c);}return picked;}
+  var legs;
+  if(randomize){var avoid=null;if(window._lastParlay&&window._lastParlay.length){avoid={};window._lastParlay.forEach(function(pl){avoid[pl]=1;});}legs=_pick(_shuffle(cands.slice()),avoid).sort(function(a,b){return _legScore(b)-_legScore(a);});}
+  else{legs=_pick(cands.slice(),null);}
+  window._lastParlay=legs.map(function(l){return l.player;});
+  var dec=1,priced=0,missing=0;
+  legs.forEach(function(l){if(l.dec){dec*=l.dec;priced++;}else{missing++;}});
+  var am=priced?_decToAm(dec):null;var payout=priced?(100*dec):null;
+  var dirColor=function(d){return d==='OVER'?'#4ade80':d==='UNDER'?'#f87171':'#9ca3af';};
+  var rows=legs.map(function(l,i){var fo=_fmtOdds(l.odds);return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid #1a1a1a">'
+    +'<div style="min-width:0">'
+    +'<div style="font-weight:800;color:#fff;font-size:.85rem">'+(i+1)+'. '+l.player+' <span style="color:#777;font-size:.7rem">'+l.team+(l.opp?(' vs '+l.opp):'')+'</span></div>'
+    +'<div style="color:#999;font-size:.72rem;margin-top:2px">'+l.market+(l.line!=null?(' · line '+l.line):'')+(l.rate?(' · '+l.rate+'% hit'):'')+'</div>'
+    +'</div>'
+    +'<div style="text-align:right;white-space:nowrap">'
+    +'<div style="color:'+dirColor(l.dir)+';font-weight:900;font-size:.8rem">'+l.dir+'</div>'
+    +'<div style="color:#f59e0b;font-size:.72rem;font-weight:800">'+(fo||'odds N/A')+'</div>'
+    +'</div></div>';}).join('');
+  var header='<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid #262626;background:#121212">'
+    +'<span style="font-weight:800;color:#ccc;font-size:.74rem">'+(randomize?'RANDOM MIX':'TOP PLAYS')+'</span>'
+    +'<span onclick="closeParlay()" title="Close" style="cursor:pointer;color:#888;font-weight:900;font-size:1.15rem;line-height:1;padding:0 6px">×</span></div>';
+  var summary='<div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:linear-gradient(135deg,rgba(245,158,11,.12),rgba(245,158,11,.02));border-top:1px solid #262626">'
+    +'<div style="font-weight:900;color:#f59e0b">'+n+'-LEG PARLAY</div>'
+    +'<div style="text-align:right">'+(am?('<div style="font-weight:900;color:#4ade80;font-size:1.05rem">'+am+'</div><div style="color:#999;font-size:.7rem">$100 → $'+payout.toFixed(2)+(missing?(' · '+priced+'/'+n+' legs priced'):'')+'</div>'):('<div style="color:#888;font-size:.78rem">No book odds available for these legs</div>'))+'</div>'
+    +'</div>';
+  out.innerHTML='<div style="background:#0e0e0e;border:1px solid #262626;border-radius:12px;overflow:hidden">'+header+rows+summary+'</div>';
+}
 
 // Get Picks: load saved picks for the chosen date (read-only, never runs the pipeline).
 async function getPicks(){
@@ -1101,6 +1183,7 @@ function renderResults(d){
   // All Plays by Game - collapsible
   var allPlays = (d.picks||[]).concat(d.rest||[])
     .concat(d.ptsPicks||[]).concat(d.ptsRest||[]);
+  window.__NHL_PLAYS__=allPlays;
   if(allPlays.length && d.games && d.games.length){
     h += '<div class="sec" style="margin-top:32px">All Plays by Game</div>';
     d.games.forEach(function(g, gi){
