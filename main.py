@@ -60,6 +60,7 @@ MIN_SPG       = 1.5   # shots/game season average to qualify
 MIN_GP        = 10    # minimum games played for valid average
 
 MIN_GAMES     = 2     # min games required for hit-rate calc
+RECENT_DAYS   = 14    # player must have a game within this many days to count as "playing today"
 HIT_THRESH         = 70.0  # % hit rate to qualify (shots always vs 1.5 base line)
 HIT_THRESH_PTS     = 65.0  # % hit rate to qualify (points)
 PTS_LINE      = 0.5   # 1+ point = hit
@@ -209,6 +210,29 @@ async def get_team_sa_map(season: str = "20252026") -> Dict[str, float]:
         for t in md.get("data", [])
         if t.get("teamFullName") in name_to_abbrev
     }
+
+
+def _played_recently(logs: List[Dict], ref_date: str, days: int = RECENT_DAYS) -> bool:
+    """True if the player has at least one game within `days` of ref_date.
+    NHL doesn't post confirmed lineups pre-game, so this is our proxy for
+    "actually in today's playing group" — it drops healthy scratches, AHL
+    call-ups who got sent down, and long-term injured depth players."""
+    if not logs:
+        return False
+    try:
+        cutoff = date.fromisoformat(ref_date) - timedelta(days=days)
+    except Exception:
+        return True  # unparseable ref date -> don't over-filter
+    for g in logs:
+        d = (g.get("date") or "")[:10]
+        if not d:
+            continue
+        try:
+            if date.fromisoformat(d) >= cutoff:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
@@ -516,6 +540,7 @@ async def get_pts_picks(
     season: str = "20252026",
     pts_lines_map: Dict[str, Dict] = None,
     ast_lines_map: Dict[str, Dict] = None,
+    target_date: str = None,
 ):
     """Independent points + assists picks using NHL Stats API game logs.
     Returns a (points_picks, assist_picks) tuple."""
@@ -566,6 +591,9 @@ async def get_pts_picks(
     pts_picks, ast_picks = [], []
     for player, team, opp, hr in all_players:
         logs = logs_map.get(player["id"], [])
+        # Only players actually in today's rotation (drops scratches/AHL/injured depth)
+        if target_date and not _played_recently(logs, target_date):
+            continue
 
         # Career H/A vs today's opponent — cap at last 10 for consistency w/ shots
         c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
@@ -657,6 +685,7 @@ async def get_saves_picks(
     sem: asyncio.Semaphore,
     season: str = "20252026",
     sv_lines_map: Dict[str, Dict] = None,
+    target_date: str = None,
 ) -> List[Dict]:
     """Goalie saves picks using NHL Stats API goalie game logs."""
     sv_lines_map = sv_lines_map or {}
@@ -701,6 +730,9 @@ async def get_saves_picks(
     picks = []
     for goalie, team, opp, hr in all_goalies:
         logs = logs_map.get(goalie["id"], [])
+        # Only goalies actively playing (drops third-string/AHL/injured goalies)
+        if target_date and not _played_recently(logs, target_date):
+            continue
         c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
         r_logs = [g for g in logs if g["homeRoad"] == hr][:10]
         if len(r_logs) < MIN_GAMES:
@@ -856,6 +888,9 @@ async def run_picks(target_date: str = None) -> Dict:
     # ── Steps 2 & 3 - NHL Stats API hit-rate analysis ────────────────────────────
     async def analyze(p: Dict) -> Optional[Dict]:
         logs = logs_map.get(p["pid"], [])
+        # Only players actually in today's rotation (drops scratches/AHL/injured depth)
+        if not _played_recently(logs, target_date):
+            return None
         hr, opp, line = p["homeRoad"], p["opponent"], p["line"]
 
         # Step 2: career H/A vs today's opponent
@@ -928,9 +963,9 @@ async def run_picks(target_date: str = None) -> Dict:
     picks.sort(key=lambda x: (x["score"], x["oppSA"]), reverse=True)
 
     pts_all, ast_all = await get_pts_picks(
-        games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map)
+        games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date)
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
-    saves_all = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map)
+    saves_all = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map, target_date)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
 
     _result = {
