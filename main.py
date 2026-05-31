@@ -1105,6 +1105,8 @@ body.is-admin .admin-only{display:inline-block !important}
 body.is-admin #parlayCard{display:block}
 /* ===== NBA-style trading cards ===== */
 .picks-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:10px}
+.nhl-toolbar{display:flex;justify-content:flex-end;margin:0 0 14px}
+#nhlSearch{background:#111;color:#fff;border:1px solid #2a2a2a;border-radius:8px;padding:8px 14px;font-size:.9rem;outline:none;width:240px;max-width:60vw}
 .pick-card{position:relative;background:linear-gradient(160deg,#1a1a1a,#121212);border:1px solid #2a2a2a;border-radius:18px;padding:18px 16px 14px;overflow:hidden;transition:border-color .2s,transform .2s}
 .pick-card:hover{border-color:#f59e0b;transform:translateY(-2px)}
 .pick-card.acc-pts{border-top:3px solid #60a5fa}
@@ -1619,7 +1621,21 @@ function buildNormTable(picks, startNum){
 }
 
 function renderResults(d){
+  window.__NHL_RAW__ = d;
   window.__NHL_SEASON__ = d.season || '20252026';
+  document.getElementById('out').innerHTML = '<div class="nhl-toolbar"><input id="nhlSearch" type="text" placeholder="Search player…" oninput="_nhlPaint(this.value)"/></div><div id="nhlBody"></div>';
+  _nhlPaint('');
+}
+// Re-paints the NHL body filtered by player name. The search box lives outside
+// #nhlBody so it keeps focus across keystrokes. `d` is aliased to a shallow copy
+// whose pick lists are name-filtered, leaving the original render code untouched.
+function _nhlPaint(q){
+  var raw=window.__NHL_RAW__; if(!raw) return;
+  q=(q||'').toLowerCase().trim();
+  function _f(a){return q?(a||[]).filter(function(p){return (p.name||'').toLowerCase().indexOf(q)>=0;}):(a||[]);}
+  var d={}; for(var _k in raw){ d[_k]=raw[_k]; }
+  d.picks=_f(raw.picks); d.ptsPicks=_f(raw.ptsPicks); d.astPicks=_f(raw.astPicks); d.savesPicks=_f(raw.savesPicks);
+  d.rest=_f(raw.rest); d.ptsRest=_f(raw.ptsRest); d.astRest=_f(raw.astRest); d.savesRest=_f(raw.savesRest);
   var h = '';
 
   // Chips
@@ -1725,7 +1741,9 @@ function renderResults(d){
     });
   }
 
-  document.getElementById('out').innerHTML = h;
+  document.getElementById('nhlBody').innerHTML = h;
+  // Parlay pool always reflects the full (unfiltered) slate regardless of search.
+  window.__NHL_PLAYS__ = (raw.picks||[]).concat(raw.rest||[]).concat(raw.ptsPicks||[]).concat(raw.ptsRest||[]).concat(raw.astPicks||[]).concat(raw.astRest||[]).concat(raw.savesPicks||[]).concat(raw.savesRest||[]);
 }
 
 function nhlToggle(n){
