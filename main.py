@@ -285,6 +285,41 @@ def _book_tag(real_line, ha10avg, vs_line_rate):
     return ""
 
 
+def _proj_count(l10_avg, l10_n, opp_avg, opp_n, opp_sa, league_sa, days_rest=None):
+    """Opponent-adjusted projected stat count.
+    Blend recent H/A form (l10_avg over l10_n games) with career-vs-opponent
+    history (opp_avg over opp_n games), sample-weighted so a thin vs-opp sample
+    barely moves the projection (no hard minimum). Then scale by how the
+    opponent's shots-allowed/game compares to league average (clamped 0.85-1.15),
+    with a light back-to-back penalty. Returns (proj, opp_factor, rest_factor)."""
+    l10_n = max(int(l10_n or 0), 0)
+    opp_n = max(min(int(opp_n or 0), 10), 0)   # cap vs-opp weight at the L10 anchor
+    if l10_n + opp_n == 0:
+        base = float(l10_avg or 0.0)
+    else:
+        base = ((l10_avg or 0.0) * l10_n + (opp_avg or 0.0) * opp_n) / (l10_n + opp_n)
+    if opp_sa and league_sa:
+        opp_factor = max(0.85, min(1.15, opp_sa / league_sa))
+    else:
+        opp_factor = 1.0
+    rest_factor = 0.97 if (days_rest is not None and days_rest <= 1) else 1.0
+    return round(base * opp_factor * rest_factor, 2), round(opp_factor, 3), rest_factor
+
+
+def _days_rest(logs, ref_date):
+    """Days since the player's most recent game (from their own logs). None if unknown."""
+    try:
+        ref = date.fromisoformat(ref_date)
+        ds = [(g.get("date") or "")[:10] for g in logs if g.get("date")]
+        ds = [date.fromisoformat(d) for d in ds if d]
+        ds = [d for d in ds if d < ref]   # ignore games on/after the run date
+        if not ds:
+            return None
+        return (ref - max(ds)).days
+    except Exception:
+        return None
+
+
 async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     """Fetch real shots on goal lines from The Odds API.
     Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
@@ -870,6 +905,10 @@ async def run_picks(target_date: str = None) -> Dict:
         key=lambda x: x[1], reverse=True
     )
 
+    # League-average shots-against/game — baseline for opponent-strength scaling
+    _sa_vals = [v for v in sa_map.values() if v and v > 0]
+    league_sa = round(sum(_sa_vals) / len(_sa_vals), 2) if _sa_vals else 0.0
+
     # Build player pool from NHL skater season averages
     pool = await get_shot_qualified_players(games, sa_map, sem_nhl, season, lines_map)
     _progress = {"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35}
@@ -927,6 +966,13 @@ async def run_picks(target_date: str = None) -> Dict:
         _gsrc = ([g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10] or _ha)
         glog = [{"d": g["date"], "v": g["shots"]} for g in _gsrc]
 
+        # Opponent-adjusted projected shot count + edge vs the line
+        proj, opp_factor, rest_factor = _proj_count(
+            avg3, t3, avg2, t2, p.get("oppSA", 0.0), league_sa, _days_rest(logs, target_date))
+        proj_line = real_line if real_line is not None else line
+        proj_edge = round(proj - proj_line, 2)
+        proj_pick = "OVER" if proj_edge > 0 else ("UNDER" if proj_edge < 0 else "")
+
         return {
             **p,
             "step2Hits": h2, "step2Total": t2, "step2Rate": r2,
@@ -943,6 +989,8 @@ async def run_picks(target_date: str = None) -> Dict:
             "realUnderOdds": p.get("realUnderOdds", ""),
             "underHits": u_hits, "underTotal": u_total,
             "underRate": u_rate, "underLine": uline,
+            "proj": proj, "projEdge": proj_edge, "projPick": proj_pick,
+            "oppFactor": opp_factor, "restFactor": rest_factor, "leagueSA": league_sa,
             "glog": glog,
         }
 
@@ -960,7 +1008,7 @@ async def run_picks(target_date: str = None) -> Dict:
 
     _progress = {"stage": "Analyzing points...", "done": len(pool), "total": len(pool), "pct": 96}
     # ── Step 4 - rank shots & run independent points picks ───────────────────
-    picks.sort(key=lambda x: (x["score"], x["oppSA"]), reverse=True)
+    picks.sort(key=lambda x: (x.get("projEdge", -999), x["score"], x["oppSA"]), reverse=True)
 
     pts_all, ast_all = await get_pts_picks(
         games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date)
@@ -1128,6 +1176,13 @@ body.is-admin #parlayCard{display:block}
 .pc-line-row .ln{font-weight:900;color:#4ade80;font-size:1.05rem}
 .pc-line-row .od{color:#6b7280;font-size:.76rem}
 .pc-line-row .est{background:rgba(245,158,11,.08);color:#f59e0b;border:1px solid rgba(245,158,11,.2);padding:2px 8px;border-radius:5px;font-size:.82rem;font-weight:700}
+.pc-proj{display:flex;align-items:center;gap:8px;background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.25);border-radius:10px;padding:7px 12px;margin-bottom:10px}
+.pc-proj .pp-lab{font-size:.62rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#9ca3af}
+.pc-proj .pp-num{font-family:'Playfair Display',serif;font-weight:900;color:#f59e0b;font-size:1.25rem;margin-left:auto}
+.pc-proj .pp-edge{font-size:.8rem;font-weight:800}
+.pos{color:#4ade80}
+.neg{color:#f87171}
+.lad-why{font-size:.72rem;color:#9ca3af;padding:6px 4px;line-height:1.4}
 .pc-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
 .pc-stat{background:#141414;border:1px solid #222;border-radius:9px;padding:8px;text-align:center}
 .pc-stat .k{font-size:.56rem;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;font-weight:700}
@@ -1454,6 +1509,7 @@ function nhlCard(p,i){
      </div>
      <div class="pc-tagrow">${fmtTag(p.tag)}</div>
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Line</span></div>
+     ${p.proj!=null?`<div class="pc-proj"><span class="pp-lab">Projected</span><span class="pp-num">${p.proj}</span><span class="pp-edge ${p.projEdge>=0?'pos':'neg'}">${p.projEdge>=0?'+':''}${p.projEdge}</span></div>`:''}
      <div class="pc-stats">
        <div class="pc-stat"><div class="k">Career vs ${p.opponent}</div><div class="v">${_rateHtml(p.rateA,p.hitsA,p.totA)}</div></div>
        <div class="pc-stat"><div class="k">L10 ${ha?'Home':'Away'}</div><div class="v">${_rateHtml(p.rateB,p.hitsB,p.totB)}</div></div>
@@ -1511,6 +1567,8 @@ function openNhlLadder(key){
       ${vslRow}
       <div class="lad-stat"><span class="k">Under Line L10</span><span class="v ${rateClass(p.underRate)}">${p.underHits}/${p.underTotal} (${p.underRate}%)</span></div>
       <div class="lad-stat"><span class="k">Average</span><span class="v gold">${p.avg}</span></div>
+      ${p.proj!=null?`<div class="lad-stat"><span class="k">Projected (opp-adjusted)</span><span class="v gold">${p.proj} <span class="${p.projEdge>=0?'pos':'neg'}">(${p.projEdge>=0?'+':''}${p.projEdge} vs ${p.dispLine})</span></span></div>
+      <div class="lad-why">${_projWhy(p)}</div>`:''}
       <div class="lad-stat"><span class="k">Score</span><span class="v" style="color:#f59e0b">${p.dispScore}</span></div>
     </div>`;
   var ov=document.createElement('div');
@@ -1519,6 +1577,13 @@ function openNhlLadder(key){
   document.body.appendChild(ov);
 }
 function closeNhlLadder(){var o=document.getElementById('nhlLadOv');if(o)o.remove();}
+function _projWhy(p){
+  var bits=['L10 '+(p.homeRoad==='H'?'home':'away')+' avg '+p.avg];
+  if(p.totA) bits.push('vs '+p.opponent+' avg '+p.avgA+' ('+p.totA+'g)');
+  if(p.oppSA) bits.push(p.opponent+' allows '+p.oppSA+' SA/g (×'+(p.oppFactor||1)+')');
+  if(p.restFactor && p.restFactor<1) bits.push('back-to-back ×'+p.restFactor);
+  return 'Why: '+bits.join(' · ');
+}
 
 function fmtTag(t){
   if(t==='SUGGESTED') return '<span class="tag-sug">⭐ PICK</span>';
