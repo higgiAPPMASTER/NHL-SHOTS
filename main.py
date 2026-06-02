@@ -1534,7 +1534,11 @@ function _spCol(title,picks){
   return `<div class="sp-col"><h4>${title}</h4>${rows}</div>`;
 }
 function _underBox(picks){
-  var u=(picks||[]).filter(function(p){return p.underTotal>=1 && p.underLine!=null;})
+  // Only surface genuine fade candidates: a player must go UNDER his line in at
+  // least UNDER_THRESH% of his last-10 H/A games. Without this gate the list
+  // included clear OVER plays (e.g. a 9/10 over) ranked at the bottom.
+  var UNDER_THRESH=60;
+  var u=(picks||[]).filter(function(p){return p.underTotal>=1 && p.underLine!=null && p.underRate>=UNDER_THRESH;})
       .sort(function(a,b){return b.underRate-a.underRate;});
   if(!u.length) return '';
   var rows=u.map(function(p){
