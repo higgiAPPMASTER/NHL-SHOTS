@@ -1534,8 +1534,8 @@ function _spCol(title,picks){
   return `<div class="sp-col"><h4>${title}</h4>${rows}</div>`;
 }
 function _underBox(picks){
-  var u=(picks||[]).filter(function(p){return p.underTotal>=2 && p.underRate>=60;})
-      .sort(function(a,b){return b.underRate-a.underRate;}).slice(0,8);
+  var u=(picks||[]).filter(function(p){return p.underTotal>=1 && p.underLine!=null;})
+      .sort(function(a,b){return b.underRate-a.underRate;});
   if(!u.length) return '';
   var rows=u.map(function(p){
     var key=_ladKey(p); window.__NHLLAD__[key]=p;
@@ -1740,16 +1740,22 @@ function _nhlPaint(q){
     h += '<div class="sec">🎯 Top ' + d.ptsPicks.length + ' Points (1+)</div>';
     h += nhlCardGrid(d.ptsPicks);
   }
+  var ubP = _underBox((d.ptsPicks||[]).concat(d.ptsRest||[]));
+  if(ubP){ h += '<div class="sec">⬇ Points UNDER Track</div>' + ubP; }
   // ASSISTS cards
   if((d.astPicks||[]).length){
     h += '<div class="sec">🅰️ Top ' + d.astPicks.length + ' Assists (1+)</div>';
     h += nhlCardGrid(d.astPicks);
   }
+  var ubA = _underBox((d.astPicks||[]).concat(d.astRest||[]));
+  if(ubA){ h += '<div class="sec">⬇ Assists UNDER Track</div>' + ubA; }
   // SAVES cards
   if((d.savesPicks||[]).length){
     h += '<div class="sec">🧤 Top ' + d.savesPicks.length + ' Goalie Saves</div>';
     h += nhlCardGrid(d.savesPicks);
   }
+  var ubS = _underBox((d.savesPicks||[]).concat(d.savesRest||[]));
+  if(ubS){ h += '<div class="sec">⬇ Goalie Saves UNDER Track</div>' + ubS; }
 
   // SPECIAL — best plays, NBA-style 2-col boxes
   h += '<div class="sec">⭐ Special — Best Plays</div>';
