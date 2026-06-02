@@ -68,6 +68,9 @@ AST_LINE      = 0.5   # 1+ assist = hit
 SAVES_LINE    = 24.5  # baseline goalie saves line when no book line posted
 HIT_THRESH_AST     = 60.0  # % hit rate to qualify (assists)
 HIT_THRESH_SAVES   = 55.0  # % hit rate to qualify (goalie saves)
+UNDER_THRESH       = 60.0  # under-rate % to qualify as a fade candidate (under cards/track)
+UNDER_MIN_VO       = 2     # min H/A games vs THIS opponent for a vs-opp under
+UNDER_MIN_ANY      = 3     # min H/A games vs anyone for an any-opp under
 SEASONS       = ["20252026","20242025","20232024","20222023","20212022"]  # for points game logs
 TOP_N       = 10     # final picks count
 SEM_NHL     = 8      # concurrent NHL API calls
@@ -318,6 +321,36 @@ def _days_rest(logs, ref_date):
         return (ref - max(ds)).days
     except Exception:
         return None
+
+
+def _under_fields(logs, stat_key, uline, hr, opp):
+    """Build under-candidate fields for ANY market from a player's own game logs.
+
+    A fade qualifies on EITHER last-10 H/A vs THIS opponent OR last-10 H/A vs
+    anyone clearing UNDER_THRESH, so genuine unders surface even when the player
+    fails the OVER gate. underRate/Hits/Total are set to the qualifying basis
+    (vs-opp preferred) so the card + ladder render the relevant sample.
+    """
+    vo = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
+    an = [g for g in logs if g["homeRoad"] == hr][:10]
+    vo_h = sum(1 for g in vo if g[stat_key] < uline); vo_t = len(vo)
+    an_h = sum(1 for g in an if g[stat_key] < uline); an_t = len(an)
+    vo_r = round(vo_h / vo_t * 100, 1) if vo_t else 0.0
+    an_r = round(an_h / an_t * 100, 1) if an_t else 0.0
+    vo_ok = vo_t >= UNDER_MIN_VO and vo_r >= UNDER_THRESH
+    an_ok = an_t >= UNDER_MIN_ANY and an_r >= UNDER_THRESH
+    if vo_ok:
+        basis, uh, ut, ur = "vs opp", vo_h, vo_t, vo_r
+    elif an_ok:
+        basis, uh, ut, ur = "L10 H/A", an_h, an_t, an_r
+    else:
+        basis, uh, ut, ur = "", an_h, an_t, an_r
+    return {
+        "underOk": bool(vo_ok or an_ok), "underBasis": basis,
+        "underHits": uh, "underTotal": ut, "underRate": ur, "underLine": uline,
+        "underHitsVo": vo_h, "underTotVo": vo_t, "underRateVo": vo_r,
+        "underHitsAny": an_h, "underTotAny": an_t, "underRateAny": an_r,
+    }
 
 
 async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
@@ -578,7 +611,7 @@ async def get_pts_picks(
     target_date: str = None,
 ):
     """Independent points + assists picks using NHL Stats API game logs.
-    Returns a (points_picks, assist_picks) tuple."""
+    Returns (points_picks, assist_picks, points_unders, assist_unders)."""
 
     pts_lines_map = pts_lines_map or {}
     ast_lines_map = ast_lines_map or {}
@@ -624,6 +657,7 @@ async def get_pts_picks(
     logs_map = {pid: (r if isinstance(r, list) else []) for pid, r in zip(log_tasks.keys(), log_results)}
 
     pts_picks, ast_picks = [], []
+    pts_unders, ast_unders = [], []
     for player, team, opp, hr in all_players:
         logs = logs_map.get(player["id"], [])
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
@@ -649,8 +683,7 @@ async def get_pts_picks(
             avg2 = round(sum(g[stat_key] for g in c_logs) / len(c_logs), 2) if c_logs else 0
             # Qualify on career H/A vs opp if we have it, else last-10 H/A
             qualifies = (r2 >= thresh) if len(c_logs) >= MIN_GAMES else (r3 >= thresh)
-            if not qualifies:
-                return None
+            over_ok = bool(qualifies)
             score = round((r2 + r3) / 2 if c_logs else r3, 1)
             real_line, real_odds, under_odds = None, "", ""
             for odds_name, sb_info in (lines_map or {}).items():
@@ -667,11 +700,11 @@ async def get_pts_picks(
                 vsl_rate = round(vsl_hits / vsl_total * 100, 1) if vsl_total else 0.0
                 gap = round(avg3 - real_line, 2)
                 tag = _book_tag(real_line, avg3, vsl_rate)
-            # Under track — value below the line (same L10 H/A sample, free data)
+            # Under track — vs-opp OR any-opp H/A (so genuine fades surface)
             uline = real_line if real_line is not None else base_line
-            u_hits = sum(1 for g in r_logs if g[stat_key] < uline)
-            u_total = len(r_logs)
-            u_rate = round(u_hits / u_total * 100, 1) if u_total else 0.0
+            uf = _under_fields(logs, stat_key, uline, hr, opp)
+            if not over_ok and not uf["underOk"]:
+                return None
             # Game log for the per-card dropdown (vs opp if available, else L10 H/A)
             g_src = ([g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
                      or [g for g in logs if g["homeRoad"] == hr][:10])
@@ -688,8 +721,7 @@ async def get_pts_picks(
                 "dispScore": score,
                 "vsLineHits": vsl_hits, "vsLineTotal": vsl_total, "vsLineRate": vsl_rate,
                 "gap": gap, "tag": tag,
-                "underHits": u_hits, "underTotal": u_total,
-                "underRate": u_rate, "underLine": uline,
+                **uf, "overOk": over_ok,
                 "glog": glog,
             }
 
@@ -702,16 +734,20 @@ async def get_pts_picks(
                 "pts3Hits": pp["hitsB"], "pts3Total": pp["totB"], "pts3Rate": pp["rateB"],
                 "ptsScore": pp["dispScore"],
             })
-            pts_picks.append(pp)
+            if pp["overOk"]: pts_picks.append(pp)
+            if pp["underOk"]: pts_unders.append(pp)
 
         ap = build_pick("assists", AST_LINE, HIT_THRESH_AST, ast_lines_map, "Assists (1+)")
         if ap:
-            ast_picks.append(ap)
+            if ap["overOk"]: ast_picks.append(ap)
+            if ap["underOk"]: ast_unders.append(ap)
 
     pts_picks.sort(key=lambda x: (x["ptsScore"], x["oppSA"]), reverse=True)
     ast_picks.sort(key=lambda x: (x["dispScore"], x["oppSA"]), reverse=True)
-    print(f"[PTS] {len(pts_picks)} points | {len(ast_picks)} assists qualifying")
-    return pts_picks, ast_picks
+    pts_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
+    ast_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
+    print(f"[PTS] {len(pts_picks)} points | {len(ast_picks)} assists | {len(pts_unders)} pts unders | {len(ast_unders)} ast unders")
+    return pts_picks, ast_picks, pts_unders, ast_unders
 
 
 async def get_saves_picks(
@@ -763,6 +799,7 @@ async def get_saves_picks(
                 for pid, r in zip(log_tasks.keys(), log_results)}
 
     picks = []
+    unders = []
     for goalie, team, opp, hr in all_goalies:
         logs = logs_map.get(goalie["id"], [])
         # Only goalies actively playing (drops third-string/AHL/injured goalies)
@@ -791,7 +828,9 @@ async def get_saves_picks(
         avg2 = round(sum(g["saves"] for g in c_logs) / len(c_logs), 2) if c_logs else 0
 
         qualifies = (r2 >= HIT_THRESH_SAVES) if len(c_logs) >= MIN_GAMES else (r3 >= HIT_THRESH_SAVES)
-        if not qualifies:
+        over_ok = bool(qualifies)
+        uf = _under_fields(logs, "saves", base_line, hr, opp)
+        if not over_ok and not uf["underOk"]:
             continue
         score = round((r2 + r3) / 2 if c_logs else r3, 1)
 
@@ -800,14 +839,10 @@ async def get_saves_picks(
             gap = round(avg3 - real_line, 2)
             tag = _book_tag(real_line, avg3, r3)
 
-        uline = base_line
-        u_hits = sum(1 for g in r_logs if g["saves"] < uline)
-        u_rate = round(u_hits / len(r_logs) * 100, 1) if r_logs else 0.0
-
         g_src = c_logs or r_logs
         glog = [{"d": g["date"], "v": g["saves"]} for g in g_src]
 
-        picks.append({
+        rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
             "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
             "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
@@ -820,14 +855,16 @@ async def get_saves_picks(
             "vsLineTotal": (len(r_logs) if real_line is not None else 0),
             "vsLineRate": (r3 if real_line is not None else 0.0),
             "gap": gap, "tag": tag,
-            "underHits": u_hits, "underTotal": len(r_logs),
-            "underRate": u_rate, "underLine": uline,
+            **uf, "overOk": over_ok,
             "glog": glog,
-        })
+        }
+        if over_ok: picks.append(rec)
+        if uf["underOk"]: unders.append(rec)
 
     picks.sort(key=lambda x: (x["dispScore"], x["avg"]), reverse=True)
-    print(f"[SAVES] {len(picks)} goalies qualifying at {HIT_THRESH_SAVES}%+")
-    return picks
+    unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
+    print(f"[SAVES] {len(picks)} goalies over | {len(unders)} unders")
+    return picks, unders
 
 
 
@@ -942,8 +979,7 @@ async def run_picks(target_date: str = None) -> Dict:
         # Use lower threshold when no real sportsbook line (season avg fallback)
         s2_ok = (t2 < MIN_GAMES) or (r2 >= HIT_THRESH)
         s3_ok = r3 >= HIT_THRESH
-        if not s2_ok or not s3_ok:
-            return None
+        over_ok = bool(s2_ok and s3_ok)
         score = round((r2 + r3) / 2 if t2 >= MIN_GAMES else r3, 1)
 
         # NEW: hit rate vs real sportsbook line (last 10 H/A) + gap + tag
@@ -957,12 +993,12 @@ async def run_picks(target_date: str = None) -> Dict:
             gap = round(avg3 - real_line, 2)
             tag = _book_tag(real_line, avg3, vsl_rate)
 
-        # Under track + game log for the per-card dropdown
+        # Under track (vs-opp OR any-opp H/A) + game log for the per-card dropdown
         uline = real_line if real_line is not None else line
+        uf = _under_fields(logs, "shots", uline, hr, opp)
+        if not over_ok and not uf["underOk"]:
+            return None
         _ha = [g for g in logs if g["homeRoad"] == hr][:10]
-        u_total = len(_ha)
-        u_hits = sum(1 for g in _ha if g["shots"] < uline)
-        u_rate = round(u_hits / u_total * 100, 1) if u_total else 0.0
         _gsrc = ([g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10] or _ha)
         glog = [{"d": g["date"], "v": g["shots"]} for g in _gsrc]
 
@@ -987,8 +1023,7 @@ async def run_picks(target_date: str = None) -> Dict:
             "rateB": r3, "hitsB": h3, "totB": t3,
             "dispScore": score,
             "realUnderOdds": p.get("realUnderOdds", ""),
-            "underHits": u_hits, "underTotal": u_total,
-            "underRate": u_rate, "underLine": uline,
+            **uf, "overOk": over_ok,
             "proj": proj, "projEdge": proj_edge, "projPick": proj_pick,
             "oppFactor": opp_factor, "restFactor": rest_factor, "leagueSA": league_sa,
             "glog": glog,
@@ -1004,16 +1039,18 @@ async def run_picks(target_date: str = None) -> Dict:
         return result
 
     results_raw = await asyncio.gather(*[analyze_tracked(p) for p in pool])
-    picks = [r for r in results_raw if r is not None]
+    picks = [r for r in results_raw if r and r.get("overOk")]
+    shot_unders = [r for r in results_raw if r and r.get("underOk")]
+    shot_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
 
     _progress = {"stage": "Analyzing points...", "done": len(pool), "total": len(pool), "pct": 96}
     # ── Step 4 - rank shots & run independent points picks ───────────────────
     picks.sort(key=lambda x: (x.get("projEdge", -999), x["score"], x["oppSA"]), reverse=True)
 
-    pts_all, ast_all = await get_pts_picks(
+    pts_all, ast_all, pts_unders, ast_unders = await get_pts_picks(
         games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date)
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
-    saves_all = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map, target_date)
+    saves_all, saves_unders = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map, target_date)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
 
     _result = {
@@ -1025,6 +1062,10 @@ async def run_picks(target_date: str = None) -> Dict:
         "astRest":       ast_all[TOP_N:],
         "savesPicks":    saves_all[:TOP_N],
         "savesRest":     saves_all[TOP_N:],
+        "shotUnders":    shot_unders,
+        "ptsUnders":     pts_unders,
+        "astUnders":     ast_unders,
+        "savesUnders":   saves_unders,
         "games":         games,
         "sa_ranks":      sa_ranks,
         "poolSize":      len(pool),
@@ -1524,6 +1565,47 @@ function nhlCardGrid(picks){
   if(!picks||!picks.length) return '<div class="no-picks">No qualifying picks for this market.</div>';
   return '<div class="picks-grid">'+picks.map(function(p,i){return nhlCard(p,i+1);}).join('')+'</div>';
 }
+function underClass(r){ return r>=75?'green':r>=65?'gold':'red-txt'; }
+function nhlUnderCard(p,i){
+  var season=(window.__NHL_SEASON__||'20252026');
+  var key=_ladKey(p); window.__NHLLAD__[key]=p;
+  var ha=p.homeRoad==='H';
+  var head='https://assets.nhle.com/mugs/nhl/'+season+'/'+p.team+'/'+p.pid+'.png';
+  var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
+  var lineHtml=(p.realLine!=null)
+    ? `<span class="ln">U ${p.dispLine}</span> <span class="od">${p.realUnderOdds||''}</span>`
+    : `<span class="est">U ~${p.dispLine}</span>`;
+  var voHtml=p.underTotVo?`<span class="${underClass(p.underRateVo)}">${p.underHitsVo}/${p.underTotVo} (${p.underRateVo}%)</span>`:'<span class="gray">—</span>';
+  var anHtml=p.underTotAny?`<span class="${underClass(p.underRateAny)}">${p.underHitsAny}/${p.underTotAny} (${p.underRateAny}%)</span>`:'<span class="gray">—</span>';
+  return `
+   <div class="pick-card under-card ${_accFor(p.mkt)}">
+     <div class="pc-rank">${i}</div>
+     <div class="pc-top">
+       <div class="hs-wrap"><span class="hs-ini">${_initials(p.name)}</span>
+         <img class="hs-img" src="${head}" onerror="this.style.display='none'"/>
+         <img class="pc-logo" src="${logo}" onerror="this.style.display='none'"/>
+       </div>
+       <div class="pc-id">
+         <div class="pc-name">${p.name}</div>
+         <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></div>
+         <div class="pc-mkt">${p.mkt||''} · UNDER</div>
+       </div>
+     </div>
+     <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Under Line</span></div>
+     <div class="pc-stats">
+       <div class="pc-stat"><div class="k">Under vs ${p.opponent}</div><div class="v">${voHtml}</div></div>
+       <div class="pc-stat"><div class="k">Under L10 ${ha?'Home':'Away'}</div><div class="v">${anHtml}</div></div>
+       <div class="pc-stat"><div class="k">Avg</div><div class="v gold">${p.avg}</div></div>
+       <div class="pc-stat"><div class="k">Basis</div><div class="v">${p.underBasis||'—'}</div></div>
+     </div>
+     <div class="pc-foot"><span class="pc-score ${underClass(p.underRate)}">${p.underHits}/${p.underTotal} (${p.underRate}%)</span>
+       <button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></div>
+   </div>`;
+}
+function nhlUnderGrid(picks){
+  if(!picks||!picks.length) return '';
+  return '<div class="picks-grid">'+picks.map(function(p,i){return nhlUnderCard(p,i+1);}).join('')+'</div>';
+}
 function _spRow(p){
   var key=_ladKey(p); window.__NHLLAD__[key]=p;
   var best=Math.max(p.rateA||0,p.rateB||0);
@@ -1705,6 +1787,7 @@ function _nhlPaint(q){
   var d={}; for(var _k in raw){ d[_k]=raw[_k]; }
   d.picks=_f(raw.picks); d.ptsPicks=_f(raw.ptsPicks); d.astPicks=_f(raw.astPicks); d.savesPicks=_f(raw.savesPicks);
   d.rest=_f(raw.rest); d.ptsRest=_f(raw.ptsRest); d.astRest=_f(raw.astRest); d.savesRest=_f(raw.savesRest);
+  d.shotUnders=_f(raw.shotUnders); d.ptsUnders=_f(raw.ptsUnders); d.astUnders=_f(raw.astUnders); d.savesUnders=_f(raw.savesUnders);
   var h = '';
 
   // Chips
@@ -1735,31 +1818,39 @@ function _nhlPaint(q){
   h += '<div class="sec">🏒 Top ' + ((d.picks||[]).length) + ' Shots on Goal — OVER</div>';
   h += nhlCardGrid(d.picks);
 
-  // Shots UNDER track
-  var ub = _underBox((d.picks||[]).concat(d.rest||[]));
-  if(ub){ h += '<div class="sec">⬇ Shots UNDER Track</div>' + ub; }
+  // Shots UNDER cards
+  if((d.shotUnders||[]).length){
+    h += '<div class="sec">⬇ ' + d.shotUnders.length + ' Shots on Goal — UNDER</div>';
+    h += nhlUnderGrid(d.shotUnders);
+  }
 
   // POINTS cards
   if((d.ptsPicks||[]).length){
     h += '<div class="sec">🎯 Top ' + d.ptsPicks.length + ' Points (1+)</div>';
     h += nhlCardGrid(d.ptsPicks);
   }
-  var ubP = _underBox((d.ptsPicks||[]).concat(d.ptsRest||[]));
-  if(ubP){ h += '<div class="sec">⬇ Points UNDER Track</div>' + ubP; }
+  if((d.ptsUnders||[]).length){
+    h += '<div class="sec">⬇ ' + d.ptsUnders.length + ' Points (1+) — UNDER</div>';
+    h += nhlUnderGrid(d.ptsUnders);
+  }
   // ASSISTS cards
   if((d.astPicks||[]).length){
     h += '<div class="sec">🅰️ Top ' + d.astPicks.length + ' Assists (1+)</div>';
     h += nhlCardGrid(d.astPicks);
   }
-  var ubA = _underBox((d.astPicks||[]).concat(d.astRest||[]));
-  if(ubA){ h += '<div class="sec">⬇ Assists UNDER Track</div>' + ubA; }
+  if((d.astUnders||[]).length){
+    h += '<div class="sec">⬇ ' + d.astUnders.length + ' Assists (1+) — UNDER</div>';
+    h += nhlUnderGrid(d.astUnders);
+  }
   // SAVES cards
   if((d.savesPicks||[]).length){
     h += '<div class="sec">🧤 Top ' + d.savesPicks.length + ' Goalie Saves</div>';
     h += nhlCardGrid(d.savesPicks);
   }
-  var ubS = _underBox((d.savesPicks||[]).concat(d.savesRest||[]));
-  if(ubS){ h += '<div class="sec">⬇ Goalie Saves UNDER Track</div>' + ubS; }
+  if((d.savesUnders||[]).length){
+    h += '<div class="sec">⬇ ' + d.savesUnders.length + ' Goalie Saves — UNDER</div>';
+    h += nhlUnderGrid(d.savesUnders);
+  }
 
   // SPECIAL — best plays, NBA-style 2-col boxes
   h += '<div class="sec">⭐ Special — Best Plays</div>';
