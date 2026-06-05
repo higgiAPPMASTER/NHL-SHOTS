@@ -31,7 +31,7 @@ def _verify_hub_token(token: str) -> bool:
     except Exception:
         return False
 
-_ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "higgi117711@gmail.com").strip().lower()
+_ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAIL", "higgi117711@gmail.com").split(",") if e.strip()}
 
 def _token_email(token: str) -> str:
     if not token or len(token.split(".")) != 3 or not JWT_SECRET:
@@ -43,7 +43,7 @@ def _token_email(token: str) -> str:
         return ""
 
 def _is_admin_token(token: str) -> bool:
-    return bool(_ADMIN_EMAIL) and _token_email(token) == _ADMIN_EMAIL
+    return bool(_ADMIN_EMAILS) and _token_email(token) in _ADMIN_EMAILS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1270,8 +1270,25 @@ body.is-admin #parlayCard{display:block}
 
 <nav>
   <div class="logo">Money <span>Picks</span> Arena</div>
-
+  <div style="display:flex;gap:8px;align-items:center"><button class="admin-only" onclick="openNhlMyBets()" style="background:#0e7490;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128176; My Bets</button></div>
 </nav>
+
+<style>
+.nhl-bets-tbl{width:100%;border-collapse:collapse;font-size:.82rem}
+.nhl-bets-tbl th{padding:7px 10px;text-align:left;font-size:.72rem;color:#94a3b8;font-weight:700;text-transform:uppercase;letter-spacing:.07em;border-bottom:1px solid #1e293b;white-space:nowrap}
+.nhl-bets-tbl td{padding:8px 10px;border-bottom:1px solid #0f172a;vertical-align:middle;color:#e2e8f0}
+.nhl-bets-tbl tr:last-child td{border-bottom:none}
+.nhl-bets-tbl tr:hover td{background:rgba(255,255,255,.02)}
+</style>
+<div id="nhl-mybets-card" style="display:none;max-width:960px;margin:0 auto 24px;padding:0 16px">
+  <div class="card" style="padding:20px 22px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#128176; My Bets</h2>
+      <button onclick="document.getElementById(&#39;nhl-mybets-card&#39;).style.display=&#39;none&#39;" style="background:#1e293b;border:none;color:#94a3b8;border-radius:8px;padding:8px 11px;font-size:.9rem;cursor:pointer">&#215;</button>
+    </div>
+    <div id="nhl-mybets-body"><p style="color:#94a3b8;font-size:.85rem">Loading&#8230;</p></div>
+  </div>
+</div>
 
 <div class="page">
   <div class="app-hdr">
@@ -1558,7 +1575,7 @@ function nhlCard(p,i){
        ${lastStat}
      </div>
      <div class="pc-foot"><span class="pc-score">${p.dispScore}</span>
-       <button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></div>
+       <span style="display:flex;gap:6px">${_nhlBetBtn(p)}<button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></span></div>
    </div>`;
 }
 function nhlCardGrid(picks){
@@ -1599,7 +1616,7 @@ function nhlUnderCard(p,i){
        <div class="pc-stat"><div class="k">Basis</div><div class="v">${p.underBasis||'—'}</div></div>
      </div>
      <div class="pc-foot"><span class="pc-score ${underClass(p.underRate)}">${p.underHits}/${p.underTotal} (${p.underRate}%)</span>
-       <button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></div>
+       <span style="display:flex;gap:6px">${_nhlBetBtn(p,'UNDER')}<button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></span></div>
    </div>`;
 }
 function nhlUnderGrid(picks){
@@ -1774,6 +1791,7 @@ function buildNormTable(picks, startNum){
 function renderResults(d){
   window.__NHL_RAW__ = d;
   window.__NHL_SEASON__ = d.season || '20252026';
+  window.__NHL_DATE__ = d.date || '';
   document.getElementById('out').innerHTML = '<div class="nhl-toolbar"><input id="nhlSearch" type="text" placeholder="Search player…" oninput="_nhlPaint(this.value)"/></div><div id="nhlBody"></div>';
   _nhlPaint('');
 }
@@ -1920,9 +1938,522 @@ function nhlToggle(n){
   el.style.display=hidden?'block':'none';
   if(btn) btn.textContent=hidden?'Collapse':'Expand';
 }
+// ── My Bets ──────────────────────────────────────────────────────────────────
+function _nhlEsc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function _nhlMoney(v){var n=Number(v)||0;return(n>=0?'$':'\u2212$')+Math.abs(n).toFixed(2);}
+function _nhlBetAuthQS(){
+  var tok=localStorage.getItem('__mpa_token')||'';
+  var adm=new URLSearchParams(location.search).get('admin')||'';
+  return '?token='+encodeURIComponent(tok)+(adm?('&admin='+encodeURIComponent(adm)):'');
+}
+function _nhlBetToast(msg){
+  var t=document.createElement('div');t.textContent=msg;
+  t.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#0e7490;color:#fff;padding:10px 20px;border-radius:10px;font-weight:700;font-size:.85rem;z-index:99999;white-space:nowrap;pointer-events:none;box-shadow:0 4px 20px rgba(0,0,0,.5)';
+  document.body.appendChild(t);
+  setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .4s';setTimeout(function(){t.remove();},400);},2200);
+}
+function _nhlBetMkt(m){
+  m=(m||'');
+  if(m.indexOf('Shot')>=0) return ['SHOTS','Shots on Goal'];
+  if(m.indexOf('Point')>=0) return ['POINTS','Points'];
+  if(m.indexOf('Assist')>=0) return ['ASSISTS','Assists'];
+  if(m.indexOf('Save')>=0) return ['SAVES','Goalie Saves'];
+  return ['',''];
+}
+var _nhlBetN=0;
+window.__NHL_BET_SRC__=window.__NHL_BET_SRC__||{};
+function _nhlBetBtn(p,forceSide){
+  if(p.realLine==null) return '';
+  var mk=_nhlBetMkt(p.mkt); if(!mk[0]) return '';
+  var side=forceSide||(p.pick==='UNDER'?'UNDER':'OVER');
+  var odds=side==='OVER'?(p.realOdds!=null?p.realOdds:p.realUnderOdds):(p.realUnderOdds!=null?p.realUnderOdds:p.realOdds);
+  var k='nh'+(++_nhlBetN);
+  window.__NHL_BET_SRC__[k]={
+    name:p.name,pid:(p.pid!=null?String(p.pid):''),team:(p.team||''),opp:(p.opponent||''),
+    category:mk[1],side:side,stat_key:mk[0],stat_label:mk[1],
+    line:p.realLine,odds:(odds!=null?odds:null),date:(window.__NHL_DATE__||'')
+  };
+  return '<button data-betkey="'+k+'" class="admin-only" onclick="event.stopPropagation();_nhlBetForm(this.dataset.betkey)" style="background:#0e7490;color:#fff;border:none;border-radius:8px;padding:6px 10px;font-size:.7rem;font-weight:800;cursor:pointer">Track Bet</button>';
+}
+function _nhlBetForm(key){
+  var src=(window.__NHL_BET_SRC__||{})[key]; if(!src) return;
+  window.__NHL_BET_CUR__=src;
+  var ov=document.getElementById('nhl-bet-modal');
+  if(!ov){
+    ov=document.createElement('div'); ov.id='nhl-bet-modal';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(2,6,23,.82);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px';
+    ov.onclick=function(e){if(e.target===ov)ov.style.display='none';};
+    document.body.appendChild(ov);
+  }
+  var pickTxt=src.side+' '+src.line+' '+(src.stat_label||'');
+  ov.innerHTML=`<div style="background:#0f172a;border:1px solid #0e7490;border-radius:16px;max-width:360px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:16px 18px;border-bottom:1px solid #1e293b">
+      <div>
+        <div style="font-weight:800;color:#fff;font-size:1.02rem">${_nhlEsc(src.name)}</div>
+        <div style="color:#67e8f9;font-size:.82rem;font-weight:800;margin-top:2px">${_nhlEsc(pickTxt)}</div>
+        <div style="color:#94a3b8;font-size:.72rem;margin-top:2px">${_nhlEsc(src.category||'')}${src.opp?' &middot; vs '+_nhlEsc(src.opp):''}${src.date?' &middot; '+src.date:''}</div>
+      </div>
+      <button onclick="document.getElementById('nhl-bet-modal').style.display='none'" style="background:#1e293b;border:none;color:#cbd5e1;width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:1rem">&#215;</button>
+    </div>
+    <div style="padding:16px 18px;display:grid;gap:12px">
+      <label style="font-size:.72rem;color:#94a3b8;font-weight:600">Odds (American)<input id="nhl-bet-odds" type="number" value="${src.odds!=null?src.odds:''}" style="display:block;width:100%;margin-top:5px;background:#0b1120;border:1px solid #334155;border-radius:8px;padding:9px 11px;color:#fbbf24;font-family:monospace;font-weight:700;font-size:.95rem"></label>
+      <label style="font-size:.72rem;color:#94a3b8;font-weight:600">Bet size ($)<input id="nhl-bet-stake" type="number" min="0" step="0.01" placeholder="e.g. 50" style="display:block;width:100%;margin-top:5px;background:#0b1120;border:1px solid #334155;border-radius:8px;padding:9px 11px;color:#fff;font-weight:700;font-size:.95rem"></label>
+      <div id="nhl-bet-payout" style="font-size:.78rem;color:#64748b;min-height:1em"></div>
+      <div id="nhl-bet-msg" style="font-size:.76rem;color:#f87171;min-height:1em"></div>
+      <button id="nhl-bet-save" onclick="_nhlSaveBet()" style="background:#0e7490;color:#fff;border:none;border-radius:9px;padding:11px;font-weight:800;cursor:pointer;font-size:.92rem">Log Bet</button>
+    </div>
+  </div>`;
+  ov.style.display='flex';
+  var so=document.getElementById('nhl-bet-odds'),ss=document.getElementById('nhl-bet-stake');
+  function _calc(){
+    var o=parseFloat(so.value),s=parseFloat(ss.value);
+    var pay=document.getElementById('nhl-bet-payout');
+    if(!isFinite(o)||!isFinite(s)||s<=0){pay.textContent='';return;}
+    var win=o>0?s*(o/100):s*(100/Math.abs(o));
+    pay.innerHTML='To win <strong style="color:#4ade80">$'+win.toFixed(2)+'</strong> &middot; total payout <strong style="color:#cbd5e1">$'+(s+win).toFixed(2)+'</strong>';
+  }
+  so.oninput=_calc;ss.oninput=_calc;_calc();
+  setTimeout(function(){ss.focus();},50);
+}
+async function _nhlSaveBet(){
+  var src=window.__NHL_BET_CUR__;if(!src) return;
+  var o=parseFloat(document.getElementById('nhl-bet-odds').value);
+  var s=parseFloat(document.getElementById('nhl-bet-stake').value);
+  var msg=document.getElementById('nhl-bet-msg');
+  if(!isFinite(o)){msg.textContent='Enter the odds.';return;}
+  if(!isFinite(s)||s<=0){msg.textContent='Enter a bet size greater than 0.';return;}
+  var btn=document.getElementById('nhl-bet-save');btn.disabled=true;btn.textContent='Saving\u2026';
+  try{
+    var body=Object.assign({},src,{odds:Math.round(o),stake:s,placed_at:new Date().toISOString()});
+    var res=await fetch('/api/bets'+_nhlBetAuthQS(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!res.ok){throw new Error(await res.text());}
+    document.getElementById('nhl-bet-modal').style.display='none';
+    _nhlBetToast('\u2705 Bet logged');
+    var mb=document.getElementById('nhl-mybets-card');
+    if(mb&&mb.style.display!=='none') openNhlMyBets(false);
+  }catch(e){msg.textContent=(e.message||'Save failed');btn.disabled=false;btn.textContent='Log Bet';}
+}
+async function openNhlMyBets(scroll){
+  var card=document.getElementById('nhl-mybets-card');if(!card) return;
+  card.style.display='block';
+  if(scroll!==false) card.scrollIntoView({behavior:'smooth',block:'start'});
+  document.getElementById('nhl-mybets-body').innerHTML='<p style="color:#94a3b8;font-size:.85rem">Loading\u2026</p>';
+  try{
+    var res=await fetch('/api/bets'+_nhlBetAuthQS());
+    if(!res.ok){
+      var t=await res.text();
+      if(res.status===403) t='Session expired \u2014 reopen from hub';
+      throw new Error(t);
+    }
+    window.__NHL_MYBETS__=await res.json();
+    renderNhlMyBets(window.__NHL_MYBETS__);
+  }catch(e){
+    document.getElementById('nhl-mybets-body').innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading bets')+'</p>';
+  }
+}
+function _nhlBetOddsDisp(o){return o!=null?((o>0?'+':'')+o):'\u2014';}
+function _nhlResColor(r){return r==='WIN'?'#4ade80':(r==='LOSS'?'#f87171':(r==='PUSH'?'#facc15':'#94a3b8'));}
+function _nhlStatBox(lbl,val,clr){
+  return '<div style="background:#111;border-radius:10px;padding:10px 14px;min-width:92px">'
+    +'<div style="font-size:.64rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em">'+lbl+'</div>'
+    +'<div style="font-size:1.12rem;font-weight:800;color:'+(clr||'#e2e8f0')+'">'+val+'</div></div>';
+}
+function renderNhlMyBets(d){
+  var s=d.summary||{};var bets=d.bets||[];
+  var roiTxt=s.roi!=null?((s.roi>0?'+':'')+s.roi+'%'):'\u2014';
+  var roiClr=s.roi==null?'#94a3b8':(s.roi>0?'#4ade80':(s.roi<0?'#f87171':'#facc15'));
+  var netClr=(s.profit||0)>0?'#4ade80':((s.profit||0)<0?'#f87171':'#cbd5e1');
+  var recTxt=(s.wins||0)+'-'+(s.losses||0)+(s.push?('-'+s.push+'P'):'');
+  var head='<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:18px">'
+    +_nhlStatBox('Record',recTxt,'#e2e8f0')
+    +_nhlStatBox('Pending',(s.pending||0),'#94a3b8')
+    +_nhlStatBox('Staked',_nhlMoney(s.staked||0),'#cbd5e1')
+    +_nhlStatBox('Net',_nhlMoney(s.profit||0),netClr)
+    +_nhlStatBox('Returned',_nhlMoney(s.returned||0),'#cbd5e1')
+    +_nhlStatBox('ROI',roiTxt,roiClr)
+    +'<div style="margin-left:auto"><button onclick="downloadNhlMyBetsCSV()" style="background:#0e7490;color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:.78rem;font-weight:700;cursor:pointer">&#11015; CSV</button></div>'
+    +'</div>';
+  var bc=(s.by_category||[]).map(function(c){
+    var croi=c.roi!=null?((c.roi>0?'+':'')+c.roi+'%'):'\u2014';
+    var cclr=c.roi==null?'#94a3b8':(c.roi>0?'#4ade80':(c.roi<0?'#f87171':'#facc15'));
+    return '<tr><td style="font-weight:600">'+_nhlEsc(c.category)+'</td>'
+      +'<td style="font-family:monospace">'+c.wins+'-'+c.losses+(c.push?('-'+c.push+'P'):'')+'</td>'
+      +'<td style="font-family:monospace;color:#94a3b8">'+(c.pending||0)+'</td>'
+      +'<td style="font-family:monospace">'+_nhlMoney(c.staked)+'</td>'
+      +'<td style="font-family:monospace;color:'+((c.profit||0)>=0?'#4ade80':'#f87171')+'">'+_nhlMoney(c.profit)+'</td>'
+      +'<td style="font-family:monospace;font-weight:700;color:'+cclr+'">'+croi+'</td></tr>';
+  }).join('');
+  var bcHtml=bc?'<div style="overflow-x:auto;margin-bottom:18px"><table class="nhl-bets-tbl"><thead><tr><th>Category</th><th>W-L</th><th>Pend</th><th>Staked</th><th>Net</th><th>ROI</th></tr></thead><tbody>'+bc+'</tbody></table></div>':'';
+  var rows=bets.map(function(b){
+    var res=b.result||'pending';
+    var delBtn='<button data-delid="'+b.id+'" onclick="_nhlDeleteBet(this.dataset.delid)" title="Remove" style="background:none;border:none;color:#64748b;cursor:pointer;font-size:1rem">&#10006;</button>';
+    var pk=b.side+' '+b.line+' '+(b.stat_label||'');
+    var actTxt=b.actual!=null?(' <span style="color:#64748b;font-weight:400;font-size:.72rem">('+b.actual+')</span>'):'';
+    return '<tr>'
+      +'<td style="white-space:nowrap;color:#94a3b8;font-family:monospace;font-size:.76rem">'+(b.date||'')+'</td>'
+      +'<td style="font-weight:600">'+_nhlEsc(b.name||'')+'<div style="font-size:.68rem;color:#64748b">'+_nhlEsc(b.category||'')+'</div></td>'
+      +'<td style="font-size:.82rem">'+_nhlEsc(pk)+'</td>'
+      +'<td style="font-family:monospace">'+_nhlBetOddsDisp(b.odds)+'</td>'
+      +'<td style="font-family:monospace">'+_nhlMoney(b.stake)+'</td>'
+      +'<td style="font-weight:800;color:'+_nhlResColor(res)+'">'+(res==='pending'?'pending':res)+actTxt+'</td>'
+      +'<td style="font-family:monospace;font-weight:700;color:'+((b.profit||0)>=0?'#4ade80':'#f87171')+'">'+(b.profit!=null?_nhlMoney(b.profit):'\u2014')+'</td>'
+      +'<td>'+delBtn+'</td></tr>';
+  }).join('');
+  var rowsHtml=bets.length
+    ?'<div style="overflow-x:auto"><table class="nhl-bets-tbl"><thead><tr><th>Date</th><th>Player</th><th>Pick</th><th>Odds</th><th>Stake</th><th>Result</th><th>Profit</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+    :'<p style="color:#94a3b8;padding:16px">No bets logged yet. Click <strong style="color:#67e8f9">Track Bet</strong> on any pick card to start.</p>';
+  document.getElementById('nhl-mybets-body').innerHTML=head+bcHtml+rowsHtml;
+}
+async function _nhlDeleteBet(id){
+  if(!confirm('Remove this bet from your log?')) return;
+  try{
+    var res=await fetch('/api/bets/'+encodeURIComponent(id)+_nhlBetAuthQS(),{method:'DELETE'});
+    if(!res.ok) throw new Error(await res.text());
+    openNhlMyBets(false);
+  }catch(e){alert(e.message||'Delete failed');}
+}
+function downloadNhlMyBetsCSV(){
+  var d=window.__NHL_MYBETS__;if(!d){alert('Open My Bets first.');return;}
+  var rows=[['Date','Player','Team','Category','Side','Pick','Odds','Stake','Result','Actual','Profit']];
+  (d.bets||[]).forEach(function(b){
+    rows.push([b.date||'',b.name||'',b.team||'',b.category||'',b.side||'',
+      b.side+' '+b.line+' '+(b.stat_label||''),
+      b.odds!=null?b.odds:'',b.stake!=null?b.stake:'',
+      b.result||'',b.actual!=null?b.actual:'',b.profit!=null?b.profit:'']);
+  });
+  function _c(v){var sv=String(v==null?'':v);if(/[,"\\n]/.test(sv))sv='"'+sv.replace(/"/g,'""')+'"';return sv;}
+  var csv=rows.map(function(r){return r.map(_c).join(',');}).join('\\r\\n');
+  var blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8;'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');a.href=url;a.download='nhl-my-bets.csv';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+}
 </script>
 </body>
 </html>"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  My Bets (bet tracking) — admin-only, mirrors NBA/MLB
+# ─────────────────────────────────────────────────────────────────────────────
+import threading as _bt_th, uuid as _bt_uuid
+
+_NHL_BET_LOG_PATH = str(_CACHE_DIR / "_nhl_bet_log.json")
+_NHL_BET_LOCK = _bt_th.Lock()
+_NHL_BET_STAT_KEYS = ("SHOTS", "POINTS", "ASSISTS", "SAVES")
+_NHL_STAT_LABEL = {"SHOTS": "Shots on Goal", "POINTS": "Points",
+                   "ASSISTS": "Assists", "SAVES": "Goalie Saves"}
+_NHL_CAT_ORDER = ["Shots on Goal", "Points", "Assists", "Goalie Saves"]
+
+
+def _nhl_load_bets() -> dict:
+    try:
+        with open(_NHL_BET_LOG_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _nhl_save_bets(data: dict):
+    try:
+        tmp = _NHL_BET_LOG_PATH + f".{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, _NHL_BET_LOG_PATH)
+    except Exception as e:
+        print(f"[nhl_bet_log] save failed: {e}")
+
+
+def _nhl_bet_admin_ok(tok: str, admin: str) -> bool:
+    return _is_admin_token(tok) or (
+        bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__"))
+
+
+def _nhl_bet_user_key(tok: str, admin: str) -> str:
+    em = _token_email(tok) if tok else ""
+    return em if em else "__admin__"
+
+
+def _nhl_american_profit(odds, stake, result) -> float:
+    try:
+        stake = float(stake)
+    except Exception:
+        return 0.0
+    if result == "WIN":
+        try:
+            o = float(odds)
+        except Exception:
+            return 0.0
+        return stake * (o / 100.0) if o > 0 else stake * (100.0 / abs(o))
+    if result == "LOSS":
+        return -stake
+    return 0.0
+
+
+def _nhl_seasons_for(date_str: str):
+    try:
+        y, m, _d = (int(x) for x in date_str.split("-"))
+    except Exception:
+        return []
+    start = y if m >= 8 else y - 1
+    return [f"{start}{start + 1}"]
+
+
+def _nhl_extract_stat(g: dict, stat_key: str):
+    try:
+        if stat_key == "SHOTS":
+            v = g.get("shots")
+            if v is None:
+                v = g.get("sog")
+            return float(v) if v is not None else None
+        if stat_key == "ASSISTS":
+            return float(g["assists"]) if g.get("assists") is not None else None
+        if stat_key == "POINTS":
+            if g.get("points") is not None:
+                return float(g["points"])
+            gl, a = g.get("goals"), g.get("assists")
+            if gl is not None and a is not None:
+                return float(gl) + float(a)
+            return None
+        if stat_key == "SAVES":
+            if g.get("saves") is not None:
+                return float(g["saves"])
+            sa, ga = g.get("shotsAgainst"), g.get("goalsAgainst")
+            if sa is not None and ga is not None:
+                return float(sa) - float(ga)
+            return None
+    except Exception:
+        return None
+    return None
+
+
+def _nhl_player_games(pid, season) -> dict:
+    """Return {gameDate: gamelog_entry} for a player+season (regular + playoff merged)."""
+    out = {}
+    for gt in (2, 3):
+        try:
+            r = httpx.get(f"{NHL_API}/player/{pid}/game-log/{season}/{gt}",
+                          timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200:
+                continue
+            for g in r.json().get("gameLog", []):
+                gd = g.get("gameDate")
+                if gd:
+                    out[gd] = g
+        except Exception:
+            continue
+    return out
+
+
+def _nhl_settle_cached(bet: dict, games: dict) -> bool:
+    if bet.get("result") in ("WIN", "LOSS", "PUSH"):
+        return False
+    g = games.get(bet.get("date"))
+    if not g:
+        return False
+    actual = _nhl_extract_stat(g, bet.get("stat_key"))
+    if actual is None:
+        return False
+    try:
+        line = float(bet.get("line"))
+    except Exception:
+        return False
+    side = bet.get("side", "OVER")
+    if actual == line:
+        res = "PUSH"
+    elif side == "OVER":
+        res = "WIN" if actual > line else "LOSS"
+    else:
+        res = "WIN" if actual < line else "LOSS"
+    bet["result"] = res
+    bet["actual"] = actual
+    bet["profit"] = round(_nhl_american_profit(bet.get("odds"), bet.get("stake"), res), 2)
+    bet["settled_at"] = date.today().isoformat()
+    return True
+
+
+def _nhl_settle_batch(bets: list) -> bool:
+    today = date.today().isoformat()
+    need = {}
+    for b in bets:
+        if b.get("result") in ("WIN", "LOSS", "PUSH"):
+            continue
+        bdate, pid = b.get("date"), b.get("pid")
+        if not bdate or not pid or bdate >= today:
+            continue
+        for s in _nhl_seasons_for(bdate):
+            need.setdefault((str(pid), s), None)
+    if not need:
+        return False
+    cache = {}
+    for (pid, s) in need:
+        try:
+            cache[(pid, s)] = _nhl_player_games(pid, s)
+        except Exception as e:
+            print(f"[nhl_bet_log] settle fetch failed {pid}/{s}: {e}")
+            cache[(pid, s)] = {}
+    changed = False
+    for b in bets:
+        if b.get("result") in ("WIN", "LOSS", "PUSH"):
+            continue
+        bdate, pid = b.get("date"), str(b.get("pid") or "")
+        if not bdate or not pid or bdate >= today:
+            continue
+        merged = {}
+        for s in _nhl_seasons_for(bdate):
+            merged.update(cache.get((pid, s), {}))
+        if _nhl_settle_cached(b, merged):
+            changed = True
+    return changed
+
+
+def _nhl_settle_bet(bet: dict) -> bool:
+    bdate, pid = bet.get("date"), bet.get("pid")
+    if not bdate or not pid or bdate >= date.today().isoformat():
+        return False
+    merged = {}
+    for s in _nhl_seasons_for(bdate):
+        try:
+            merged.update(_nhl_player_games(pid, s))
+        except Exception:
+            pass
+    return _nhl_settle_cached(bet, merged)
+
+
+def _nhl_summarize_bets(bets: list) -> dict:
+    cats = {}
+    tot_staked = tot_profit = 0.0
+    w = l = pu = pend = 0
+    for b in bets:
+        res = b.get("result", "pending")
+        try:
+            stake = float(b.get("stake") or 0)
+        except Exception:
+            stake = 0.0
+        c = cats.setdefault(b.get("category", "?"),
+                            {"wins": 0, "losses": 0, "push": 0, "pending": 0,
+                             "staked": 0.0, "profit": 0.0})
+        if res == "WIN":
+            w += 1; c["wins"] += 1
+        elif res == "LOSS":
+            l += 1; c["losses"] += 1
+        elif res == "PUSH":
+            pu += 1; c["push"] += 1
+        else:
+            pend += 1; c["pending"] += 1
+        if res in ("WIN", "LOSS", "PUSH"):
+            prof = float(b.get("profit") or 0)
+            tot_staked += stake; c["staked"] += stake
+            tot_profit += prof; c["profit"] += prof
+    roi = (tot_profit / tot_staked * 100.0) if tot_staked > 0 else None
+    ordered = _NHL_CAT_ORDER + [k for k in cats if k not in _NHL_CAT_ORDER]
+    by_cat = []
+    for cat in ordered:
+        c = cats.get(cat)
+        if not c:
+            continue
+        st, pr = c["staked"], c["profit"]
+        by_cat.append({"category": cat, "wins": c["wins"], "losses": c["losses"],
+                       "push": c["push"], "pending": c["pending"],
+                       "staked": round(st, 2), "profit": round(pr, 2),
+                       "roi": round(pr / st * 100, 1) if st > 0 else None})
+    return {"wins": w, "losses": l, "push": pu, "pending": pend,
+            "staked": round(tot_staked, 2), "profit": round(tot_profit, 2),
+            "returned": round(tot_staked + tot_profit, 2),
+            "roi": round(roi, 1) if roi is not None else None,
+            "by_category": by_cat}
+
+
+@app.get("/api/bets")
+async def nhl_get_bets(request: Request, token: str = "", admin: str = "", settle: bool = True):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not _nhl_bet_admin_ok(tok, admin):
+        raise HTTPException(status_code=403, detail="Admin only")
+    with _NHL_BET_LOCK:
+        data = _nhl_load_bets()
+        key = _nhl_bet_user_key(tok, admin)
+        bets = data.get(key, [])
+        changed = _nhl_settle_batch(bets) if settle else False
+        if changed:
+            data[key] = bets
+            _nhl_save_bets(data)
+        snapshot = list(bets)
+    snapshot.sort(key=lambda b: (b.get("date", ""), b.get("placed_at", "")), reverse=True)
+    return {"bets": snapshot, "summary": _nhl_summarize_bets(snapshot)}
+
+
+@app.post("/api/bets")
+async def nhl_add_bet(request: Request, token: str = "", admin: str = ""):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not _nhl_bet_admin_ok(tok, admin):
+        raise HTTPException(status_code=403, detail="Admin only")
+    body = await request.json()
+    try:
+        stake = round(float(body.get("stake")), 2)
+        odds = int(round(float(body.get("odds"))))
+        line = float(body.get("line"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="stake, odds and line must be numbers")
+    if stake <= 0:
+        raise HTTPException(status_code=400, detail="Bet size must be greater than 0")
+    name = (body.get("name") or "").strip()
+    stat_key = (body.get("stat_key") or "").strip().upper()
+    side = (body.get("side") or "OVER").strip().upper()
+    if not name or stat_key not in _NHL_BET_STAT_KEYS or side not in ("OVER", "UNDER"):
+        raise HTTPException(status_code=400, detail="Invalid bet")
+    bdate = (body.get("date") or date.today().isoformat()).strip()
+    bet = {"id": _bt_uuid.uuid4().hex[:12], "date": bdate,
+           "name": name, "pid": str(body.get("pid") or ""),
+           "team": (body.get("team") or "").strip(),
+           "opp": (body.get("opp") or "").strip(),
+           "category": (body.get("category") or _NHL_STAT_LABEL.get(stat_key, "?")).strip(),
+           "side": side, "stat_key": stat_key,
+           "stat_label": (body.get("stat_label") or _NHL_STAT_LABEL.get(stat_key, "")).strip(),
+           "line": line, "odds": odds, "stake": stake,
+           "placed_at": (body.get("placed_at") or date.today().isoformat()),
+           "result": "pending", "actual": None, "profit": None, "settled_at": None}
+    try:
+        _nhl_settle_bet(bet)
+    except Exception:
+        pass
+    with _NHL_BET_LOCK:
+        data = _nhl_load_bets()
+        key = _nhl_bet_user_key(tok, admin)
+        data.setdefault(key, []).append(bet)
+        _nhl_save_bets(data)
+    return {"ok": True, "bet": bet}
+
+
+@app.delete("/api/bets/{bet_id}")
+async def nhl_delete_bet(bet_id: str, request: Request, token: str = "", admin: str = ""):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not _nhl_bet_admin_ok(tok, admin):
+        raise HTTPException(status_code=403, detail="Admin only")
+    with _NHL_BET_LOCK:
+        data = _nhl_load_bets()
+        key = _nhl_bet_user_key(tok, admin)
+        bets = data.get(key, [])
+        new_bets = [b for b in bets if b.get("id") != bet_id]
+        if len(new_bets) != len(bets):
+            data[key] = new_bets
+            _nhl_save_bets(data)
+    return {"ok": True}
+
+
+@app.get("/api/bets/summary")
+async def nhl_bets_summary(request: Request, token: str = "", admin: str = "", settle: bool = True):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not _nhl_bet_admin_ok(tok, admin):
+        raise HTTPException(status_code=403, detail="Admin only")
+    with _NHL_BET_LOCK:
+        data = _nhl_load_bets()
+        key = _nhl_bet_user_key(tok, admin)
+        bets = data.get(key, [])
+        if settle and _nhl_settle_batch(bets):
+            data[key] = bets
+            _nhl_save_bets(data)
+        snapshot = list(bets)
+    return {"sport": "NHL", "summary": _nhl_summarize_bets(snapshot)}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Routes
