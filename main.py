@@ -1186,6 +1186,10 @@ tr:last-child td{border-bottom:none}
 @keyframes spin{to{transform:rotate(360deg)}}
 .err-box{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:12px;padding:20px;text-align:center;color:#f87171;font-weight:700}
 .no-picks{text-align:center;padding:50px;color:#4b5563}
+.more-btn{width:100%;margin-top:6px;padding:11px 16px;background:#0f172a;border:1px solid #334155;border-radius:12px;font-size:.82rem;font-weight:700;cursor:pointer;letter-spacing:.04em;text-align:center}
+.more-btn:hover{background:#1e293b}
+details>summary{cursor:pointer;list-style:none;user-select:none}
+details>summary::-webkit-details-marker{display:none}
 footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border-top:1px solid #1c1c1c;margin-top:24px;font-family:'Source Sans Pro',sans-serif}
 .ft-logo{font-family:'Playfair Display',serif;color:#f59e0b;font-weight:700;font-size:.95rem;margin-bottom:6px}
 .admin-only{display:none !important}
@@ -1582,6 +1586,14 @@ function nhlCardGrid(picks){
   if(!picks||!picks.length) return '<div class="no-picks">No qualifying picks for this market.</div>';
   return '<div class="picks-grid">'+picks.map(function(p,i){return nhlCard(p,i+1);}).join('')+'</div>';
 }
+function nhlRestBlock(rest, label, color){
+  if(!rest || !rest.length) return '';
+  var c = color || '#4ade80';
+  return '<details style="margin-top:8px"><summary class="more-btn" style="color:'+c+';border-color:'+c+'33">&#9655; '+rest.length+' more '+label+'</summary>'
+    + '<div class="picks-grid" style="margin-top:12px">'
+    + rest.map(function(p,i){return nhlCard(p, 10+i+1);}).join('')
+    + '</div></details>';
+}
 function underClass(r){ return r>=75?'green':r>=65?'gold':'red-txt'; }
 function nhlUnderCard(p,i){
   var season=(window.__NHL_SEASON__||'20252026');
@@ -1835,6 +1847,7 @@ function _nhlPaint(q){
   // SHOTS cards (OVER)
   h += '<div class="sec">🏒 Top ' + ((d.picks||[]).length) + ' Shots on Goal — OVER</div>';
   h += nhlCardGrid(d.picks);
+  h += nhlRestBlock(d.rest, 'shots', '#4ade80');
 
   // Shots UNDER cards
   if((d.shotUnders||[]).length){
@@ -1846,6 +1859,7 @@ function _nhlPaint(q){
   if((d.ptsPicks||[]).length){
     h += '<div class="sec">🎯 Top ' + d.ptsPicks.length + ' Points (1+)</div>';
     h += nhlCardGrid(d.ptsPicks);
+    h += nhlRestBlock(d.ptsRest, 'points', '#a78bfa');
   }
   if((d.ptsUnders||[]).length){
     h += '<div class="sec">⬇ ' + d.ptsUnders.length + ' Points (1+) — UNDER</div>';
@@ -1855,6 +1869,7 @@ function _nhlPaint(q){
   if((d.astPicks||[]).length){
     h += '<div class="sec">🅰️ Top ' + d.astPicks.length + ' Assists (1+)</div>';
     h += nhlCardGrid(d.astPicks);
+    h += nhlRestBlock(d.astRest, 'assists', '#f59e0b');
   }
   if((d.astUnders||[]).length){
     h += '<div class="sec">⬇ ' + d.astUnders.length + ' Assists (1+) — UNDER</div>';
@@ -1864,6 +1879,7 @@ function _nhlPaint(q){
   if((d.savesPicks||[]).length){
     h += '<div class="sec">🧤 Top ' + d.savesPicks.length + ' Goalie Saves</div>';
     h += nhlCardGrid(d.savesPicks);
+    h += nhlRestBlock(d.savesRest, 'saves', '#60a5fa');
   }
   if((d.savesUnders||[]).length){
     h += '<div class="sec">⬇ ' + d.savesUnders.length + ' Goalie Saves — UNDER</div>';
