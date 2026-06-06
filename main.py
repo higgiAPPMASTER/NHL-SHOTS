@@ -2159,6 +2159,8 @@ _NHL_BET_STAT_KEYS = ("SHOTS", "POINTS", "ASSISTS", "SAVES")
 _NHL_STAT_LABEL = {"SHOTS": "Shots on Goal", "POINTS": "Points",
                    "ASSISTS": "Assists", "SAVES": "Goalie Saves"}
 _NHL_CAT_ORDER = ["Shots on Goal", "Points", "Assists", "Goalie Saves"]
+_NHL_BOX_CACHE: dict = {}   # (pid, season) → (games_dict, timestamp, permanent)
+_NHL_BOX_LOCK = _bt_th.Lock()
 
 
 def _nhl_load_bets() -> dict:
@@ -2242,22 +2244,49 @@ def _nhl_extract_stat(g: dict, stat_key: str):
     return None
 
 
-def _nhl_player_games(pid, season) -> dict:
-    """Return {gameDate: gamelog_entry} for a player+season (regular + playoff merged)."""
+def _nhl_season_is_final(season: str) -> bool:
+    try:
+        end_y = int(season[4:8])
+        return date.today() > date(end_y, 6, 30)
+    except Exception:
+        return False
+
+
+def _nhl_player_games_raw(pid, season) -> tuple:
+    """Return (games_dict, complete) with cache. complete=True when all fetches succeeded."""
+    key = (str(pid), season)
+    with _NHL_BOX_LOCK:
+        entry = _NHL_BOX_CACHE.get(key)
+    if entry:
+        games, ts, permanent = entry
+        if permanent or (time.time() - ts < 120):
+            return games, True
     out = {}
+    ok = True
     for gt in (2, 3):
         try:
             r = httpx.get(f"{NHL_API}/player/{pid}/game-log/{season}/{gt}",
                           timeout=15, headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code != 200:
+                ok = False
                 continue
             for g in r.json().get("gameLog", []):
                 gd = g.get("gameDate")
                 if gd:
                     out[gd] = g
-        except Exception:
-            continue
-    return out
+        except Exception as e:
+            print(f"[nhl_box] fetch {pid}/{season}/{gt}: {e}")
+            ok = False
+    permanent = ok and _nhl_season_is_final(season)
+    with _NHL_BOX_LOCK:
+        _NHL_BOX_CACHE[key] = (out, time.time(), permanent)
+    return out, ok
+
+
+def _nhl_player_games(pid, season) -> dict:
+    """Return {gameDate: gamelog_entry} for a player+season (regular + playoff merged)."""
+    games, _ = _nhl_player_games_raw(pid, season)
+    return games
 
 
 def _nhl_settle_cached(bet: dict, games: dict) -> bool:
@@ -2287,7 +2316,8 @@ def _nhl_settle_cached(bet: dict, games: dict) -> bool:
     return True
 
 
-def _nhl_settle_batch(bets: list) -> bool:
+def _nhl_settle_batch(bets: list) -> tuple:
+    """Return (changed, complete). complete=True when all fetches succeeded."""
     today = date.today().isoformat()
     need = {}
     for b in bets:
@@ -2299,14 +2329,19 @@ def _nhl_settle_batch(bets: list) -> bool:
         for s in _nhl_seasons_for(bdate):
             need.setdefault((str(pid), s), None)
     if not need:
-        return False
+        return False, True
     cache = {}
+    all_ok = True
     for (pid, s) in need:
         try:
-            cache[(pid, s)] = _nhl_player_games(pid, s)
+            games, ok = _nhl_player_games_raw(pid, s)
+            cache[(pid, s)] = games
+            if not ok:
+                all_ok = False
         except Exception as e:
             print(f"[nhl_bet_log] settle fetch failed {pid}/{s}: {e}")
             cache[(pid, s)] = {}
+            all_ok = False
     changed = False
     for b in bets:
         if b.get("result") in ("WIN", "LOSS", "PUSH"):
@@ -2319,7 +2354,7 @@ def _nhl_settle_batch(bets: list) -> bool:
             merged.update(cache.get((pid, s), {}))
         if _nhl_settle_cached(b, merged):
             changed = True
-    return changed
+    return changed, all_ok
 
 
 def _nhl_settle_bet(bet: dict) -> bool:
@@ -2384,17 +2419,29 @@ async def nhl_get_bets(request: Request, token: str = "", admin: str = "", settl
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     if not _nhl_bet_admin_ok(tok, admin):
         raise HTTPException(status_code=403, detail="Admin only")
+    key = _nhl_bet_user_key(tok, admin)
+    # load + release lock before settling (network calls must not hold the lock)
     with _NHL_BET_LOCK:
         data = _nhl_load_bets()
-        key = _nhl_bet_user_key(tok, admin)
-        bets = data.get(key, [])
-        changed = _nhl_settle_batch(bets) if settle else False
+        bets = list(data.get(key, []))
+    if settle:
+        loop = asyncio.get_running_loop()
+        changed, _ = await loop.run_in_executor(None, _nhl_settle_batch, bets)
         if changed:
-            data[key] = bets
-            _nhl_save_bets(data)
-        snapshot = list(bets)
-    snapshot.sort(key=lambda b: (b.get("date", ""), b.get("placed_at", "")), reverse=True)
-    return {"bets": snapshot, "summary": _nhl_summarize_bets(snapshot)}
+            # merge terminal-only: apply WIN/LOSS/PUSH onto still-pending on-disk bets
+            with _NHL_BET_LOCK:
+                data2 = _nhl_load_bets()
+                disk = {b["id"]: b for b in data2.get(key, [])}
+                for b in bets:
+                    if b.get("result") in ("WIN", "LOSS", "PUSH"):
+                        d = disk.get(b["id"])
+                        if d and d.get("result") not in ("WIN", "LOSS", "PUSH"):
+                            d.update({"result": b["result"], "actual": b.get("actual"),
+                                      "profit": b.get("profit"), "settled_at": b.get("settled_at")})
+                data2[key] = list(disk.values())
+                _nhl_save_bets(data2)
+    bets.sort(key=lambda b: (b.get("date", ""), b.get("placed_at", "")), reverse=True)
+    return {"bets": bets, "summary": _nhl_summarize_bets(bets)}
 
 
 @app.post("/api/bets")
@@ -2460,15 +2507,26 @@ async def nhl_bets_summary(request: Request, token: str = "", admin: str = "", s
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     if not _nhl_bet_admin_ok(tok, admin):
         raise HTTPException(status_code=403, detail="Admin only")
+    key = _nhl_bet_user_key(tok, admin)
     with _NHL_BET_LOCK:
         data = _nhl_load_bets()
-        key = _nhl_bet_user_key(tok, admin)
-        bets = data.get(key, [])
-        if settle and _nhl_settle_batch(bets):
-            data[key] = bets
-            _nhl_save_bets(data)
-        snapshot = list(bets)
-    return {"sport": "NHL", "summary": _nhl_summarize_bets(snapshot)}
+        bets = list(data.get(key, []))
+    if settle:
+        loop = asyncio.get_running_loop()
+        changed, _ = await loop.run_in_executor(None, _nhl_settle_batch, bets)
+        if changed:
+            with _NHL_BET_LOCK:
+                data2 = _nhl_load_bets()
+                disk = {b["id"]: b for b in data2.get(key, [])}
+                for b in bets:
+                    if b.get("result") in ("WIN", "LOSS", "PUSH"):
+                        d = disk.get(b["id"])
+                        if d and d.get("result") not in ("WIN", "LOSS", "PUSH"):
+                            d.update({"result": b["result"], "actual": b.get("actual"),
+                                      "profit": b.get("profit"), "settled_at": b.get("settled_at")})
+                data2[key] = list(disk.values())
+                _nhl_save_bets(data2)
+    return {"sport": "NHL", "summary": _nhl_summarize_bets(bets)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
