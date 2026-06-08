@@ -354,6 +354,53 @@ def _under_fields(logs, stat_key, uline, hr, opp):
     }
 
 
+def _parse_toi(s: str) -> int:
+    """'MM:SS' → seconds. Returns 0 on failure."""
+    try:
+        parts = str(s or "0:00").split(":")
+        return int(parts[0]) * 60 + int(parts[1])
+    except Exception:
+        return 0
+
+
+def _hot_streak(logs: List[Dict], stat_key: str, line: float, hr: str, n: int = 5) -> Tuple[int, int]:
+    """Count hits over `line` in last `n` H/A games. Returns (hits, total)."""
+    games = [g for g in logs if g.get("homeRoad") == hr][:n]
+    return sum(1 for g in games if g.get(stat_key, 0) > line), len(games)
+
+
+async def get_opp_goalie_svpct(season: str) -> Dict[str, float]:
+    """Returns team_abbrev → primary goalie season SV% (goalie with most GP on team).
+    Used to display opposing goalie quality on each skater card."""
+    import urllib.parse
+    sort_p = urllib.parse.quote('[{"property":"gamesPlayed","direction":"DESC"}]')
+    url = (f"{NHL_STATS}/goalie/summary"
+           f"?isAggregate=false&isGame=false&sort={sort_p}"
+           f"&start=0&limit=200&factCayenneExp=gamesPlayed>=3"
+           f"&cayenneExp=gameTypeId=2 and seasonId<={season} and seasonId>={season}")
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
+            data = await _fetch(url, c)
+        if not data:
+            return {}
+        team_best: Dict[str, Dict] = {}
+        for g in data.get("data", []):
+            team = (g.get("teamAbbrevs") or "").strip()
+            sv = float(g.get("savePct") or 0)
+            gp = int(g.get("gamesPlayed") or 0)
+            name = g.get("goalieFullName") or g.get("skaterFullName", "")
+            if not team or "," in team:
+                continue
+            if team not in team_best or gp > team_best[team]["gp"]:
+                team_best[team] = {"sv": sv, "gp": gp, "name": name}
+        result = {team: round(v["sv"], 3) for team, v in team_best.items()}
+        print(f"[Goalies] SV% map: {len(result)} teams")
+        return result
+    except Exception as e:
+        print(f"[Goalies] SV% fetch error: {e}")
+        return {}
+
+
 async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     """Fetch real shots on goal lines from The Odds API.
     Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
@@ -573,12 +620,14 @@ async def _pts_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[
             goals   = int(g.get("goals",   0) or 0)
             assists = int(g.get("assists", 0) or 0)
             logs.append({
-                "date":     g.get("gameDate",     ""),
-                "points":   goals + assists,
-                "goals":    goals,
-                "assists":  assists,
-                "homeRoad": g.get("homeRoadFlag", ""),
-                "opponent": g.get("opponentAbbrev", ""),
+                "date":       g.get("gameDate",     ""),
+                "points":     goals + assists,
+                "goals":      goals,
+                "assists":    assists,
+                "toi_sec":    _parse_toi(g.get("toi", "0:00")),
+                "pp_toi_sec": _parse_toi(g.get("powerPlayToi", "0:00")),
+                "homeRoad":   g.get("homeRoadFlag", ""),
+                "opponent":   g.get("opponentAbbrev", ""),
             })
     return logs
 
@@ -614,6 +663,7 @@ async def get_pts_picks(
     ast_lines_map: Dict[str, Dict] = None,
     target_date: str = None,
     goal_lines_map: Dict[str, Dict] = None,
+    goalie_map: Dict[str, float] = None,
 ):
     """Independent points + assists + goals picks using NHL Stats API game logs.
     Returns (points_picks, assist_picks, points_unders, assist_unders, goal_picks, goal_unders)."""
@@ -621,6 +671,7 @@ async def get_pts_picks(
     pts_lines_map = pts_lines_map or {}
     ast_lines_map = ast_lines_map or {}
     goal_lines_map = goal_lines_map or {}
+    goalie_map = goalie_map or {}
 
     # Build team context
     team_ctx: Dict[str, Dict] = {}
@@ -715,6 +766,12 @@ async def get_pts_picks(
             g_src = ([g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
                      or [g for g in logs if g["homeRoad"] == hr][:10])
             glog = [{"d": g["date"], "v": g[stat_key]} for g in g_src]
+            # Signal factors
+            toi_avg_sec = round(sum(g.get("toi_sec", 0) for g in r_logs) / len(r_logs)) if r_logs else 0
+            pp_toi_avg_sec = round(sum(g.get("pp_toi_sec", 0) for g in r_logs) / len(r_logs)) if r_logs else 0
+            hot_hits_p, hot_total_p = _hot_streak(logs, stat_key, base_line, hr, 5)
+            rest_days_p = _days_rest(logs, target_date)
+            opp_sv = goalie_map.get(opp)
             return {
                 "name": player["name"], "pid": player["id"], "team": team,
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
@@ -729,6 +786,9 @@ async def get_pts_picks(
                 "gap": gap, "tag": tag,
                 **uf, "overOk": over_ok,
                 "glog": glog,
+                "restDays": rest_days_p, "hotHits": hot_hits_p, "hotTotal": hot_total_p,
+                "toiAvgSec": toi_avg_sec, "ppToiAvgSec": pp_toi_avg_sec,
+                "oppGoalieSv": opp_sv,
             }
 
         pp = build_pick("points", PTS_LINE, HIT_THRESH_PTS, pts_lines_map, "Points (1+)")
@@ -855,6 +915,8 @@ async def get_saves_picks(
 
         g_src = c_logs or r_logs
         glog = [{"d": g["date"], "v": g["saves"]} for g in g_src]
+        rest_days_sv = _days_rest(logs, target_date)
+        hot_hits_sv, hot_total_sv = _hot_streak(logs, "saves", base_line, hr, 5)
 
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
@@ -871,6 +933,8 @@ async def get_saves_picks(
             "gap": gap, "tag": tag,
             **uf, "overOk": over_ok,
             "glog": glog,
+            "restDays": rest_days_sv, "hotHits": hot_hits_sv, "hotTotal": hot_total_sv,
+            "toiAvgSec": 0, "ppToiAvgSec": 0, "oppGoalieSv": None,
         }
         if over_ok: picks.append(rec)
         if uf["underOk"]: unders.append(rec)
@@ -899,11 +963,15 @@ async def _nhl_player_logs(pid: int, sem: asyncio.Semaphore) -> List[Dict]:
         if not isinstance(data, dict): continue
         for g in data.get("gameLog", []):
             all_logs.append({
-                "date":     g.get("gameDate", ""),
-                "shots":    int(g.get("shots", 0) or 0),
-                "points":   int(g.get("goals", 0) or 0) + int(g.get("assists", 0) or 0),
-                "homeRoad": g.get("homeRoadFlag", ""),
-                "opponent": g.get("opponentAbbrev", ""),
+                "date":       g.get("gameDate", ""),
+                "shots":      int(g.get("shots", 0) or 0),
+                "goals":      int(g.get("goals", 0) or 0),
+                "assists":    int(g.get("assists", 0) or 0),
+                "points":     int(g.get("goals", 0) or 0) + int(g.get("assists", 0) or 0),
+                "toi_sec":    _parse_toi(g.get("toi", "0:00")),
+                "pp_toi_sec": _parse_toi(g.get("powerPlayToi", "0:00")),
+                "homeRoad":   g.get("homeRoadFlag", ""),
+                "opponent":   g.get("opponentAbbrev", ""),
             })
     all_logs.sort(key=lambda x: x["date"], reverse=True)
     return all_logs
@@ -941,10 +1009,11 @@ async def run_picks(target_date: str = None) -> Dict:
                 "message": f"No NHL games scheduled for {target_date}.",
                 "picks": [], "games": []}
 
-    # Games exist — now fetch SA map + sportsbook lines in parallel.
-    sa_map, _lines_tuple = await asyncio.gather(
+    # Games exist — now fetch SA map, lines, and goalie SV% map in parallel.
+    sa_map, _lines_tuple, goalie_map = await asyncio.gather(
         get_team_sa_map(season),
         get_shot_lines(target_date),
+        get_opp_goalie_svpct(season),
     )
     lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map = _lines_tuple
     _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
@@ -1017,11 +1086,18 @@ async def run_picks(target_date: str = None) -> Dict:
         glog = [{"d": g["date"], "v": g["shots"]} for g in _gsrc]
 
         # Opponent-adjusted projected shot count + edge vs the line
+        rest_days = _days_rest(logs, target_date)
         proj, opp_factor, rest_factor = _proj_count(
-            avg3, t3, avg2, t2, p.get("oppSA", 0.0), league_sa, _days_rest(logs, target_date))
+            avg3, t3, avg2, t2, p.get("oppSA", 0.0), league_sa, rest_days)
         proj_line = real_line if real_line is not None else line
         proj_edge = round(proj - proj_line, 2)
         proj_pick = "OVER" if proj_edge > 0 else ("UNDER" if proj_edge < 0 else "")
+
+        # Signal factors
+        toi_avg_sec = round(sum(g.get("toi_sec", 0) for g in _ha) / len(_ha)) if _ha else 0
+        pp_toi_avg_sec = round(sum(g.get("pp_toi_sec", 0) for g in _ha) / len(_ha)) if _ha else 0
+        hot_hits, hot_total = _hot_streak(logs, "shots", line, hr, 5)
+        opp_sv = goalie_map.get(opp)
 
         return {
             **p,
@@ -1041,6 +1117,9 @@ async def run_picks(target_date: str = None) -> Dict:
             "proj": proj, "projEdge": proj_edge, "projPick": proj_pick,
             "oppFactor": opp_factor, "restFactor": rest_factor, "leagueSA": league_sa,
             "glog": glog,
+            "restDays": rest_days, "hotHits": hot_hits, "hotTotal": hot_total,
+            "toiAvgSec": toi_avg_sec, "ppToiAvgSec": pp_toi_avg_sec,
+            "oppGoalieSv": opp_sv,
         }
 
     completed = [0]
@@ -1062,7 +1141,8 @@ async def run_picks(target_date: str = None) -> Dict:
     picks.sort(key=lambda x: (x.get("projEdge", -999), x["score"], x["oppSA"]), reverse=True)
 
     pts_all, ast_all, pts_unders, ast_unders, goal_all, goal_unders_all = await get_pts_picks(
-        games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date, goal_lines_map)
+        games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date, goal_lines_map,
+        goalie_map=goalie_map)
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
     saves_all, saves_unders = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map, target_date)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
@@ -1228,6 +1308,18 @@ body.is-admin #parlayCard{display:block}
 .pick-card.acc-shots{border-top:3px solid #f59e0b}
 .pick-card.acc-ast{border-top:3px solid #a78bfa}
 .pick-card.acc-sv{border-top:3px solid #34d399}
+.pick-card.acc-goals{border-top:3px solid #34d399}
+.sig-row{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 4px}
+.sig-badge{font-size:.65rem;font-weight:700;padding:2px 7px;border-radius:999px;letter-spacing:.03em;white-space:nowrap}
+.sig-b2b{background:rgba(248,113,113,.15);color:#f87171;border:1px solid rgba(248,113,113,.3)}
+.sig-fresh{background:rgba(52,211,153,.12);color:#34d399;border:1px solid rgba(52,211,153,.25)}
+.sig-hot{background:rgba(251,146,60,.15);color:#fb923c;border:1px solid rgba(251,146,60,.3)}
+.sig-cold{background:rgba(96,165,250,.12);color:#60a5fa;border:1px solid rgba(96,165,250,.25)}
+.sig-toi{background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.25)}
+.sig-pp{background:rgba(245,158,11,.1);color:#f59e0b;border:1px solid rgba(245,158,11,.25)}
+.sig-sv-good{background:rgba(52,211,153,.12);color:#34d399;border:1px solid rgba(52,211,153,.25)}
+.sig-sv-avg{background:rgba(107,114,128,.15);color:#9ca3af;border:1px solid rgba(107,114,128,.25)}
+.sig-sv-tough{background:rgba(248,113,113,.15);color:#f87171;border:1px solid rgba(248,113,113,.3)}
 .pc-rank{position:absolute;top:10px;right:14px;font-family:'Playfair Display',serif;font-weight:900;font-size:1.6rem;color:rgba(245,158,11,.35)}
 .pc-top{display:flex;align-items:center;gap:12px;margin-bottom:10px}
 .hs-wrap{position:relative;width:58px;height:58px;border-radius:50%;flex:0 0 auto;background:#222;border:2px solid #333;overflow:visible;display:flex;align-items:center;justify-content:center}
@@ -1558,7 +1650,36 @@ function _accFor(mkt){
   if(mkt==='Points (1+)') return 'acc-pts';
   if(mkt==='Assists (1+)') return 'acc-ast';
   if(mkt==='Goalie Saves') return 'acc-sv';
+  if(mkt==='Goals (1+)') return 'acc-goals';
   return 'acc-shots';
+}
+function _fmtToi(sec){
+  if(!sec||sec<60) return '';
+  var m=Math.floor(sec/60),s=sec%60;
+  return m+':'+(s<10?'0':'')+s;
+}
+function _sigBadges(p){
+  var out='';
+  var rd=p.restDays;
+  if(rd!=null){
+    if(rd<=1) out+='<span class="sig-badge sig-b2b">B2B / No Rest</span>';
+    else if(rd>=3) out+='<span class="sig-badge sig-fresh">'+rd+'d Rest</span>';
+  }
+  var hh=p.hotHits, ht=p.hotTotal;
+  if(ht>=3){
+    if(hh>=4) out+='<span class="sig-badge sig-hot">&#128293; '+hh+'/'+ht+' Hot</span>';
+    else if(hh<=1) out+='<span class="sig-badge sig-cold">&#10052; '+hh+'/'+ht+' Cold</span>';
+  }
+  var toi=_fmtToi(p.toiAvgSec);
+  if(toi) out+='<span class="sig-badge sig-toi">'+toi+' TOI</span>';
+  if(p.ppToiAvgSec>60){var pp=_fmtToi(p.ppToiAvgSec);out+='<span class="sig-badge sig-pp">'+pp+' PP</span>';}
+  var sv=p.oppGoalieSv;
+  if(sv!=null&&sv>0){
+    var svStr=sv.toFixed(3);
+    var cls=sv<0.895?'sig-sv-good':sv>0.915?'sig-sv-tough':'sig-sv-avg';
+    out+='<span class="sig-badge '+cls+'">Opp G .'+Math.round(sv*1000)+'</span>';
+  }
+  return out?'<div class="sig-row">'+out+'</div>':'';
 }
 function _ladKey(p){ return 'nlad_'+p.pid+'_'+String(p.mkt||'').replace(/[^a-z]/gi,''); }
 function _rateHtml(rate,hits,tot){
@@ -1592,6 +1713,7 @@ function nhlCard(p,i){
        </div>
      </div>
      <div class="pc-tagrow">${fmtTag(p.tag)}</div>
+     ${_sigBadges(p)}
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Line</span></div>
      ${p.proj!=null?`<div class="pc-proj"><span class="pp-lab">Projected</span><span class="pp-num">${p.proj}</span><span class="pp-edge ${p.projEdge>=0?'pos':'neg'}">${p.projEdge>=0?'+':''}${p.projEdge}</span></div>`:''}
      <div class="pc-stats">
@@ -1642,6 +1764,7 @@ function nhlUnderCard(p,i){
          <div class="pc-mkt">${p.mkt||''} · UNDER</div>
        </div>
      </div>
+     ${_sigBadges(p)}
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Under Line</span></div>
      <div class="pc-stats">
        <div class="pc-stat"><div class="k">Under vs ${p.opponent}</div><div class="v">${voHtml}</div></div>
