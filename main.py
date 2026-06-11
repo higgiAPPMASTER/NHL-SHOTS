@@ -439,44 +439,74 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                     continue
 
                 for ev in events:
+                    # Only the over/under markets here. player_goal_scorer is NOT a
+                    # valid Odds API key and a single invalid market 422s the WHOLE
+                    # request (returns zero data for every market), so goal scorer is
+                    # fetched separately below in an isolated call.
                     r2 = await c.get(
                         f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
                         params={"apiKey": api_key, "regions": "us,us2",
                                 "markets": ("player_shots_on_goal,player_points,"
-                                            "player_assists,player_total_saves,player_goal_scorer"),
+                                            "player_assists,player_total_saves"),
                                 "oddsFormat": "american"})
-                    if r2.status_code != 200:
-                        continue
-                    # Iterate ALL bookmakers so every player gets a line even if
-                    # no single book covers the full slate.
-                    targets = {
-                        "player_shots_on_goal": lines,
-                        "player_points":        pts_lines,
-                        "player_assists":       ast_lines,
-                        "player_total_saves":   sv_lines,
-                        "player_goal_scorer":   goal_lines,
-                    }
-                    for book in r2.json().get("bookmakers", []):
-                        for mkt in book.get("markets", []):
-                            mkey = mkt.get("key")
-                            if mkey not in targets:
-                                continue
-                            target = targets[mkey]
-                            for oc in mkt.get("outcomes", []):
-                                nm = oc.get("name")
-                                if nm not in ("Over", "Under"):
+                    if r2.status_code == 200:
+                        # Iterate ALL bookmakers so every player gets a line even if
+                        # no single book covers the full slate.
+                        targets = {
+                            "player_shots_on_goal": lines,
+                            "player_points":        pts_lines,
+                            "player_assists":       ast_lines,
+                            "player_total_saves":   sv_lines,
+                        }
+                        for book in r2.json().get("bookmakers", []):
+                            for mkt in book.get("markets", []):
+                                mkey = mkt.get("key")
+                                if mkey not in targets:
                                     continue
-                                player = oc.get("description", "").strip()
-                                line   = float(oc.get("point") or 0)
-                                if not player or line <= 0:
-                                    continue
-                                rec = target.setdefault(player, {
-                                    "line": line, "odds": "",
-                                    "under_odds": "", "source": "OddsAPI"})
-                                if nm == "Over" and not rec["odds"]:
-                                    rec["odds"] = str(oc.get("price", ""))
-                                elif nm == "Under" and not rec["under_odds"]:
-                                    rec["under_odds"] = str(oc.get("price", ""))
+                                target = targets[mkey]
+                                for oc in mkt.get("outcomes", []):
+                                    nm = oc.get("name")
+                                    if nm not in ("Over", "Under"):
+                                        continue
+                                    player = oc.get("description", "").strip()
+                                    line   = float(oc.get("point") or 0)
+                                    if not player or line <= 0:
+                                        continue
+                                    rec = target.setdefault(player, {
+                                        "line": line, "odds": "",
+                                        "under_odds": "", "source": "OddsAPI"})
+                                    if nm == "Over" and not rec["odds"]:
+                                        rec["odds"] = str(oc.get("price", ""))
+                                    elif nm == "Under" and not rec["under_odds"]:
+                                        rec["under_odds"] = str(oc.get("price", ""))
+
+                    # Anytime goal scorer — isolated so a missing/invalid market on
+                    # this plan can never wipe out the four markets above. It's a
+                    # Yes/No market (no point line), so we store line 0.5 + the Yes price.
+                    try:
+                        rg = await c.get(
+                            f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
+                            params={"apiKey": api_key, "regions": "us,us2",
+                                    "markets": "player_goal_scorer_anytime",
+                                    "oddsFormat": "american"})
+                        if rg.status_code == 200:
+                            for book in rg.json().get("bookmakers", []):
+                                for mkt in book.get("markets", []):
+                                    if mkt.get("key") != "player_goal_scorer_anytime":
+                                        continue
+                                    for oc in mkt.get("outcomes", []):
+                                        if oc.get("name") != "Yes":
+                                            continue
+                                        player = oc.get("description", "").strip()
+                                        if not player:
+                                            continue
+                                        rec = goal_lines.setdefault(player, {
+                                            "line": 0.5, "odds": "",
+                                            "under_odds": "", "source": "OddsAPI"})
+                                        if not rec["odds"]:
+                                            rec["odds"] = str(oc.get("price", ""))
+                    except Exception as _ge:
+                        print(f"[Lines] goal-scorer fetch skipped: {_ge}")
 
                 if lines or pts_lines or ast_lines or sv_lines or goal_lines:
                     break  # found lines — no need to try next sport key
