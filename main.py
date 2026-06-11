@@ -2814,6 +2814,68 @@ async def api_status():
         "time":      datetime.utcnow().isoformat(),
     }
 
+@app.get("/api/odds-debug")
+async def api_odds_debug(dt: str = None, admin: str = ""):
+    """Admin-gated diagnostic: surfaces exactly what The Odds API returns for
+    NHL player props so silent fetch failures (bad key/plan/markets/region) are
+    visible without Render logs. Visit ?admin=INTERNAL_API_TOKEN&dt=YYYY-MM-DD."""
+    if admin != os.environ.get("INTERNAL_API_TOKEN", "__none__"):
+        return JSONResponse({"error": "admin token required"}, status_code=403)
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if not api_key:
+        return JSONResponse({"error": "ODDS_API_KEY not set on this service"})
+    target_date = dt or date.today().isoformat()
+    tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
+    out = {"target_date": target_date, "tomorrow": tomorrow,
+           "key_tail": api_key[-4:], "sport_keys": {}}
+    MKTS = ("player_shots_on_goal,player_points,player_assists,"
+            "player_total_saves,player_goal_scorer")
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            for sport_key in ["icehockey_nhl", "icehockey_nhl_championship"]:
+                sk = {"events_status": None, "events_total": 0,
+                      "events_in_window": 0, "sample_events": [], "per_event": []}
+                r = await c.get(f"{ODDS_API}/sports/{sport_key}/events",
+                                params={"apiKey": api_key, "dateFormat": "iso"})
+                sk["events_status"] = r.status_code
+                sk["quota_remaining"] = r.headers.get("x-requests-remaining")
+                if r.status_code == 200:
+                    evs = r.json()
+                    sk["events_total"] = len(evs)
+                    win = [e for e in evs
+                           if e.get("commence_time", "")[:10] in (target_date, tomorrow)]
+                    sk["events_in_window"] = len(win)
+                    sk["sample_events"] = [
+                        {"home": e.get("home_team"), "away": e.get("away_team"),
+                         "commence": e.get("commence_time")} for e in evs[:6]]
+                    for ev in win[:3]:
+                        r2 = await c.get(
+                            f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
+                            params={"apiKey": api_key, "regions": "us,us2",
+                                    "markets": MKTS, "oddsFormat": "american"})
+                        info = {"event": f"{ev.get('away_team')} @ {ev.get('home_team')}",
+                                "odds_status": r2.status_code,
+                                "body_head": (r2.text[:300] if r2.status_code != 200 else None),
+                                "books": [], "market_counts": {}, "sample_players": []}
+                        if r2.status_code == 200:
+                            for book in r2.json().get("bookmakers", []):
+                                info["books"].append(book.get("key"))
+                                for mkt in book.get("markets", []):
+                                    mk = mkt.get("key")
+                                    n = len(mkt.get("outcomes", []))
+                                    info["market_counts"][mk] = info["market_counts"].get(mk, 0) + n
+                                    for oc in mkt.get("outcomes", [])[:3]:
+                                        nm = oc.get("description", "")
+                                        if nm and nm not in info["sample_players"]:
+                                            info["sample_players"].append(nm)
+                        sk["per_event"].append(info)
+                else:
+                    sk["body_head"] = r.text[:300]
+                out["sport_keys"][sport_key] = sk
+    except Exception as e:
+        out["exception"] = f"{type(e).__name__}: {e}"
+    return JSONResponse(out)
+
 @app.get("/api/progress")
 async def api_progress():
     return JSONResponse(_progress)
