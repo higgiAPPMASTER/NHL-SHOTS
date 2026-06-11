@@ -441,15 +441,14 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                 for ev in events:
                     r2 = await c.get(
                         f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                        params={"apiKey": api_key, "regions": "us",
+                        params={"apiKey": api_key, "regions": "us,us2",
                                 "markets": ("player_shots_on_goal,player_points,"
                                             "player_assists,player_total_saves,player_goal_scorer"),
                                 "oddsFormat": "american"})
                     if r2.status_code != 200:
                         continue
-                    # Map each market key to its destination dict. We take the first
-                    # bookmaker that posts a given market (Over AND Under come together
-                    # in one market response, so the Under side is free).
+                    # Iterate ALL bookmakers so every player gets a line even if
+                    # no single book covers the full slate.
                     targets = {
                         "player_shots_on_goal": lines,
                         "player_points":        pts_lines,
@@ -457,11 +456,10 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                         "player_total_saves":   sv_lines,
                         "player_goal_scorer":   goal_lines,
                     }
-                    got = {k: False for k in targets}
                     for book in r2.json().get("bookmakers", []):
                         for mkt in book.get("markets", []):
                             mkey = mkt.get("key")
-                            if mkey not in targets or got[mkey]:
+                            if mkey not in targets:
                                 continue
                             target = targets[mkey]
                             for oc in mkt.get("outcomes", []):
@@ -479,9 +477,6 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                                     rec["odds"] = str(oc.get("price", ""))
                                 elif nm == "Under" and not rec["under_odds"]:
                                     rec["under_odds"] = str(oc.get("price", ""))
-                            got[mkey] = True
-                        if all(got.values()):
-                            break
 
                 if lines or pts_lines or ast_lines or sv_lines or goal_lines:
                     break  # found lines — no need to try next sport key
@@ -585,18 +580,19 @@ async def get_shot_qualified_players(
                     real_under_odds = sb_info.get("under_odds", "")
                     line_source     = sb_info.get("source", "OddsAPI")
                     break
+            alg_line = real_line if real_line is not None else 1.5
             pool.append({
                 "name":       p["name"],
                 "pid":        p["id"],
                 "team":       team,
                 "opponent":   opp,
                 "homeRoad":   hr,
-                "line":       1.5,        # ALWAYS 1.5 for the algorithm
-                "realLine":   real_line,  # Sportsbook line - display only
+                "line":       alg_line,   # real book line when available, else 1.5
+                "realLine":   real_line,
                 "realOdds":   real_odds,
                 "realUnderOdds": real_under_odds,
                 "lineSource": line_source,
-                "estLine":    1.5,
+                "estLine":    alg_line,
                 "spg":        0,
                 "oppSA":      sa_map.get(opp, 0.0),
             })
