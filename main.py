@@ -1220,6 +1220,7 @@ async def run_picks(target_date: str = None) -> Dict:
         push_picks_to_replit("nhl", _result, html=_snapshot_html)
     except Exception as _e:
         print(f"[replit_push] nhl push failed: {_e}")
+    _nhl_save_picks_snapshot(target_date, _result)
     return _result
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1423,6 +1424,14 @@ body.is-admin #parlayCard{display:block}
 .nhl-bets-tbl td{padding:8px 10px;border-bottom:1px solid #0f172a;vertical-align:middle;color:#e2e8f0}
 .nhl-bets-tbl tr:last-child td{border-bottom:none}
 .nhl-bets-tbl tr:hover td{background:rgba(255,255,255,.02)}
+/* NHL Track Record */
+.nhl-trk-tbl{width:100%;border-collapse:collapse;font-size:.82rem}
+.nhl-trk-tbl th{padding:10px 12px;text-align:left;color:#67e8f9;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;background:#0a0f1a;white-space:nowrap;border-bottom:1px solid rgba(103,232,249,.2)}
+.nhl-trk-tbl td{padding:9px 12px;border-bottom:1px solid #0f172a;white-space:nowrap}
+.nhl-trk-tbl tr:last-child td{border-bottom:none}
+.nhl-trk-tbl tr:hover td{background:rgba(255,255,255,.02)}
+.nhl-trk-bar-wrap{width:80px;background:#1e293b;border-radius:4px;height:8px;overflow:hidden;display:inline-block;vertical-align:middle}
+.nhl-trk-bar{height:100%;border-radius:4px}
 </style>
 <div id="nhl-mybets-card" style="display:none;max-width:960px;margin:0 auto 24px;padding:0 16px">
   <div class="card" style="padding:20px 22px">
@@ -2349,7 +2358,155 @@ function downloadNhlMyBetsCSV(){
   var a=document.createElement('a');a.href=url;a.download='nhl-my-bets.csv';
   document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
 }
+// ── NHL Track Record ──────────────────────────────────────────────────────────
+var _nhlTrkData=null,_nhlTrkTabMode='cat';
+function _nhlTrkDayName(){
+  var dp=document.getElementById('nhlTrkDate'),dn=document.getElementById('nhlTrkDayName');
+  if(!dp||!dn) return;
+  try{var days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    dn.textContent=days[new Date(dp.value+'T12:00:00').getDay()];}catch(e){dn.textContent='';}
+}
+async function loadNhlTrackRecord(){
+  var body=document.getElementById('nhlTrkBody');
+  if(body) body.innerHTML='<p style="color:#94a3b8;padding:24px">Loading\u2026</p>';
+  try{
+    var r=await fetch('/api/track-record');
+    if(!r.ok) throw new Error(await r.text());
+    _nhlTrkData=await r.json();
+    renderNhlTrackDay();
+  }catch(e){
+    if(body) body.innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading track record')+'</p>';
+  }
+}
+function nhlTrkSetTab(tab){
+  _nhlTrkTabMode=tab;
+  var bc=document.getElementById('nhlTrkBtnCat'),bl=document.getElementById('nhlTrkBtnList');
+  if(bc) bc.style.background=tab==='cat'?'#065f46':'#1e293b';
+  if(bl) bl.style.background=tab==='list'?'#065f46':'#1e293b';
+  renderNhlTrackDay();
+}
+function renderNhlTrackDay(){
+  if(!_nhlTrkData) return;
+  var dp=document.getElementById('nhlTrkDate');
+  var selDate=dp?dp.value:'';
+  var dates=_nhlTrkData.dates||[];
+  var dayData=selDate?dates.find(function(d){return d.date===selDate;}):null;
+  var sumEl=document.getElementById('nhlTrkSummary'),bodyEl=document.getElementById('nhlTrkBody');
+  if(!sumEl||!bodyEl) return;
+  var rows=[];
+  if(dayData) rows=dayData.detail||[];
+  else dates.forEach(function(d){(d.detail||[]).forEach(function(r){rows.push(r);});});
+  var decided=rows.filter(function(r){return(r.result==='WIN'||r.result==='LOSS')&&r.odds!=null;});
+  if(!decided.length&&selDate){
+    sumEl.innerHTML='<p style="color:#94a3b8;padding:12px;text-align:center">No graded picks for '+selDate+'. Games may not be final yet.</p>';
+    bodyEl.innerHTML='';return;
+  }
+  var stake=_nhlTrkData.stake||20;
+  var wins=decided.filter(function(r){return r.result==='WIN';}).length;
+  var losses=decided.length-wins;
+  var netPL=decided.reduce(function(a,r){return a+(r.profit||0);},0);
+  var totalStaked=decided.length*stake;
+  var roi=totalStaked?(netPL/totalStaked*100):null;
+  var rate=decided.length?(wins/decided.length*100):null;
+  var plColor=netPL>=0?'#4ade80':'#f87171';
+  sumEl.innerHTML='<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+    +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
+    +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
+    +'<span style="font-family:monospace;font-weight:800;color:'+plColor+'">Net '+(netPL>=0?'+$':'-$')+Math.abs(netPL).toFixed(0)+'</span>'
+    +(roi!=null?'<span style="font-family:monospace;font-weight:700;color:'+plColor+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
+    +'<span style="color:#475569;font-size:.8rem">$'+stake+'/play \u00b7 $20 flat</span>'
+    +'</div>';
+  bodyEl.innerHTML=_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(decided):_nhlTrkListHtml(decided);
+}
+function _nhlTrkCatHtml(decided){
+  if(!decided.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
+  var cats={};
+  decided.forEach(function(r){
+    var c=cats[r.category]=cats[r.category]||{w:0,l:0,pl:0,staked:0};
+    if(r.result==='WIN') c.w++; else c.l++;
+    c.pl+=(r.profit||0); c.staked+=20;
+  });
+  var entries=Object.entries(cats).sort(function(a,b){
+    return ((b[1].pl/b[1].staked)||0)-((a[1].pl/a[1].staked)||0);
+  });
+  var rows=entries.map(function(e){
+    var cat=e[0],c=e[1],total=c.w+c.l;
+    var rate=total?(c.w/total*100):0;
+    var roi=c.staked?(c.pl/c.staked*100):null;
+    var plColor=c.pl>=0?'#4ade80':'#f87171';
+    var barColor=rate>=70?'#4ade80':rate>=55?'#facc15':'#f87171';
+    var barW=Math.min(100,Math.round(rate));
+    return '<tr>'
+      +'<td style="color:#e2e8f0;font-weight:700">'+cat+'</td>'
+      +'<td style="font-family:monospace;color:#e2e8f0">'+c.w+'-'+c.l+'</td>'
+      +'<td><div style="display:flex;align-items:center;gap:8px">'
+      +'<div class="nhl-trk-bar-wrap"><div class="nhl-trk-bar" style="width:'+barW+'%;background:'+barColor+'"></div></div>'
+      +'<span style="color:'+barColor+';font-weight:700;font-size:.82rem">'+rate.toFixed(0)+'%</span></div></td>'
+      +'<td style="font-family:monospace;font-weight:800;color:'+plColor+'">'+(c.pl>=0?'+$':'-$')+Math.abs(c.pl).toFixed(0)+'</td>'
+      +'<td style="font-family:monospace;font-weight:700;color:'+plColor+'">'+(roi!=null?(roi>=0?'+':'')+roi.toFixed(1)+'%':'—')+'</td>'
+      +'</tr>';
+  }).join('');
+  return '<div style="overflow-x:auto"><table class="nhl-trk-tbl">'
+    +'<thead><tr><th>Category</th><th>Record</th><th>Hit Rate</th><th>Net P/L</th><th>ROI</th></tr></thead>'
+    +'<tbody>'+rows+'</tbody></table></div>';
+}
+function _nhlTrkListHtml(decided){
+  if(!decided.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
+  var sorted=[].concat(decided).sort(function(a,b){return(b.profit||0)-(a.profit||0);});
+  var rows=sorted.map(function(r){
+    var plColor=r.result==='WIN'?'#4ade80':'#f87171';
+    var pl=r.profit!=null?((r.profit>=0?'+$':'-$')+Math.abs(r.profit).toFixed(0)):'—';
+    var odds=r.odds!=null?(r.odds>0?'+':'')+r.odds:'—';
+    return '<tr>'
+      +'<td style="color:#94a3b8;font-size:.78rem">'+r.category+'</td>'
+      +'<td style="color:#e2e8f0;font-weight:700">'+r.name+'</td>'
+      +'<td style="color:#475569">'+r.team+'</td>'
+      +'<td style="color:#cbd5e1">'+(r.side||'')+(r.line!=null?' '+r.line:'')+'</td>'
+      +'<td style="font-family:monospace;color:#94a3b8">'+odds+'</td>'
+      +'<td style="color:#475569">'+((r.actual!=null)?r.actual:'—')+'</td>'
+      +'<td style="font-weight:800;color:'+plColor+'">'+r.result+'</td>'
+      +'<td style="font-family:monospace;font-weight:700;color:'+plColor+'">'+pl+'</td>'
+      +'</tr>';
+  }).join('');
+  return '<div style="overflow-x:auto"><table class="nhl-trk-tbl">'
+    +'<thead><tr><th>Category</th><th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th></tr></thead>'
+    +'<tbody>'+rows+'</tbody></table></div>';
+}
+document.addEventListener('DOMContentLoaded',function(){
+  var dp=document.getElementById('nhlTrkDate');
+  if(dp){dp.value=new Date().toISOString().slice(0,10);
+    dp.addEventListener('change',function(){_nhlTrkDayName();renderNhlTrackDay();});}
+  _nhlTrkDayName();
+  loadNhlTrackRecord();
+  var top=document.getElementById('nhl-btn-top'),bot=document.getElementById('nhl-btn-bot');
+  function _sc(){var y=window.pageYOffset||document.documentElement.scrollTop;
+    var atBot=(y+window.innerHeight)>=document.body.scrollHeight-50;
+    if(top) top.style.display=y>400?'block':'none';
+    if(bot) bot.style.display=!atBot?'block':'none';}
+  window.addEventListener('scroll',_sc,{passive:true});_sc();
+});
 </script>
+<!-- NHL Track Record — always visible below picks -->
+<div id="nhl-track-section" style="max-width:960px;margin:0 auto 0;padding:0 16px 40px">
+  <div class="card" style="padding:20px 22px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#127942; NHL Track Record</h2>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <label style="color:#94a3b8;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Date</label>
+      <input type="date" id="nhlTrkDate" style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:.85rem;outline:none">
+      <span id="nhlTrkDayName" style="color:#34d399;font-weight:700;font-size:.9rem"></span>
+      <button onclick="loadNhlTrackRecord()" style="background:#065f46;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">&#8635; Get Results</button>
+      <button id="nhlTrkBtnCat" onclick="nhlTrkSetTab('cat')" style="background:#065f46;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">By Category</button>
+      <button id="nhlTrkBtnList" onclick="nhlTrkSetTab('list')" style="background:#1e293b;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">Full List</button>
+    </div>
+    <div id="nhlTrkSummary"></div>
+    <div id="nhlTrkBody"></div>
+  </div>
+</div>
+<!-- Scroll buttons -->
+<button id="nhl-btn-top" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Back to top" style="position:fixed;bottom:76px;right:22px;z-index:9999;display:none;width:48px;height:48px;border-radius:50%;border:none;cursor:pointer;background:#34d399;color:#0a0a0a;font-size:1.4rem;font-weight:900;box-shadow:0 4px 14px rgba(0,0,0,.45);line-height:1">&#8593;</button>
+<button id="nhl-btn-bot" onclick="window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})" title="Scroll to bottom" style="position:fixed;bottom:22px;right:22px;z-index:9999;display:none;width:48px;height:48px;border-radius:50%;border:none;cursor:pointer;background:#0ea5e9;color:#0a0a0a;font-size:1.4rem;font-weight:900;box-shadow:0 4px 14px rgba(0,0,0,.45);line-height:1">&#8595;</button>
 </body>
 </html>"""
 
@@ -2562,6 +2719,255 @@ def _nhl_settle_batch(bets: list) -> tuple:
     return changed, all_ok
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  NHL Track Record — automated daily grading, Supabase-backed
+# ─────────────────────────────────────────────────────────────────────────────
+_NHL_SB_URL_RAW = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+_NHL_SB_URL = (f"https://{_NHL_SB_URL_RAW}.supabase.co"
+               if _NHL_SB_URL_RAW and not _NHL_SB_URL_RAW.startswith("http")
+               else _NHL_SB_URL_RAW)
+_NHL_SB_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+def _nhl_sb_get(table, params=None):
+    if not _NHL_SB_URL or not _NHL_SB_KEY:
+        return []
+    try:
+        r = httpx.get(f"{_NHL_SB_URL}/rest/v1/{table}",
+                      headers={"apikey": _NHL_SB_KEY, "Authorization": f"Bearer {_NHL_SB_KEY}"},
+                      params=params or {}, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"[nhl_sb_get] {e}")
+    return []
+
+def _nhl_sb_upsert(table, rows, on_conflict=None):
+    if not _NHL_SB_URL or not _NHL_SB_KEY or not rows:
+        return False
+    try:
+        h = {"apikey": _NHL_SB_KEY, "Authorization": f"Bearer {_NHL_SB_KEY}",
+             "Content-Type": "application/json",
+             "Prefer": "resolution=merge-duplicates,return=minimal"}
+        url = f"{_NHL_SB_URL}/rest/v1/{table}"
+        if on_conflict:
+            url += f"?on_conflict={on_conflict}"
+        r = httpx.post(url, headers=h, json=rows, timeout=20)
+        return r.status_code in (200, 201, 204)
+    except Exception as e:
+        print(f"[nhl_sb_upsert] {e}")
+    return False
+
+_NHL_TRK_APP   = "nhl"
+_NHL_TRK_STAKE = 20.0
+_NHL_TRK_TOP   = 10
+_NHL_SNAP_CAT  = "__picks__"
+
+# (result_key, category_label, stat_key, side, is_overflow)
+_NHL_TRK_LISTS = [
+    ("picks",           "Shots on Goal", "SHOTS",  "OVER",  False),
+    ("rest",            "Shots on Goal", "SHOTS",  "OVER",  True),
+    ("shotUnders",      "Shots on Goal", "SHOTS",  "UNDER", False),
+    ("shotUndersRest",  "Shots on Goal", "SHOTS",  "UNDER", True),
+    ("ptsPicks",        "Points",        "POINTS", "OVER",  False),
+    ("ptsRest",         "Points",        "POINTS", "OVER",  True),
+    ("ptsUnders",       "Points",        "POINTS", "UNDER", False),
+    ("ptsUndersRest",   "Points",        "POINTS", "UNDER", True),
+    ("astPicks",        "Assists",       "ASSISTS","OVER",  False),
+    ("astRest",         "Assists",       "ASSISTS","OVER",  True),
+    ("astUnders",       "Assists",       "ASSISTS","UNDER", False),
+    ("astUndersRest",   "Assists",       "ASSISTS","UNDER", True),
+    ("goalPicks",       "Goals",         "GOALS",  "OVER",  False),
+    ("goalRest",        "Goals",         "GOALS",  "OVER",  True),
+    ("goalUnders",      "Goals",         "GOALS",  "UNDER", False),
+    ("goalUndersRest",  "Goals",         "GOALS",  "UNDER", True),
+    ("savesPicks",      "Goalie Saves",  "SAVES",  "OVER",  False),
+    ("savesRest",       "Goalie Saves",  "SAVES",  "OVER",  True),
+    ("savesUnders",     "Goalie Saves",  "SAVES",  "UNDER", False),
+    ("savesUndersRest", "Goalie Saves",  "SAVES",  "UNDER", True),
+]
+
+def _nhl_save_picks_snapshot(date_str: str, result: dict):
+    """Freeze all pick lists to Supabase so they survive redeploys and can be graded."""
+    flat = []
+    for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
+        for rank, p in enumerate(result.get(rkey) or [], 1):
+            odds = p.get("realOdds") if side == "OVER" else p.get("realUnderOdds")
+            line = p.get("realLine") or p.get("line") or p.get("dispLine")
+            flat.append({
+                "name": p.get("name", ""), "pid": p.get("pid"),
+                "team": p.get("team", ""), "category": cat,
+                "stat_key": sk, "side": side, "line": line,
+                "odds": odds, "score": p.get("score") or p.get("ptsScore") or 0,
+                "rank": rank, "is_overflow": ovf,
+            })
+    if not flat:
+        return
+    ok = _nhl_sb_upsert("mpa_track_ledger",
+                        [{"app": _NHL_TRK_APP, "date": date_str, "category": _NHL_SNAP_CAT,
+                          "side": "ALL", "wins": 0, "losses": 0, "locked": False, "detail": flat}],
+                        "app,date,category,side")
+    print(f"[nhl_track] snapshot {'saved' if ok else 'FAILED'}: {len(flat)} picks -> {date_str}")
+
+def _nhl_load_picks_snapshot(date_str: str) -> list:
+    rows = _nhl_sb_get("mpa_track_ledger", {
+        "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{_NHL_SNAP_CAT}",
+        "side": "eq.ALL", "date": f"eq.{date_str}", "select": "detail", "limit": "1"})
+    if rows:
+        d = rows[0].get("detail") or []
+        return d if isinstance(d, list) else []
+    return []
+
+def _nhl_list_snap_dates() -> list:
+    rows = _nhl_sb_get("mpa_track_ledger", {
+        "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{_NHL_SNAP_CAT}",
+        "side": "eq.ALL", "select": "date", "limit": "365"})
+    return sorted({r["date"] for r in rows if r.get("date")})
+
+def _nhl_grade_pick_stat(g: dict, stat_key: str):
+    """Like _nhl_extract_stat but also handles GOALS for anytime-scorer market."""
+    if stat_key == "GOALS":
+        v = g.get("goals")
+        return float(v) if v is not None else None
+    return _nhl_extract_stat(g, stat_key)
+
+def _nhl_grade_date(date_str: str, snap: list) -> dict:
+    from collections import defaultdict
+    need: dict = {}
+    for p in snap:
+        pid = p.get("pid")
+        if pid:
+            need.setdefault(str(pid), []).append(p)
+    pid_games: dict = {}
+    all_found = True
+    for pid in need:
+        merged: dict = {}
+        for s in _nhl_seasons_for(date_str):
+            try:
+                games, ok = _nhl_player_games_raw(pid, s)
+                merged.update(games)
+                if not ok:
+                    all_found = False
+            except Exception as e:
+                print(f"[nhl_track] grade {pid}/{s}: {e}")
+                all_found = False
+        pid_games[pid] = merged
+    any_game = bool(pid_games)
+    by_group: dict = defaultdict(list)
+    for p in snap:
+        pid = str(p.get("pid") or "")
+        if pid in pid_games:
+            by_group[(p.get("category","?"), (p.get("side") or "OVER").upper(),
+                      bool(p.get("is_overflow")))].append(p)
+    main_rows: list = []
+    ovf_rows: list = []
+    for (cat, side, is_ovf), ps in by_group.items():
+        ps.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+        for rank, p in enumerate(ps, 1):
+            pid = str(p.get("pid") or "")
+            g = pid_games.get(pid, {}).get(date_str)
+            sk = p.get("stat_key")
+            line_raw = p.get("line")
+            odds = p.get("odds")
+            result_val = actual = profit = None
+            if g and line_raw is not None and sk:
+                actual = _nhl_grade_pick_stat(g, sk)
+                if actual is not None:
+                    try:
+                        fl = float(line_raw)
+                        if actual == fl:
+                            result_val = "PUSH"
+                        elif side == "OVER":
+                            result_val = "WIN" if actual > fl else "LOSS"
+                        else:
+                            result_val = "WIN" if actual < fl else "LOSS"
+                        if result_val and odds is not None:
+                            profit = round(_nhl_american_profit(odds, _NHL_TRK_STAKE, result_val), 2)
+                    except Exception:
+                        pass
+            row = {"name": p.get("name",""), "team": p.get("team",""),
+                   "category": cat, "side": side, "stat_key": sk,
+                   "line": line_raw, "odds": odds, "rank": rank,
+                   "result": result_val, "actual": actual, "profit": profit}
+            if not is_ovf:
+                main_rows.append(row)
+            else:
+                ovf_rows.append({**row, "category": "NHL Overflow"})
+    return {"any_game": any_game, "all_final": all_found,
+            "main": main_rows, "overflow": ovf_rows}
+
+def _nhl_aggregate_graded(graded: dict) -> dict:
+    agg: dict = {}
+    for row in graded.get("main", []) + graded.get("overflow", []):
+        if row.get("result") not in ("WIN","LOSS") or row.get("odds") is None:
+            continue
+        rec = agg.setdefault(row["category"], {}).setdefault(row.get("side","OVER"), [0,0])
+        if row["result"] == "WIN":
+            rec[0] += 1
+        else:
+            rec[1] += 1
+    return agg
+
+def _nhl_detail_graded(graded: dict) -> list:
+    out = []
+    for row in graded.get("main", []) + graded.get("overflow", []):
+        if row.get("result") not in ("WIN","LOSS") or row.get("odds") is None:
+            continue
+        out.append({k: row.get(k) for k in
+                    ("name","team","category","side","stat_key","line","odds","rank","result","actual","profit")})
+    return out
+
+_NHL_TRK_LOCK = _bt_th.Lock()
+
+def _nhl_update_track_ledger():
+    from datetime import date as _d
+    today = _d.today().isoformat()
+    with _NHL_TRK_LOCK:
+        locked = {r["date"] for r in (_nhl_sb_get("mpa_track_ledger", {
+            "app": f"eq.{_NHL_TRK_APP}", "category": "eq.__ledger__",
+            "locked": "eq.true", "select": "date", "limit": "500"}) or [])}
+        upserts = []
+        for d in _nhl_list_snap_dates():
+            if d >= today or d in locked:
+                continue
+            snap = _nhl_load_picks_snapshot(d)
+            if not snap:
+                continue
+            try:
+                graded = _nhl_grade_date(d, snap)
+            except Exception as e:
+                print(f"[nhl_track] grade failed {d}: {e}")
+                continue
+            if not graded.get("any_game"):
+                continue
+            try:
+                from datetime import date as _dd
+                old_enough = (_dd.today() - _dd.fromisoformat(d)).days >= 2
+            except Exception:
+                old_enough = False
+            if not graded.get("all_final") and not old_enough:
+                continue
+            agg = _nhl_aggregate_graded(graded)
+            det = _nhl_detail_graded(graded)
+            upserts += [
+                {"app":_NHL_TRK_APP,"date":d,"category":"__ledger__","side":"ALL",
+                 "wins":0,"losses":0,"locked":True,"detail":agg},
+                {"app":_NHL_TRK_APP,"date":d,"category":"__detail__","side":"ALL",
+                 "wins":0,"losses":0,"locked":True,"detail":det},
+            ]
+        if upserts:
+            for i in range(0, len(upserts), 10):
+                _nhl_sb_upsert("mpa_track_ledger", upserts[i:i+10], "app,date,category,side")
+            print(f"[nhl_track] locked {len(upserts)//2} dates")
+
+def _nhl_trk_bg():
+    try:
+        _nhl_update_track_ledger()
+    except Exception as e:
+        print(f"[nhl_track] bg error: {e}")
+
+_bt_th.Thread(target=_nhl_trk_bg, daemon=True).start()
+
+
 def _nhl_settle_bet(bet: dict) -> bool:
     bdate, pid = bet.get("date"), bet.get("pid")
     if not bdate or not pid or bdate >= date.today().isoformat():
@@ -2751,6 +3157,45 @@ async def verify_token_nhl(request: Request):
 async def whoami(request: Request, token: str = ""):
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     return {"is_admin": _is_admin_token(tok)}
+
+@app.get("/api/track-record")
+async def nhl_track_record():
+    """NHL Track Record — all graded picks by date, $20/play."""
+    _bt_th.Thread(target=_nhl_trk_bg, daemon=True).start()
+    det_rows = _nhl_sb_get("mpa_track_ledger", {
+        "app": f"eq.{_NHL_TRK_APP}", "category": "eq.__detail__",
+        "locked": "eq.true", "select": "date,detail", "limit": "365"})
+    detail_by_date = {r["date"]: (r.get("detail") or []) for r in (det_rows or [])}
+    dates = sorted(detail_by_date.keys(), reverse=True)
+    result = []
+    for d in dates:
+        det = detail_by_date[d]
+        decided = [r for r in det if r.get("result") in ("WIN","LOSS") and r.get("odds") is not None]
+        wins = sum(1 for r in decided if r["result"] == "WIN")
+        losses = len(decided) - wins
+        net_pl = round(sum(r.get("profit") or 0 for r in decided), 2)
+        staked = len(decided) * _NHL_TRK_STAKE
+        roi = round(net_pl / staked * 100, 1) if staked else None
+        cats: dict = {}
+        for r in decided:
+            cat = r.get("category","?")
+            e = cats.setdefault(cat, {"wins":0,"losses":0,"pl":0.0,"staked":0.0})
+            if r["result"] == "WIN": e["wins"] += 1
+            else: e["losses"] += 1
+            e["pl"] = round(e["pl"] + (r.get("profit") or 0), 2)
+            e["staked"] += _NHL_TRK_STAKE
+        by_cat = []
+        for cat, e in cats.items():
+            total = e["wins"] + e["losses"]
+            by_cat.append({"category": cat, "wins": e["wins"], "losses": e["losses"],
+                           "net_pl": e["pl"],
+                           "roi": round(e["pl"]/e["staked"]*100,1) if e["staked"] else None,
+                           "rate": round(e["wins"]/total*100,1) if total else None})
+        by_cat.sort(key=lambda x: (x.get("roi") or -999), reverse=True)
+        result.append({"date":d,"wins":wins,"losses":losses,
+                       "net_pl":net_pl,"roi":roi,"by_cat":by_cat,"detail":det})
+    return JSONResponse({"dates": result, "stake": _NHL_TRK_STAKE})
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index(admin: str = "", token: str = ""):
