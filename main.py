@@ -74,7 +74,7 @@ UNDER_MIN_VO       = 2     # min H/A games vs THIS opponent for a vs-opp under
 UNDER_MIN_ANY      = 3     # min H/A games vs anyone for an any-opp under
 SEASONS       = ["20252026","20242025","20232024","20222023","20212022"]  # for points game logs
 TOP_N       = 10     # final picks count
-SEM_NHL     = 8      # concurrent NHL API calls
+SEM_NHL     = 14     # concurrent NHL API calls
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -438,11 +438,10 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                 if not events:
                     continue
 
-                for ev in events:
-                    # Only the over/under markets here. player_goal_scorer is NOT a
-                    # valid Odds API key and a single invalid market 422s the WHOLE
-                    # request (returns zero data for every market), so goal scorer is
-                    # fetched separately below in an isolated call.
+                # Fetch all events' odds concurrently (main markets + goal scorer
+                # in parallel per event, then all events gathered at once).
+                async def _fetch_ev_odds(ev):
+                    # Main O/U markets
                     r2 = await c.get(
                         f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
                         params={"apiKey": api_key, "regions": "us,us2",
@@ -450,8 +449,6 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                                             "player_assists,player_total_saves"),
                                 "oddsFormat": "american"})
                     if r2.status_code == 200:
-                        # Iterate ALL bookmakers so every player gets a line even if
-                        # no single book covers the full slate.
                         targets = {
                             "player_shots_on_goal": lines,
                             "player_points":        pts_lines,
@@ -479,10 +476,7 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                                         rec["odds"] = str(oc.get("price", ""))
                                     elif nm == "Under" and not rec["under_odds"]:
                                         rec["under_odds"] = str(oc.get("price", ""))
-
-                    # Anytime goal scorer — isolated so a missing/invalid market on
-                    # this plan can never wipe out the four markets above. It's a
-                    # Yes/No market (no point line), so we store line 0.5 + the Yes price.
+                    # Anytime goal scorer — isolated call so a bad market never wipes main
                     try:
                         rg = await c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
@@ -507,6 +501,8 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                                             rec["odds"] = str(oc.get("price", ""))
                     except Exception as _ge:
                         print(f"[Lines] goal-scorer fetch skipped: {_ge}")
+
+                await asyncio.gather(*[_fetch_ev_odds(ev) for ev in events])
 
                 if lines or pts_lines or ast_lines or sv_lines or goal_lines:
                     break  # found lines — no need to try next sport key
@@ -636,11 +632,15 @@ async def get_shot_qualified_players(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _pts_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[Dict]:
-    """Fetch both regular season (2) and playoff (3) game logs."""
+    """Fetch regular season (2) and playoff (3) game logs concurrently."""
+    datas = await asyncio.gather(
+        _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/2", c),
+        _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/3", c),
+        return_exceptions=True,
+    )
     logs = []
-    for gtype in (2, 3):  # regular season + playoffs
-        data = await _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/{gtype}", c)
-        if not data:
+    for data in datas:
+        if not data or isinstance(data, Exception):
             continue
         for g in data.get("gameLog", []):
             goals   = int(g.get("goals",   0) or 0)
@@ -659,18 +659,20 @@ async def _pts_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[
 
 
 async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[Dict]:
-    """Goalie game logs — saves = shotsAgainst - goalsAgainst."""
+    """Goalie game logs — saves = shotsAgainst - goalsAgainst (parallel gtype fetch)."""
+    datas = await asyncio.gather(
+        _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/2", c),
+        _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/3", c),
+        return_exceptions=True,
+    )
     logs = []
-    for gtype in (2, 3):  # regular season + playoffs
-        data = await _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/{gtype}", c)
-        if not data:
+    for data in datas:
+        if not data or isinstance(data, Exception):
             continue
         for g in data.get("gameLog", []):
-            sa = int(g.get("shotsAgainst", 0) or 0)
-            ga = int(g.get("goalsAgainst", 0) or 0)
-            saves = sa - ga
-            if saves < 0:
-                saves = 0
+            sa    = int(g.get("shotsAgainst", 0) or 0)
+            ga    = int(g.get("goalsAgainst", 0) or 0)
+            saves = max(0, sa - ga)
             logs.append({
                 "date":     g.get("gameDate",     ""),
                 "saves":    saves,
@@ -2034,6 +2036,44 @@ function _nhlPaint(q){
   });
   h += '</div>';
 
+  // ── 🔒 80–100% Locks — cross-market picks hitting 80%+ ────────────────
+  var _lockAll=[];
+  ['picks','ptsPicks','astPicks','goalPicks','savesPicks',
+   'shotUnders','ptsUnders','astUnders','goalUnders','savesUnders'].forEach(function(k){
+    (d[k]||[]).forEach(function(p){
+      var sc=Number(p.dispScore||p.ptsScore||p.score||0);
+      if(sc>=80) _lockAll.push(Object.assign({},p,{_lockScore:sc}));
+    });
+  });
+  // De-dup by name+market in case a player appears in two lists
+  var _lockSeen={}; _lockAll=_lockAll.filter(function(p){
+    var k=(p.name||'')+'|'+(p.mkt||'')+'|'+(p.pick||'OVER');
+    if(_lockSeen[k]) return false; _lockSeen[k]=true; return true;
+  });
+  _lockAll.sort(function(a,b){return b._lockScore-a._lockScore;});
+  if(q) _lockAll=_lockAll.filter(function(p){return (p.name||'').toLowerCase().indexOf(q)>=0;});
+  var _lockMain=_lockAll.slice(0,10);
+  var _lockOvf=_lockAll.slice(10,20);
+  if(_lockMain.length){
+    h+='<div style="background:linear-gradient(135deg,rgba(245,158,11,.1),rgba(74,222,128,.05));border:1px solid rgba(245,158,11,.4);border-radius:14px;margin-bottom:14px;overflow:hidden">'
+      +'<div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(245,158,11,.2)">'
+      +'<span style="font-size:1.4rem;flex-shrink:0">&#128274;</span>'
+      +'<div style="flex:1;min-width:0">'
+      +'<div style="font-weight:900;font-size:1rem;color:#f59e0b;letter-spacing:.03em">80–100% Locks</div>'
+      +'<div style="font-size:.72rem;color:#9ca3af;margin-top:2px">Picks hitting 80%+ across all tracked samples — top-line performers sorted highest % first</div>'
+      +'</div>'
+      +'<div style="background:rgba(245,158,11,.2);border:1px solid rgba(245,158,11,.5);border-radius:20px;padding:3px 12px;font-size:.73rem;font-weight:900;color:#f59e0b;flex-shrink:0">'+_lockMain.length+(_lockOvf.length?' + '+_lockOvf.length+' more':'')+' lock'+(_lockMain.length!==1?'s':'')+'</div>'
+      +'</div>'
+      +nhlCardGrid(_lockMain);
+    if(_lockOvf.length){
+      h+='<details style="border-top:1px solid rgba(245,158,11,.2)">'
+        +'<summary style="padding:10px 16px;cursor:pointer;color:#f59e0b;font-size:.8rem;font-weight:700;user-select:none">&#9660; '+_lockOvf.length+' more lock'+(+_lockOvf.length!==1?'s':'')+' (Overflow)</summary>'
+        +nhlCardGrid(_lockOvf)
+        +'</details>';
+    }
+    h+='</div>';
+  }
+
   // SHOTS cards (OVER)
   h += '<div class="sec">🏒 Top ' + ((d.picks||[]).length) + ' Shots on Goal — OVER</div>';
   h += nhlCardGrid(d.picks);
@@ -2860,6 +2900,7 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
                       bool(p.get("is_overflow")))].append(p)
     main_rows: list = []
     ovf_rows: list = []
+    lock_rows: list = []
     for (cat, side, is_ovf), ps in by_group.items():
         ps.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
         for rank, p in enumerate(ps, 1):
@@ -2892,12 +2933,16 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
                 main_rows.append(row)
             else:
                 ovf_rows.append({**row, "category": "NHL Overflow"})
+            # Cross-market 80-100% Locks category
+            lock_score = float(p.get("dispScore") or p.get("ptsScore") or p.get("score") or 0)
+            if lock_score >= 80:
+                lock_rows.append({**row, "category": "80-100% Locks"})
     return {"any_game": any_game, "all_final": all_found,
-            "main": main_rows, "overflow": ovf_rows}
+            "main": main_rows, "overflow": ovf_rows, "locks": lock_rows}
 
 def _nhl_aggregate_graded(graded: dict) -> dict:
     agg: dict = {}
-    for row in graded.get("main", []) + graded.get("overflow", []):
+    for row in graded.get("main", []) + graded.get("overflow", []) + graded.get("locks", []):
         if row.get("result") not in ("WIN","LOSS") or row.get("odds") is None:
             continue
         rec = agg.setdefault(row["category"], {}).setdefault(row.get("side","OVER"), [0,0])
@@ -2909,7 +2954,7 @@ def _nhl_aggregate_graded(graded: dict) -> dict:
 
 def _nhl_detail_graded(graded: dict) -> list:
     out = []
-    for row in graded.get("main", []) + graded.get("overflow", []):
+    for row in graded.get("main", []) + graded.get("overflow", []) + graded.get("locks", []):
         if row.get("result") not in ("WIN","LOSS") or row.get("odds") is None:
             continue
         out.append({k: row.get(k) for k in
