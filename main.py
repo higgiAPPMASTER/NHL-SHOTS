@@ -8,7 +8,7 @@ Step 4 : Rank & top 10
 Deployed on Render (FastAPI + httpx)
 """
 
-import os, hmac, asyncio, re, unicodedata, time, json
+import os, hmac, asyncio, re, unicodedata, time, json, logging
 from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -51,6 +51,7 @@ def _is_admin_token(token: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 app      = FastAPI(title="NHL Shots Picks")
+logger   = logging.getLogger("nhl_money_shots")
 
 NHL_API      = "https://api-web.nhle.com/v1"
 NHL_STATS    = "https://api.nhle.com/stats/rest/en"
@@ -75,6 +76,10 @@ UNDER_MIN_ANY      = 3     # min H/A games vs anyone for an any-opp under
 SEASONS       = ["20252026","20242025","20232024","20222023","20212022"]  # for points game logs
 TOP_N       = 10     # final picks count
 SEM_NHL     = 14     # concurrent NHL API calls
+
+# This endpoint is polled before the first on-demand run completes.  Keep a
+# stable idle value available so a fresh deploy never returns a 500 here.
+_progress = {"stage": "Ready", "done": 0, "total": 0, "pct": 0}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,6 +482,7 @@ def _nhl_gp_predict(games: list, gp_data: dict) -> list:
                          else round(-home_ml / (-home_ml + 100), 3))
 
         preds.append({
+            "gameId": g.get("gameId"),
             "homeTeam": home, "awayTeam": away,
             "homeFull": g.get("homeFull", ""), "awayFull": g.get("awayFull", ""),
             "startTime": g.get("startTime", ""),
@@ -1525,15 +1531,26 @@ async def run_picks(target_date: str = None) -> Dict:
         # Bake the picks into the page HTML so the Replit hub can serve an
         # instant, no-cold-start snapshot at moneypicksarena.com/dashboard/nhl.
         import json as _json
+        try:
+            _track_record = _nhl_track_record_payload()
+        except Exception:
+            # A picks snapshot is still useful if historical data is
+            # temporarily unavailable.  The exception is retained in Render
+            # logs rather than turning the entire member page into a 500.
+            logger.exception("NHL snapshot Track Record payload failed")
+            _track_record = None
         _inject = (
             '<script>window.__INITIAL_PICKS__ = '
             + _json.dumps(_result).replace('</', '<\\/')
+            + ';window.__INITIAL_TRACK_RECORD__ = '
+            + _json.dumps(_track_record).replace('</', '<\\/')
             + ';</script></head>'
         )
         _snapshot_html = HTML.replace('</head>', _inject, 1)
         push_picks_to_replit("nhl", _result, html=_snapshot_html)
     except Exception as _e:
         print(f"[replit_push] nhl push failed: {_e}")
+    _nhl_save_gp_snapshot(target_date, _result)
     _nhl_save_picks_snapshot(target_date, _result)
     return _result
 
@@ -2287,7 +2304,7 @@ function renderNhlGamePredictor(preds){
     h+='<div class="gp-card">'
       +'<div class="gp-head"><span class="gp-mu">'+g.awayTeam+' <span style="color:#4b5563;font-weight:400">@</span> '+g.homeTeam+'</span><span class="gp-time">'+t+'</span></div>'
       +'<div class="gp-pick" style="'+pickBg+'">'
-        +'<span style="font-size:1.2rem">\uD83C\uDFC6</span>'
+        +'<span style="font-size:1.2rem">\\uD83C\\uDFC6</span>'
         +'<div><div class="gp-pick-team" style="color:'+pickClr+'">'+pickFull+'</div>'
         +'<div class="gp-pick-prob">Confidence '+g.pickProb+'%'+b2bNote+'</div></div>'
       +'</div>'
@@ -2304,7 +2321,7 @@ function renderNhlGamePredictor(preds){
       +'</div>'
       +'<div class="gp-teams">'
         +'<div class="gp-team">'
-          +'<div class="gp-thdr"><img class="gp-tlogo" src="'+hLogo+'" onerror="this.style.display=\'none\'"/><span class="gp-tabbr">'+g.homeTeam+'</span><span class="gp-tha h-ha">HOME</span></div>'
+          +'<div class="gp-thdr"><img class="gp-tlogo" src="'+hLogo+'" onerror="this.style.display=\\'none\\'"/><span class="gp-tabbr">'+g.homeTeam+'</span><span class="gp-tha h-ha">HOME</span></div>'
           +'<div class="gp-sr"><span class="sk">GF / GA /G</span><span class="sv">'+g.hGfPG+' / '+g.hGaPG+'</span></div>'
           +'<div class="gp-sr"><span class="sk">PP / PK</span><span class="sv">'+g.hPpPct+'% / '+g.hPkPct+'%</span></div>'
           +'<div class="gp-sr"><span class="sk">Home W-L-OT</span><span class="sv">'+g.hHomeRec+'</span></div>'
@@ -2313,7 +2330,7 @@ function renderNhlGamePredictor(preds){
           +'<div class="gp-badges">'+(g.hB2b?'<span class="gp-b2b">B2B</span>':'')+sBadge(g.hStreak)+'</div>'
         +'</div>'
         +'<div class="gp-team">'
-          +'<div class="gp-thdr"><img class="gp-tlogo" src="'+aLogo+'" onerror="this.style.display=\'none\'"/><span class="gp-tabbr">'+g.awayTeam+'</span><span class="gp-tha a-ha">AWAY</span></div>'
+          +'<div class="gp-thdr"><img class="gp-tlogo" src="'+aLogo+'" onerror="this.style.display=\\'none\\'"/><span class="gp-tabbr">'+g.awayTeam+'</span><span class="gp-tha a-ha">AWAY</span></div>'
           +'<div class="gp-sr"><span class="sk">GF / GA /G</span><span class="sv">'+g.aGfPG+' / '+g.aGaPG+'</span></div>'
           +'<div class="gp-sr"><span class="sk">PP / PK</span><span class="sv">'+g.aPpPct+'% / '+g.aPkPct+'%</span></div>'
           +'<div class="gp-sr"><span class="sk">Road W-L-OT</span><span class="sv">'+g.aRoadRec+'</span></div>'
@@ -2461,7 +2478,7 @@ function _nhlPaint(q){
   // ── Game Predictor ────────────────────────────────────────────────────────
   var _gpPreds = d.game_predictions || [];
   if(_gpPreds.length){
-    h += '<div class="sec">\uD83D\uDD2E Game Predictor \u2014 Win Probability & Projected Totals</div>';
+    h += '<div class="sec">\\uD83D\\uDD2E Game Predictor \u2014 Win Probability & Projected Totals</div>';
     h += renderNhlGamePredictor(_gpPreds);
   }
 
@@ -2835,11 +2852,25 @@ function _nhlTrkDayName(){
   try{var days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
     dn.textContent=days[new Date(dp.value+'T12:00:00').getDay()];}catch(e){dn.textContent='';}
 }
-async function loadNhlTrackRecord(){
+async function loadNhlTrackRecord(manualGrade){
   var body=document.getElementById('nhlTrkBody');
   if(body) body.innerHTML='<p style="color:#94a3b8;padding:24px">Loading\u2026</p>';
   try{
-    var r=await fetch('/api/track-record');
+    // Hub-hosted snapshots include a read-only Track Record payload.  That
+    // keeps results visible even when the live Render service is waking up or
+    // temporarily unavailable.
+    if(window.__INITIAL_TRACK_RECORD__){
+      if(manualGrade){
+        if(body) body.innerHTML='<p style="color:#94a3b8;padding:16px">This snapshot is read-only. Updated results appear after the next scheduled refresh.</p>';
+        return;
+      }
+      _nhlTrkData=window.__INITIAL_TRACK_RECORD__;
+      renderNhlTrackDay();
+      return;
+    }
+    var dp=document.getElementById('nhlTrkDate');
+    var qs=manualGrade?'?grade=true&date_str='+encodeURIComponent(dp&&dp.value?dp.value:''):'';
+    var r=await fetch('/api/track-record'+qs);
     if(!r.ok) throw new Error(await r.text());
     _nhlTrkData=await r.json();
     renderNhlTrackDay();
@@ -2860,6 +2891,8 @@ function renderNhlTrackDay(){
   var selDate=dp?dp.value:'';
   var dates=_nhlTrkData.dates||[];
   var dayData=selDate?dates.find(function(d){return d.date===selDate;}):null;
+  var gpDay=dayData&&dayData.gp?dayData.gp:null;
+  var gpHtml=_nhlGpHtml(gpDay);
   var sumEl=document.getElementById('nhlTrkSummary'),bodyEl=document.getElementById('nhlTrkBody');
   if(!sumEl||!bodyEl) return;
   var rows=[];
@@ -2868,7 +2901,7 @@ function renderNhlTrackDay(){
   var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
   var _withOdds=decided.filter(function(r){return r.odds!=null;});
   if(!decided.length&&selDate){
-    sumEl.innerHTML='<p style="color:#94a3b8;padding:12px;text-align:center">No graded picks for '+selDate+'. Games may not be final yet.</p>';
+    sumEl.innerHTML=gpHtml+'<p style="color:#94a3b8;padding:12px;text-align:center">No graded player picks for '+selDate+'. Games may not be final yet.</p>';
     bodyEl.innerHTML='';return;
   }
   var stake=_nhlTrkData.stake||20;
@@ -2879,7 +2912,7 @@ function renderNhlTrackDay(){
   var roi=totalStaked?(netPL/totalStaked*100):null;
   var rate=decided.length?(wins/decided.length*100):null;
   var plColor=netPL>=0?'#4ade80':'#f87171';
-  sumEl.innerHTML='<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+  sumEl.innerHTML=gpHtml+'<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
     +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
     +'<span style="font-family:monospace;font-weight:800;color:'+plColor+'">Net '+(netPL>=0?'+$':'-$')+Math.abs(netPL).toFixed(0)+'</span>'
@@ -2942,6 +2975,46 @@ function _nhlTrkListHtml(decided){
     +'<thead><tr><th>Category</th><th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th></tr></thead>'
     +'<tbody>'+rows+'</tbody></table></div>';
 }
+function _nhlGpResult(r, key){
+  var v=r&&r[key]; if(!v) return '<span style="color:#64748b">PENDING</span>';
+  var c=v==='WIN'?'#4ade80':v==='LOSS'?'#f87171':'#facc15';
+  return '<span style="color:'+c+';font-weight:900">'+v+'</span>';
+}
+function _nhlGpHtml(gp){
+  if(!gp) return '';
+  var mlTotal=(gp.mlWins||0)+(gp.mlLosses||0);
+  var ouTotal=(gp.ouWins||0)+(gp.ouLosses||0);
+  var mlRate=gp.mlRate!=null?gp.mlRate.toFixed(1)+'%':'—';
+  var ouRate=gp.ouRate!=null?gp.ouRate.toFixed(1)+'%':'—';
+  var detail=gp.detail||[];
+  var rows=detail.map(function(r){
+    var actual=(r.actualAway!=null&&r.actualHome!=null)
+      ?r.awayTeam+' '+r.actualAway+' — '+r.actualHome+' '+r.homeTeam:'Pending';
+    var totalPick=r.ouRec&&r.ouRec!=='PUSH'
+      ?r.ouRec+(r.bookTotal!=null?' '+r.bookTotal:''):'—';
+    return '<tr>'
+      +'<td style="color:#cbd5e1;font-weight:700">'+r.awayTeam+' @ '+r.homeTeam+'</td>'
+      +'<td style="color:#e2e8f0">'+(r.pickTeam||'—')+'</td>'
+      +'<td style="color:#94a3b8">'+actual+'</td>'
+      +'<td>'+_nhlGpResult(r,'mlResult')+'</td>'
+      +'<td style="color:#cbd5e1">'+totalPick+'</td>'
+      +'<td style="color:#94a3b8">'+(r.actualTotal!=null?r.actualTotal:'—')+'</td>'
+      +'<td>'+_nhlGpResult(r,'ouResult')+'</td>'
+      +'</tr>';
+  }).join('');
+  return '<div style="background:linear-gradient(135deg,rgba(14,116,144,.16),rgba(6,95,70,.12));border:1px solid rgba(45,212,191,.28);border-radius:12px;padding:14px 16px;margin-bottom:14px">'
+    +'<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">'
+    +'<div><div style="font-weight:900;font-size:1rem;color:#5eead4">🔮 Game Predictor Record</div>'
+    +'<div style="font-size:.72rem;color:#94a3b8;margin-top:3px">Read-only model results · no stake tracking</div></div>'
+    +'<div style="font-size:.7rem;color:#64748b">'+detail.length+' game'+(detail.length===1?'':'s')+'</div></div>'
+    +'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">'
+      +'<div style="background:#0f172a;border-radius:8px;padding:8px 12px;color:#e2e8f0;font-size:.8rem"><b style="color:#5eead4">ML</b> '+(gp.mlWins||0)+'-'+(gp.mlLosses||0)+'-'+(gp.mlPushes||0)+' <span style="color:#94a3b8">('+mlRate+')</span></div>'
+      +'<div style="background:#0f172a;border-radius:8px;padding:8px 12px;color:#e2e8f0;font-size:.8rem"><b style="color:#fbbf24">Projected Total</b> '+(gp.ouWins||0)+'-'+(gp.ouLosses||0)+'-'+(gp.ouPushes||0)+' <span style="color:#94a3b8">('+ouRate+')</span></div>'
+    +'</div>'
+    +(mlTotal||ouTotal?'<div style="font-size:.7rem;color:#64748b;margin-top:7px">ML W-L-P · total O/U W-L-P · hit rates exclude pushes</div>':'')
+    +(rows?'<div style="overflow-x:auto;margin-top:12px"><table class="nhl-trk-tbl"><thead><tr><th>Matchup</th><th>ML Pick</th><th>Score</th><th>ML</th><th>Total Pick</th><th>Total</th><th>O/U</th></tr></thead><tbody>'+rows+'</tbody></table></div>':'')
+    +'</div>';
+}
 document.addEventListener('DOMContentLoaded',function(){
   var dp=document.getElementById('nhlTrkDate');
   if(dp){dp.value=new Date().toISOString().slice(0,10);
@@ -2966,7 +3039,7 @@ document.addEventListener('DOMContentLoaded',function(){
       <label style="color:#94a3b8;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Date</label>
       <input type="date" id="nhlTrkDate" style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:.85rem;outline:none">
       <span id="nhlTrkDayName" style="color:#34d399;font-weight:700;font-size:.9rem"></span>
-      <button onclick="loadNhlTrackRecord()" style="background:#065f46;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">&#8635; Get Results</button>
+      <button onclick="loadNhlTrackRecord(true)" style="background:#065f46;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">&#8635; Grade &amp; Get Results</button>
       <button id="nhlTrkBtnCat" onclick="nhlTrkSetTab('cat')" style="background:#065f46;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">By Category</button>
       <button id="nhlTrkBtnList" onclick="nhlTrkSetTab('list')" style="background:#1e293b;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">Full List</button>
     </div>
@@ -3231,6 +3304,7 @@ _NHL_TRK_APP   = "nhl"
 _NHL_TRK_STAKE = 20.0
 _NHL_TRK_TOP   = 10
 _NHL_SNAP_CAT  = "__picks__"
+_NHL_GP_CAT    = "__gp__"
 
 # (result_key, category_label, stat_key, side, is_overflow)
 _NHL_TRK_LISTS = [
@@ -3277,6 +3351,212 @@ def _nhl_save_picks_snapshot(date_str: str, result: dict):
                           "side": "ALL", "wins": 0, "losses": 0, "locked": False, "detail": flat}],
                         "app,date,category,side")
     print(f"[nhl_track] snapshot {'saved' if ok else 'FAILED'}: {len(flat)} picks -> {date_str}")
+
+
+def _nhl_save_gp_snapshot(date_str: str, result: dict):
+    """Freeze the day's game-predictor calls in the shared ledger.
+
+    GP is deliberately separate from player picks: it has no stake, odds, or
+    player stat key.  Do not overwrite a non-empty pre-game snapshot on a
+    later re-run, otherwise a live re-run could change the forecast we grade.
+    """
+    captured_at = datetime.utcnow().isoformat() + "Z"
+    predictions = [
+        p for p in (result.get("game_predictions") or [])
+        if _nhl_gp_is_pre_game(p)
+    ]
+    if not predictions:
+        print(f"[nhl_track] GP snapshot skipped: no pre-game calls for {date_str}")
+        return
+    existing = _nhl_sb_get("mpa_track_ledger", {
+        "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{_NHL_GP_CAT}",
+        "side": "eq.ALL", "date": f"eq.{date_str}",
+        "select": "detail,locked", "limit": "1"})
+    if existing and isinstance(existing[0].get("detail"), list) and existing[0]["detail"]:
+        return
+    detail = []
+    for p in predictions:
+        detail.append({
+            "gameId": p.get("gameId"),
+            "homeTeam": p.get("homeTeam", ""), "awayTeam": p.get("awayTeam", ""),
+            "homeFull": p.get("homeFull", ""), "awayFull": p.get("awayFull", ""),
+            "startTime": p.get("startTime", ""),
+            "capturedAt": captured_at,
+            "pickTeam": p.get("pickTeam", ""), "pickProb": p.get("pickProb"),
+            "winProbHome": p.get("winProbHome"),
+            "projHome": p.get("projHome"), "projAway": p.get("projAway"),
+            "projTotal": p.get("projTotal"),
+            "bookTotal": p.get("bookTotal"), "ouRec": p.get("ouRec"),
+            "homeMl": p.get("homeMl"), "awayMl": p.get("awayMl"),
+            "totBook": p.get("totBook", ""), "mlBook": p.get("mlBook", ""),
+        })
+    ok = _nhl_sb_upsert("mpa_track_ledger", [{
+        "app": _NHL_TRK_APP, "date": date_str, "category": _NHL_GP_CAT,
+        "side": "ALL", "wins": 0, "losses": 0, "locked": False,
+        "detail": detail,
+    }], "app,date,category,side")
+    print(f"[nhl_track] GP snapshot {'saved' if ok else 'FAILED'}: "
+          f"{len(detail)} games -> {date_str}")
+
+
+def _nhl_gp_is_pre_game(prediction: dict, now: Optional[datetime] = None) -> bool:
+    """Only track forecasts captured before their scheduled puck drop."""
+    start = prediction.get("startTime") or ""
+    try:
+        start_at = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        start_at = start_at.replace(tzinfo=None)
+        return (now or datetime.utcnow()) < start_at
+    except (TypeError, ValueError):
+        # A missing start time cannot prove this is a pre-game prediction, so
+        # omit it rather than contaminate the accuracy record with hindsight.
+        return False
+
+
+def _nhl_load_gp_snapshots() -> list:
+    """Return all GP snapshot rows, including dates not graded yet."""
+    return _nhl_sb_get("mpa_track_ledger", {
+        "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{_NHL_GP_CAT}",
+        "side": "eq.ALL", "select": "date,detail,locked",
+        "limit": "500"}) or []
+
+
+def _nhl_gp_schedule_scores(date_str: str) -> tuple:
+    """Fetch one date of NHL schedule scores.
+
+    The schedule endpoint exposes the final score on each homeTeam/awayTeam
+    object.  Keep both game-id and matchup indexes because older saved GP
+    rows may predate the gameId field.
+    """
+    by_id, by_matchup = {}, {}
+    try:
+        r = httpx.get(f"{NHL_API}/schedule/{date_str}",
+                      follow_redirects=True, timeout=20)
+        if r.status_code != 200:
+            return by_id, by_matchup
+        for day in r.json().get("gameWeek", []):
+            if day.get("date") != date_str:
+                continue
+            for g in day.get("games", []):
+                home = g.get("homeTeam") or {}
+                away = g.get("awayTeam") or {}
+                record = {
+                    "gameId": g.get("id"),
+                    "homeTeam": home.get("abbrev", ""),
+                    "awayTeam": away.get("abbrev", ""),
+                    "homeScore": home.get("score"),
+                    "awayScore": away.get("score"),
+                    "gameState": g.get("gameState", ""),
+                }
+                if record["gameId"] is not None:
+                    by_id[str(record["gameId"])] = record
+                if record["homeTeam"] and record["awayTeam"]:
+                    by_matchup[(record["awayTeam"], record["homeTeam"])] = record
+    except Exception as e:
+        print(f"[nhl_track] schedule score fetch failed {date_str}: {e}")
+    return by_id, by_matchup
+
+
+def _nhl_grade_gp_date(date_str: str, snapshot: list) -> dict:
+    """Grade saved NHL GP calls without odds or stake accounting."""
+    by_id, by_matchup = _nhl_gp_schedule_scores(date_str)
+    final_states = {"OFF", "FINAL"}
+    graded, all_found, all_final = [], True, True
+    for p in snapshot:
+        game = by_id.get(str(p.get("gameId"))) if p.get("gameId") is not None else None
+        if game is None:
+            game = by_matchup.get((p.get("awayTeam", ""), p.get("homeTeam", "")))
+        row = dict(p)
+        row.update({
+            "mlResult": None, "ouResult": None, "actualHome": None,
+            "actualAway": None, "actualTotal": None,
+            "gameState": game.get("gameState", "") if game else "",
+        })
+        if not game:
+            all_found = False
+            all_final = False
+            graded.append(row)
+            continue
+        if game.get("gameState") not in final_states:
+            # Scores can appear during LIVE/CRIT games. They are informational
+            # only until final; never surface them as a graded result.
+            all_final = False
+            graded.append(row)
+            continue
+        try:
+            hs, aws = game.get("homeScore"), game.get("awayScore")
+            if hs is None or aws is None:
+                raise ValueError("score unavailable")
+            hs, aws = float(hs), float(aws)
+            row["actualHome"] = int(hs) if hs.is_integer() else hs
+            row["actualAway"] = int(aws) if aws.is_integer() else aws
+            row["actualTotal"] = row["actualHome"] + row["actualAway"]
+            pick = p.get("pickTeam")
+            if pick == p.get("homeTeam"):
+                row["mlResult"] = "WIN" if hs > aws else ("PUSH" if hs == aws else "LOSS")
+            elif pick == p.get("awayTeam"):
+                row["mlResult"] = "WIN" if aws > hs else ("PUSH" if hs == aws else "LOSS")
+            total_pick = p.get("ouRec")
+            total_line = p.get("bookTotal")
+            if total_pick in ("OVER", "UNDER") and total_line is not None:
+                line = float(total_line)
+                actual_total = hs + aws
+                if actual_total == line:
+                    row["ouResult"] = "PUSH"
+                elif total_pick == "OVER":
+                    row["ouResult"] = "WIN" if actual_total > line else "LOSS"
+                else:
+                    row["ouResult"] = "WIN" if actual_total < line else "LOSS"
+        except (TypeError, ValueError):
+            all_final = False
+        graded.append(row)
+    return {"detail": graded, "any_game": bool(snapshot),
+            "all_found": all_found, "all_final": all_final}
+
+
+def _nhl_gp_summary(detail: list) -> dict:
+    """Build read-only ML and projected-total counts for the UI."""
+    ml = {k: sum(1 for r in detail if r.get("mlResult") == k)
+          for k in ("WIN", "LOSS", "PUSH")}
+    ou = {k: sum(1 for r in detail if r.get("ouResult") == k)
+          for k in ("WIN", "LOSS", "PUSH")}
+    ml_decided = ml["WIN"] + ml["LOSS"]
+    ou_decided = ou["WIN"] + ou["LOSS"]
+    return {
+        "mlWins": ml["WIN"], "mlLosses": ml["LOSS"], "mlPushes": ml["PUSH"],
+        "mlRate": round(ml["WIN"] / ml_decided * 100, 1) if ml_decided else None,
+        "ouWins": ou["WIN"], "ouLosses": ou["LOSS"], "ouPushes": ou["PUSH"],
+        "ouRate": round(ou["WIN"] / ou_decided * 100, 1) if ou_decided else None,
+        "detail": detail,
+    }
+
+
+def _nhl_update_gp_ledger(include_date: str = ""):
+    """Grade unlocked historical GP snapshots and lock completed dates."""
+    today = date.today().isoformat()
+    rows = _nhl_load_gp_snapshots()
+    for saved in rows:
+        d = saved.get("date")
+        if not d or d > today or (d == today and d != include_date) or saved.get("locked"):
+            continue
+        snapshot = saved.get("detail") or []
+        if not isinstance(snapshot, list) or not snapshot:
+            continue
+        try:
+            graded = _nhl_grade_gp_date(d, snapshot)
+            if not graded.get("any_game"):
+                continue
+            _nhl_sb_upsert("mpa_track_ledger", [{
+                "app": _NHL_TRK_APP, "date": d, "category": _NHL_GP_CAT,
+                "side": "ALL",
+                "wins": sum(1 for r in graded["detail"] if r.get("mlResult") == "WIN"),
+                "losses": sum(1 for r in graded["detail"] if r.get("mlResult") == "LOSS"),
+                "locked": bool(graded.get("all_final")),
+                "locked_at": (datetime.utcnow().isoformat() + "Z"
+                              if graded.get("all_final") else None),
+                "detail": graded["detail"],
+            }], "app,date,category,side")
+        except Exception as e:
+            print(f"[nhl_track] GP grade failed {d}: {e}")
 
 def _nhl_load_picks_snapshot(date_str: str) -> list:
     rows = _nhl_sb_get("mpa_track_ledger", {
@@ -3393,7 +3673,7 @@ def _nhl_detail_graded(graded: dict) -> list:
 
 _NHL_TRK_LOCK = _bt_th.Lock()
 
-def _nhl_update_track_ledger():
+def _nhl_update_track_ledger(include_date: str = ""):
     from datetime import date as _d
     today = _d.today().isoformat()
     with _NHL_TRK_LOCK:
@@ -3433,6 +3713,12 @@ def _nhl_update_track_ledger():
             for i in range(0, len(upserts), 10):
                 _nhl_sb_upsert("mpa_track_ledger", upserts[i:i+10], "app,date,category,side")
             print(f"[nhl_track] locked {len(upserts)//2} dates")
+    # GP uses its own row and read-only summary; grade it independently from
+    # player-pick stake accounting.
+    try:
+        _nhl_update_gp_ledger(include_date)
+    except Exception as e:
+        print(f"[nhl_track] GP background error: {e}")
 
 def _nhl_trk_bg():
     try:
@@ -3634,17 +3920,34 @@ async def whoami(request: Request, token: str = ""):
     return {"is_admin": _is_admin_token(tok)}
 
 @app.get("/api/track-record")
-async def nhl_track_record():
-    """NHL Track Record — all graded picks by date, $20/play."""
-    _bt_th.Thread(target=_nhl_trk_bg, daemon=True).start()
+async def nhl_track_record(grade: bool = False, date_str: str = ""):
+    """NHL player-pick and read-only Game Predictor records by date."""
+    if grade:
+        # The Track Record button is a deliberate manual grade step.  Run it
+        # off the event loop so users receive the newly graded GP data in this
+        # same response instead of needing to click twice.
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _nhl_update_track_ledger, date_str)
+    else:
+        _bt_th.Thread(target=_nhl_trk_bg, daemon=True).start()
+    return JSONResponse(_nhl_track_record_payload())
+
+
+def _nhl_track_record_payload() -> dict:
+    """Build the read-only payload used by both the API and hub snapshots."""
     det_rows = _nhl_sb_get("mpa_track_ledger", {
         "app": f"eq.{_NHL_TRK_APP}", "category": "eq.__detail__",
         "locked": "eq.true", "select": "date,detail", "limit": "365"})
     detail_by_date = {r["date"]: (r.get("detail") or []) for r in (det_rows or [])}
-    dates = sorted(detail_by_date.keys(), reverse=True)
+    gp_by_date = {
+        r["date"]: (r.get("detail") or [])
+        for r in _nhl_load_gp_snapshots() if r.get("date")
+    }
+    dates = sorted(set(detail_by_date) | set(gp_by_date), reverse=True)
     result = []
     for d in dates:
-        det = detail_by_date[d]
+        det = detail_by_date.get(d, [])
+        gp = _nhl_gp_summary(gp_by_date[d]) if d in gp_by_date else None
         decided = [r for r in det if r.get("result") in ("WIN","LOSS") and r.get("odds") is not None]
         wins = sum(1 for r in decided if r["result"] == "WIN")
         losses = len(decided) - wins
@@ -3668,15 +3971,54 @@ async def nhl_track_record():
                            "rate": round(e["wins"]/total*100,1) if total else None})
         by_cat.sort(key=lambda x: (x.get("roi") or -999), reverse=True)
         result.append({"date":d,"wins":wins,"losses":losses,
-                       "net_pl":net_pl,"roi":roi,"by_cat":by_cat,"detail":det})
-    return JSONResponse({"dates": result, "stake": _NHL_TRK_STAKE})
+                       "net_pl":net_pl,"roi":roi,"by_cat":by_cat,"detail":det,
+                       "gp":gp})
+    return {"dates": result, "stake": _NHL_TRK_STAKE}
+
+
+_DASHBOARD_FALLBACK_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NHL Money Shots</title></head>
+<body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#0f0f0f;color:#f3f4f6;font-family:system-ui,sans-serif;text-align:center;padding:24px">
+<main><h1 style="color:#f59e0b">NHL Money Shots is reconnecting</h1>
+<p>The live dashboard is being restored. Please refresh in a moment.</p></main>
+</body></html>"""
+
+
+def _render_dashboard_shell(is_admin: bool) -> str:
+    """Render the member page without allowing a template error to become 500."""
+    try:
+        page = HTML
+        if not isinstance(page, str) or not page.strip():
+            raise RuntimeError("NHL dashboard HTML is empty or invalid")
+        js_flag = "true" if is_admin else "false"
+        rendered = page.replace(
+            "</head>",
+            f"<script>window.IS_ADMIN = {js_flag};</script></head>",
+            1,
+        )
+        if rendered == page:
+            raise RuntimeError("NHL dashboard HTML is missing its closing head tag")
+        return rendered
+    except Exception:
+        logger.exception("NHL dashboard HTML render failed; serving recovery page")
+        return _DASHBOARD_FALLBACK_HTML
+
+
+@app.on_event("startup")
+async def validate_dashboard_shell():
+    """Emit a startup signal that makes template regressions obvious in logs."""
+    rendered = _render_dashboard_shell(False)
+    if rendered == _DASHBOARD_FALLBACK_HTML:
+        logger.error("NHL dashboard startup validation failed")
+    else:
+        logger.info("NHL dashboard startup validation passed (%d bytes)", len(rendered))
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(admin: str = "", token: str = ""):
     is_admin = (bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__")) or _is_admin_token(token)
-    js_flag = "true" if is_admin else "false"
-    return HTMLResponse(HTML.replace("</head>", f"<script>window.IS_ADMIN = {js_flag};</script></head>", 1))
+    return HTMLResponse(_render_dashboard_shell(is_admin))
 
 @app.get("/api/picks")
 async def api_picks(request: Request, target_date: str = None, token: str = ""):
@@ -3715,6 +4057,9 @@ async def cron_run_nhl(request: Request, date_str: str = ""):
         result = await run_picks(ds)
         if isinstance(result, dict) and "error" not in result:
             _cache_set("nhl", ds, result)
+        # Daily cron runs also settle the prior dates' player and GP records.
+        # Keep the blocking NHL/Supabase calls out of FastAPI's event loop.
+        await asyncio.get_running_loop().run_in_executor(None, _nhl_update_track_ledger)
     finally:
         _CRON_BUSY_NHL = False
     return {"ran": True, "cached": bool(_cache_get("nhl", ds)), "date": ds}
