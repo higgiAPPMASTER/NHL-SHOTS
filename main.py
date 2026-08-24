@@ -216,6 +216,295 @@ async def get_team_sa_map(season: str = "20252026") -> Dict[str, float]:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  NHL Game Predictor — team-level win / total model
+# ─────────────────────────────────────────────────────────────────────────────
+
+_NHL_TEAM_FULL: Dict[str, str] = {
+    "ANA": "Anaheim Ducks",        "BOS": "Boston Bruins",
+    "BUF": "Buffalo Sabres",       "CGY": "Calgary Flames",
+    "CAR": "Carolina Hurricanes",  "CHI": "Chicago Blackhawks",
+    "COL": "Colorado Avalanche",   "CBJ": "Columbus Blue Jackets",
+    "DAL": "Dallas Stars",         "DET": "Detroit Red Wings",
+    "EDM": "Edmonton Oilers",      "FLA": "Florida Panthers",
+    "LAK": "Los Angeles Kings",    "MIN": "Minnesota Wild",
+    "MTL": "Montreal Canadiens",   "NSH": "Nashville Predators",
+    "NJD": "New Jersey Devils",    "NYI": "New York Islanders",
+    "NYR": "New York Rangers",     "OTT": "Ottawa Senators",
+    "PHI": "Philadelphia Flyers",  "PIT": "Pittsburgh Penguins",
+    "SJS": "San Jose Sharks",      "SEA": "Seattle Kraken",
+    "STL": "St. Louis Blues",      "TBL": "Tampa Bay Lightning",
+    "TOR": "Toronto Maple Leafs",  "UTA": "Utah Hockey Club",
+    "VAN": "Vancouver Canucks",    "VGK": "Vegas Golden Knights",
+    "WSH": "Washington Capitals",  "WPG": "Winnipeg Jets",
+}
+
+
+def _nhl_match_team_name(full_name: str) -> Optional[str]:
+    """Map an Odds API or stats-API full team name to NHL abbrev via word overlap."""
+    words = set(full_name.lower().split())
+    best, best_score = None, 0
+    for abbr, fname in _NHL_TEAM_FULL.items():
+        score = len(words & set(fname.lower().split()))
+        if score > best_score:
+            best, best_score = abbr, score
+    return best if best_score >= 1 else None
+
+
+async def _nhl_gp_fetch_all(target_date: str, season: str) -> dict:
+    """Fetch standings, team summary, PP/PK, B2B schedule, and Odds API game lines."""
+    import urllib.parse as _up
+    yesterday = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
+    api_key   = os.environ.get("ODDS_API_KEY", "")
+
+    sort_gf = _up.quote('[{"property":"goalsForPerGame","direction":"DESC"}]')
+    sort_pp = _up.quote('[{"property":"powerPlayPct","direction":"DESC"}]')
+    sort_pk = _up.quote('[{"property":"penaltyKillPct","direction":"DESC"}]')
+    _cay    = f"gameTypeId=2 and seasonId<={season} and seasonId>={season}"
+
+    summary_url = (f"{NHL_STATS}/team/summary?isAggregate=false&isGame=false"
+                   f"&sort={sort_gf}&start=0&limit=50&factCayenneExp=gamesPlayed>=1"
+                   f"&cayenneExp={_cay}")
+    pp_url = (f"{NHL_STATS}/team/powerplay?isAggregate=false&isGame=false"
+              f"&sort={sort_pp}&start=0&limit=50&factCayenneExp=gamesPlayed>=1"
+              f"&cayenneExp={_cay}")
+    pk_url = (f"{NHL_STATS}/team/penaltykill?isAggregate=false&isGame=false"
+              f"&sort={sort_pk}&start=0&limit=50&factCayenneExp=gamesPlayed>=1"
+              f"&cayenneExp={_cay}")
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
+        fetched = await asyncio.gather(
+            _fetch(f"{NHL_API}/standings/now", c),
+            _fetch(summary_url, c),
+            _fetch(pp_url, c),
+            _fetch(pk_url, c),
+            _fetch(f"{NHL_API}/schedule/{yesterday}", c),
+            return_exceptions=True,
+        )
+    def _safe(x): return x if isinstance(x, dict) else {}
+    sd, md, pd, pkd, yd = (_safe(x) for x in fetched)
+
+    # Teams that played yesterday → B2B today
+    b2b_teams: set = set()
+    for day in yd.get("gameWeek", []):
+        if day.get("date") == yesterday:
+            for g in day.get("games", []):
+                b2b_teams.add(g.get("homeTeam", {}).get("abbrev", ""))
+                b2b_teams.add(g.get("awayTeam", {}).get("abbrev", ""))
+    b2b_teams.discard("")
+
+    # Per-team dict from standings
+    name_to_abbrev: Dict[str, str] = {}
+    team_data: Dict[str, dict] = {}
+    for t in sd.get("standings", []):
+        abbr = t.get("teamAbbrev", {}).get("default", "")
+        name = t.get("teamName",  {}).get("default", "")
+        if not abbr:
+            continue
+        name_to_abbrev[name] = abbr
+        gp = t.get("gamesPlayed", 1) or 1
+        team_data[abbr] = {
+            "abbr": abbr, "name": name, "gp": gp,
+            "pts":     t.get("points", 0),
+            "pctg":    round(t.get("pointPctg", 0) * 100, 1),
+            "homeW":   t.get("homeWins",     0), "homeL":  t.get("homeLosses",  0),
+            "homeOTL": t.get("homeOtLosses", 0),
+            "roadW":   t.get("roadWins",     0), "roadL":  t.get("roadLosses",  0),
+            "roadOTL": t.get("roadOtLosses", 0),
+            "l10W":    t.get("l10Wins",      0), "l10L":   t.get("l10Losses",   0),
+            "l10OTL":  t.get("l10OtLosses",  0),
+            "streak":  t.get("streakCode",   ""),
+            "gfPG":    round(t.get("goalFor",     0) / gp, 2),
+            "gaPG":    round(t.get("goalAgainst", 0) / gp, 2),
+            "ppPct": 0.0, "pkPct": 0.0, "sfPG": 0.0, "saPG": 0.0,
+            "b2b": abbr in b2b_teams,
+        }
+
+    def _abbr_for(full: str) -> str:
+        return name_to_abbrev.get(full, "") or _nhl_match_team_name(full) or ""
+
+    for t in md.get("data", []):
+        abbr = _abbr_for(t.get("teamFullName", ""))
+        if abbr in team_data:
+            team_data[abbr]["gfPG"] = round(float(t.get("goalsForPerGame",     0) or 0), 2)
+            team_data[abbr]["gaPG"] = round(float(t.get("goalsAgainstPerGame", 0) or 0), 2)
+            team_data[abbr]["sfPG"] = round(float(t.get("shotsForPerGame",     0) or 0), 1)
+            team_data[abbr]["saPG"] = round(float(t.get("shotsAgainstPerGame", 0) or 0), 1)
+    for t in pd.get("data", []):
+        abbr = _abbr_for(t.get("teamFullName", ""))
+        if abbr in team_data:
+            team_data[abbr]["ppPct"] = round(float(t.get("powerPlayPct",   0) or 0), 1)
+    for t in pkd.get("data", []):
+        abbr = _abbr_for(t.get("teamFullName", ""))
+        if abbr in team_data:
+            team_data[abbr]["pkPct"] = round(float(t.get("penaltyKillPct", 0) or 0), 1)
+
+    # Odds API — h2h moneylines + totals
+    game_lines: dict = {}
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                evs_r = await c.get(
+                    f"{ODDS_API}/sports/icehockey_nhl/events",
+                    params={"apiKey": api_key, "dateFormat": "iso"})
+                if evs_r.status_code == 200:
+                    today_evs = [e for e in evs_r.json()
+                                 if e.get("commence_time", "")[:10] == target_date]
+                    if today_evs:
+                        odd_tasks = [
+                            c.get(f"{ODDS_API}/sports/icehockey_nhl/events/{ev['id']}/odds",
+                                  params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                                          "markets": "h2h,totals", "oddsFormat": "american"})
+                            for ev in today_evs
+                        ]
+                        odd_rs = await asyncio.gather(*odd_tasks, return_exceptions=True)
+                        for ev, r in zip(today_evs, odd_rs):
+                            if isinstance(r, Exception) or r.status_code != 200:
+                                continue
+                            h_abbr = _nhl_match_team_name(ev.get("home_team", ""))
+                            a_abbr = _nhl_match_team_name(ev.get("away_team", ""))
+                            if not h_abbr or not a_abbr:
+                                continue
+                            entry: dict = {}
+                            for book in r.json().get("bookmakers", []):
+                                for mkt in book.get("markets", []):
+                                    mk = mkt.get("key")
+                                    for oc in mkt.get("outcomes", []):
+                                        pr  = oc.get("price", 0)
+                                        pt  = oc.get("point")
+                                        nm  = oc.get("name", "")
+                                        na  = _nhl_match_team_name(nm)
+                                        if mk == "h2h":
+                                            if na == h_abbr and "home_ml" not in entry:
+                                                entry["home_ml"] = pr
+                                                entry["ml_book"] = book.get("key", "")
+                                            elif na == a_abbr and "away_ml" not in entry:
+                                                entry["away_ml"] = pr
+                                        elif mk == "totals":
+                                            side = nm.upper()
+                                            if side == "OVER" and "total" not in entry:
+                                                entry["total"]     = pt
+                                                entry["over_odds"] = pr
+                                                entry["tot_book"]  = book.get("key", "")
+                                            elif side == "UNDER" and "under_odds" not in entry:
+                                                entry["under_odds"] = pr
+                            if entry:
+                                game_lines[(a_abbr, h_abbr)] = entry
+        except Exception as _gp_oe:
+            print(f"[GP] Odds API game lines error: {_gp_oe}")
+
+    return {"team_data": team_data, "game_lines": game_lines}
+
+
+def _nhl_gp_predict(games: list, gp_data: dict) -> list:
+    """Pythagorean + H/A history + L10 form + B2B model for each today's game."""
+    team_data  = gp_data.get("team_data", {})
+    game_lines = gp_data.get("game_lines", {})
+    if not team_data:
+        return []
+
+    all_gf = [td["gfPG"] for td in team_data.values() if td["gfPG"] > 0]
+    all_ga = [td["gaPG"] for td in team_data.values() if td["gaPG"] > 0]
+    lg_avg = sum(all_gf) / len(all_gf) if all_gf else 3.0
+    lg_ga  = sum(all_ga) / len(all_ga) if all_ga else 3.0
+
+    preds = []
+    for g in games:
+        home, away = g.get("homeTeam", ""), g.get("awayTeam", "")
+        ht, at = team_data.get(home), team_data.get(away)
+        if not ht or not at:
+            continue
+
+        # Normalised offense/defense strength factors
+        h_off = ht["gfPG"] / lg_avg if lg_avg else 1.0
+        h_def = lg_ga  / ht["gaPG"] if ht["gaPG"] else 1.0
+        a_off = at["gfPG"] / lg_avg if lg_avg else 1.0
+        a_def = lg_ga  / at["gaPG"] if at["gaPG"] else 1.0
+
+        # Projected goals (opponent-adjusted) with 5% home-ice advantage
+        proj_h = round(lg_avg * h_off * a_def * 1.05, 2)
+        proj_a = round(lg_avg * a_off * h_def,         2)
+
+        # B2B penalty (~5%)
+        if ht.get("b2b"): proj_h = round(proj_h * 0.95, 2)
+        if at.get("b2b"): proj_a = round(proj_a * 0.95, 2)
+
+        # L10 form nudge (multiplier 0.95–1.05)
+        l10_h = (ht["l10W"] + 0.5 * ht["l10OTL"]) / 10
+        l10_a = (at["l10W"] + 0.5 * at["l10OTL"]) / 10
+        proj_h = round(proj_h * (0.95 + 0.10 * l10_h), 2)
+        proj_a = round(proj_a * (0.95 + 0.10 * l10_a), 2)
+
+        proj_total = round(proj_h + proj_a, 1)
+
+        # Pythagorean expectation
+        pyth = (proj_h ** 2 / (proj_h ** 2 + proj_a ** 2)
+                if (proj_h + proj_a) > 0 else 0.5)
+
+        # Historical H/A win-rates (requires ≥5 H/A games for credibility)
+        hg = ht["homeW"] + ht["homeL"] + ht["homeOTL"]
+        ag = at["roadW"] + at["roadL"] + at["roadOTL"]
+        h_ha = (ht["homeW"] + 0.5 * ht["homeOTL"]) / hg if hg >= 5 else 0.5
+        a_rd = (at["roadW"] + 0.5 * at["roadOTL"]) / ag if ag >= 5 else 0.5
+        ha_blend = (h_ha + (1 - a_rd)) / 2
+
+        # Blend 70% model + 30% H/A history; clamp [0.25, 0.75]
+        win_prob = max(0.25, min(0.75, 0.70 * pyth + 0.30 * ha_blend))
+
+        # B2B win-probability adjustment (~4 pts)
+        if ht.get("b2b"): win_prob = max(0.25, win_prob - 0.04)
+        if at.get("b2b"): win_prob = min(0.75, win_prob + 0.04)
+        win_prob = round(win_prob, 3)
+
+        pick_team = home if win_prob >= 0.5 else away
+        pick_prob = round((win_prob if win_prob >= 0.5 else 1 - win_prob) * 100, 1)
+
+        gl = game_lines.get((away, home), {})
+        book_total  = gl.get("total")
+        over_odds   = gl.get("over_odds")
+        under_odds  = gl.get("under_odds")
+        home_ml     = gl.get("home_ml")
+        away_ml     = gl.get("away_ml")
+
+        ou_rec = None
+        if book_total is not None:
+            diff = proj_total - book_total
+            ou_rec = "OVER" if diff > 0.25 else "UNDER" if diff < -0.25 else "PUSH"
+
+        ml_impl_h = None
+        if home_ml is not None:
+            ml_impl_h = (round(100 / (home_ml + 100), 3) if home_ml > 0
+                         else round(-home_ml / (-home_ml + 100), 3))
+
+        preds.append({
+            "homeTeam": home, "awayTeam": away,
+            "homeFull": g.get("homeFull", ""), "awayFull": g.get("awayFull", ""),
+            "startTime": g.get("startTime", ""),
+            "projHome": proj_h, "projAway": proj_a, "projTotal": proj_total,
+            "winProbHome": win_prob, "pickTeam": pick_team, "pickProb": pick_prob,
+            "hGfPG": ht["gfPG"], "hGaPG": ht["gaPG"],
+            "hSfPG": ht["sfPG"], "hSaPG": ht["saPG"],
+            "hPpPct": ht["ppPct"], "hPkPct": ht["pkPct"],
+            "hHomeRec": f"{ht['homeW']}-{ht['homeL']}-{ht['homeOTL']}",
+            "hL10":  f"{ht['l10W']}-{ht['l10L']}-{ht['l10OTL']}",
+            "hStreak": ht["streak"], "hPts": ht["pts"], "hPctg": ht["pctg"],
+            "hB2b": ht["b2b"],
+            "aGfPG": at["gfPG"], "aGaPG": at["gaPG"],
+            "aSfPG": at["sfPG"], "aSaPG": at["saPG"],
+            "aPpPct": at["ppPct"], "aPkPct": at["pkPct"],
+            "aRoadRec": f"{at['roadW']}-{at['roadL']}-{at['roadOTL']}",
+            "aL10":  f"{at['l10W']}-{at['l10L']}-{at['l10OTL']}",
+            "aStreak": at["streak"], "aPts": at["pts"], "aPctg": at["pctg"],
+            "aB2b": at["b2b"],
+            "bookTotal": book_total, "overOdds": over_odds, "underOdds": under_odds,
+            "homeMl": home_ml, "awayMl": away_ml,
+            "ouRec": ou_rec, "mlImpliedH": ml_impl_h,
+            "totBook": gl.get("tot_book", ""), "mlBook": gl.get("ml_book", ""),
+        })
+
+    return preds
+
+
 def _played_recently(logs: List[Dict], ref_date: str, days: int = RECENT_DAYS) -> bool:
     """True if the player has at least one game within `days` of ref_date.
     NHL doesn't post confirmed lineups pre-game, so this is our proxy for
@@ -1181,12 +1470,21 @@ async def run_picks(target_date: str = None) -> Dict:
     # ── Step 4 - rank shots & run independent points picks ───────────────────
     picks.sort(key=lambda x: (x.get("projEdge", -999), x["score"], x["oppSA"]), reverse=True)
 
+    _progress = {"stage": "Analyzing points...", "done": len(pool), "total": len(pool), "pct": 96}
     pts_all, ast_all, pts_unders, ast_unders, goal_all, goal_unders_all = await get_pts_picks(
         games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date, goal_lines_map,
         goalie_map=goalie_map, shared_logs=logs_map, shared_rosters=skater_rosters)
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
     saves_all, saves_unders = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map, target_date)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
+
+    # ── Game Predictor ─────────────────────────────────────────────────────
+    try:
+        _gp_data   = await _nhl_gp_fetch_all(target_date, season)
+        game_preds = _nhl_gp_predict(games, _gp_data)
+    except Exception as _gp_err:
+        print(f"[GP] game predictor error: {_gp_err}")
+        game_preds = []
 
     _result = {
         "picks":         picks[:TOP_N],
@@ -1218,8 +1516,9 @@ async def run_picks(target_date: str = None) -> Dict:
         "savesQualified": len(saves_all),
         "season":        season,
         "targetDate":    target_date,
-        "runTime":       datetime.utcnow().isoformat() + "Z",
-        "date":          target_date,
+        "runTime":          datetime.utcnow().isoformat() + "Z",
+        "date":             target_date,
+        "game_predictions": game_preds,
     }
     try:
         from replit_push import push_picks_to_replit
@@ -1334,6 +1633,46 @@ tr:last-child td{border-bottom:none}
 .more-btn:hover{background:#1e293b}
 details>summary{cursor:pointer;list-style:none;user-select:none}
 details>summary::-webkit-details-marker{display:none}
+/* ── NHL Game Predictor ──────────────────────────────────────────────────── */
+.gp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;margin-bottom:24px}
+@media(max-width:680px){.gp-grid{grid-template-columns:1fr}}
+.gp-card{background:#161616;border:1px solid #262626;border-radius:18px;padding:18px;overflow:hidden}
+.gp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.gp-mu{font-size:1.05rem;font-weight:900;color:#fff;letter-spacing:.02em}
+.gp-time{font-size:.7rem;color:#6b7280}
+.gp-pick{border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px}
+.gp-pick-team{font-weight:900;font-size:.95rem}
+.gp-pick-prob{font-size:.75rem;color:#cbd5e1;margin-top:2px}
+.gp-bar-wrap{margin-bottom:10px}
+.gp-bar-labels{display:flex;justify-content:space-between;margin-bottom:4px;font-size:.7rem;font-weight:700}
+.gp-bar-outer{background:#1a1a1a;border-radius:4px;height:9px;overflow:hidden;display:flex}
+.gp-bar-home{background:linear-gradient(90deg,#f59e0b,#fbbf24)}
+.gp-bar-away{background:linear-gradient(90deg,#60a5fa,#3b82f6)}
+.gp-totals{display:flex;gap:8px;margin-bottom:12px}
+.gp-tbox{flex:1;background:#0e0e0e;border:1px solid #1e1e1e;border-radius:9px;padding:7px 8px;text-align:center}
+.gp-tbox .gk{font-size:.56rem;color:#6b7280;text-transform:uppercase;letter-spacing:.07em;font-weight:700}
+.gp-tbox .gv{font-weight:900;font-size:1rem;margin-top:3px;font-family:'Playfair Display',serif;color:#f59e0b}
+.gp-tbox.ou-over{border-color:rgba(74,222,128,.3)}.gp-tbox.ou-over .gv{color:#4ade80}
+.gp-tbox.ou-under{border-color:rgba(248,113,113,.3)}.gp-tbox.ou-under .gv{color:#f87171}
+.gp-tbox.ou-push{border-color:rgba(107,114,128,.3)}.gp-tbox.ou-push .gv{color:#9ca3af}
+.gp-tbox.ou-book .gv{color:#9ca3af}
+.gp-teams{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+.gp-team{background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:9px}
+.gp-thdr{display:flex;align-items:center;gap:5px;margin-bottom:6px}
+.gp-tlogo{width:20px;height:20px;object-fit:contain}
+.gp-tabbr{font-weight:900;font-size:.85rem;color:#fff}
+.gp-tha{font-size:.58rem;font-weight:700;padding:1px 5px;border-radius:3px}
+.gp-tha.h-ha{background:rgba(74,222,128,.1);color:#4ade80;border:1px solid rgba(74,222,128,.2)}
+.gp-tha.a-ha{background:rgba(96,165,250,.1);color:#60a5fa;border:1px solid rgba(96,165,250,.2)}
+.gp-sr{display:flex;justify-content:space-between;font-size:.7rem;padding:2px 0;border-bottom:1px solid #1a1a1a}
+.gp-sr:last-child{border-bottom:none}
+.gp-sr .sk{color:#6b7280}.gp-sr .sv{font-weight:700;color:#e5e7eb}
+.gp-badges{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}
+.gp-b2b{background:rgba(248,113,113,.12);color:#f87171;border:1px solid rgba(248,113,113,.25);border-radius:4px;font-size:.6rem;font-weight:700;padding:1px 5px}
+.gp-stk{border-radius:4px;font-size:.6rem;font-weight:700;padding:1px 5px}
+.gp-stk.win-stk{background:rgba(74,222,128,.1);color:#4ade80;border:1px solid rgba(74,222,128,.2)}
+.gp-stk.loss-stk{background:rgba(248,113,113,.1);color:#f87171;border:1px solid rgba(248,113,113,.2)}
+.gp-ml-row{font-size:.68rem;color:#6b7280;margin-top:6px;display:flex;justify-content:space-between}
 footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border-top:1px solid #1c1c1c;margin-top:24px;font-family:'Source Sans Pro',sans-serif}
 .ft-logo{font-family:'Playfair Display',serif;color:#f59e0b;font-weight:700;font-size:.95rem;margin-bottom:6px}
 .admin-only{display:none !important}
@@ -1919,6 +2258,76 @@ function fmtVsLine(p){
   return '<span class="'+rateClass(p.vsLineRate)+'">'+p.vsLineHits+'/'+p.vsLineTotal+' ('+p.vsLineRate+'%)</span>';
 }
 
+function renderNhlGamePredictor(preds){
+  if(!preds||!preds.length) return '<div class="no-picks">No game predictions available.</div>';
+  var h='<div class="gp-grid">';
+  preds.forEach(function(g){
+    var t=g.startTime?new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}):'';
+    var hp=Math.round(g.winProbHome*100), ap=100-hp;
+    var isHomePick=g.pickTeam===g.homeTeam;
+    var pickFull=isHomePick?(g.homeFull||g.homeTeam):(g.awayFull||g.awayTeam);
+    var pickClr=isHomePick?'#f59e0b':'#60a5fa';
+    var pickBg=isHomePick
+      ?'background:linear-gradient(135deg,rgba(245,158,11,.12),rgba(245,158,11,.04));border:1px solid rgba(245,158,11,.3)'
+      :'background:linear-gradient(135deg,rgba(96,165,250,.12),rgba(96,165,250,.04));border:1px solid rgba(96,165,250,.3)';
+    var b2bNote=(g.hB2b&&isHomePick?' \u00b7 HOME B2B':g.aB2b&&!isHomePick?' \u00b7 AWAY B2B':'');
+    var ouClass=g.ouRec==='OVER'?'ou-over':g.ouRec==='UNDER'?'ou-under':g.ouRec==='PUSH'?'ou-push':'ou-book';
+    var ouLbl=g.ouRec==='OVER'?'\u2b06 OVER':g.ouRec==='UNDER'?'\u2b07 UNDER':g.ouRec==='PUSH'?'\u2248 PUSH':'\u2014';
+    function sBadge(s){
+      if(!s) return '';
+      return '<span class="gp-stk '+(s[0]==='W'?'win-stk':'loss-stk')+'">'+s+'</span>';
+    }
+    var hLogo='https://assets.nhle.com/logos/nhl/svg/'+g.homeTeam+'_light.svg';
+    var aLogo='https://assets.nhle.com/logos/nhl/svg/'+g.awayTeam+'_light.svg';
+    var mlRow='';
+    if(g.homeMl!=null&&g.awayMl!=null){
+      var hs=g.homeMl>=0?'+':'', as_=g.awayMl>=0?'+':'';
+      mlRow='<div class="gp-ml-row"><span>'+g.awayTeam+' ML: '+as_+g.awayMl+'</span><span>'+g.homeTeam+' ML: '+hs+g.homeMl+'</span></div>';
+    }
+    h+='<div class="gp-card">'
+      +'<div class="gp-head"><span class="gp-mu">'+g.awayTeam+' <span style="color:#4b5563;font-weight:400">@</span> '+g.homeTeam+'</span><span class="gp-time">'+t+'</span></div>'
+      +'<div class="gp-pick" style="'+pickBg+'">'
+        +'<span style="font-size:1.2rem">\uD83C\uDFC6</span>'
+        +'<div><div class="gp-pick-team" style="color:'+pickClr+'">'+pickFull+'</div>'
+        +'<div class="gp-pick-prob">Confidence '+g.pickProb+'%'+b2bNote+'</div></div>'
+      +'</div>'
+      +'<div class="gp-bar-wrap">'
+        +'<div class="gp-bar-labels"><span style="color:#f59e0b">'+g.homeTeam+' '+hp+'%</span><span style="color:#60a5fa">'+ap+'% '+g.awayTeam+'</span></div>'
+        +'<div class="gp-bar-outer"><div class="gp-bar-home" style="width:'+hp+'%"></div><div class="gp-bar-away" style="width:'+ap+'%"></div></div>'
+      +'</div>'
+      +'<div class="gp-totals">'
+        +'<div class="gp-tbox"><div class="gk">Proj Total</div><div class="gv">'+g.projTotal+'</div></div>'
+        +(g.bookTotal!=null
+          ?'<div class="gp-tbox ou-book"><div class="gk">Book O/U</div><div class="gv" style="color:#9ca3af">'+g.bookTotal+'</div></div>'
+           +'<div class="gp-tbox '+ouClass+'"><div class="gk">O/U Pick</div><div class="gv">'+ouLbl+'</div></div>'
+          :'')
+      +'</div>'
+      +'<div class="gp-teams">'
+        +'<div class="gp-team">'
+          +'<div class="gp-thdr"><img class="gp-tlogo" src="'+hLogo+'" onerror="this.style.display=\'none\'"/><span class="gp-tabbr">'+g.homeTeam+'</span><span class="gp-tha h-ha">HOME</span></div>'
+          +'<div class="gp-sr"><span class="sk">GF / GA /G</span><span class="sv">'+g.hGfPG+' / '+g.hGaPG+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">PP / PK</span><span class="sv">'+g.hPpPct+'% / '+g.hPkPct+'%</span></div>'
+          +'<div class="gp-sr"><span class="sk">Home W-L-OT</span><span class="sv">'+g.hHomeRec+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">L10</span><span class="sv">'+g.hL10+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">Points</span><span class="sv">'+g.hPts+' ('+g.hPctg+'%)</span></div>'
+          +'<div class="gp-badges">'+(g.hB2b?'<span class="gp-b2b">B2B</span>':'')+sBadge(g.hStreak)+'</div>'
+        +'</div>'
+        +'<div class="gp-team">'
+          +'<div class="gp-thdr"><img class="gp-tlogo" src="'+aLogo+'" onerror="this.style.display=\'none\'"/><span class="gp-tabbr">'+g.awayTeam+'</span><span class="gp-tha a-ha">AWAY</span></div>'
+          +'<div class="gp-sr"><span class="sk">GF / GA /G</span><span class="sv">'+g.aGfPG+' / '+g.aGaPG+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">PP / PK</span><span class="sv">'+g.aPpPct+'% / '+g.aPkPct+'%</span></div>'
+          +'<div class="gp-sr"><span class="sk">Road W-L-OT</span><span class="sv">'+g.aRoadRec+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">L10</span><span class="sv">'+g.aL10+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">Points</span><span class="sv">'+g.aPts+' ('+g.aPctg+'%)</span></div>'
+          +'<div class="gp-badges">'+(g.aB2b?'<span class="gp-b2b">B2B</span>':'')+sBadge(g.aStreak)+'</div>'
+        +'</div>'
+      +'</div>'
+      +mlRow
+      +'</div>';
+  });
+  h+='</div>';
+  return h;
+}
 function buildPtsTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
     '<th>BOOK</th><th>AVG vs OPP (L10)</th><th>AVG L10 H/A</th><th>HITS BOOK L10</th>' +
@@ -2048,6 +2457,13 @@ function _nhlPaint(q){
     h += '<div class="sa-badge"><span class="rk">#' + (i+1) + ' ' + item[0] + '</span> <span class="sv">' + item[1].toFixed(1) + '</span></div>';
   });
   h += '</div>';
+
+  // ── Game Predictor ────────────────────────────────────────────────────────
+  var _gpPreds = d.game_predictions || [];
+  if(_gpPreds.length){
+    h += '<div class="sec">\uD83D\uDD2E Game Predictor \u2014 Win Probability & Projected Totals</div>';
+    h += renderNhlGamePredictor(_gpPreds);
+  }
 
   // ── 🔒 80–100% Locks — cross-market picks hitting 80%+ ────────────────
   var _lockAll=[];
@@ -2449,7 +2865,8 @@ function renderNhlTrackDay(){
   var rows=[];
   if(dayData) rows=dayData.detail||[];
   else dates.forEach(function(d){(d.detail||[]).forEach(function(r){rows.push(r);});});
-  var decided=rows.filter(function(r){return(r.result==='WIN'||r.result==='LOSS')&&r.odds!=null;});
+  var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
+  var _withOdds=decided.filter(function(r){return r.odds!=null;});
   if(!decided.length&&selDate){
     sumEl.innerHTML='<p style="color:#94a3b8;padding:12px;text-align:center">No graded picks for '+selDate+'. Games may not be final yet.</p>';
     bodyEl.innerHTML='';return;
@@ -2457,8 +2874,8 @@ function renderNhlTrackDay(){
   var stake=_nhlTrkData.stake||20;
   var wins=decided.filter(function(r){return r.result==='WIN';}).length;
   var losses=decided.length-wins;
-  var netPL=decided.reduce(function(a,r){return a+(r.profit||0);},0);
-  var totalStaked=decided.length*stake;
+  var netPL=_withOdds.reduce(function(a,r){return a+(r.profit||0);},0);
+  var totalStaked=_withOdds.length*stake;
   var roi=totalStaked?(netPL/totalStaked*100):null;
   var rate=decided.length?(wins/decided.length*100):null;
   var plColor=netPL>=0?'#4ade80':'#f87171';
@@ -2477,7 +2894,7 @@ function _nhlTrkCatHtml(decided){
   decided.forEach(function(r){
     var c=cats[r.category]=cats[r.category]||{w:0,l:0,pl:0,staked:0};
     if(r.result==='WIN') c.w++; else c.l++;
-    c.pl+=(r.profit||0); c.staked+=20;
+    c.pl+=(r.profit||0); if(r.odds!=null) c.staked+=20;
   });
   var entries=Object.entries(cats).sort(function(a,b){
     return ((b[1].pl/b[1].staked)||0)-((a[1].pl/a[1].staked)||0);
@@ -2956,7 +3373,7 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
 def _nhl_aggregate_graded(graded: dict) -> dict:
     agg: dict = {}
     for row in graded.get("main", []) + graded.get("overflow", []) + graded.get("locks", []):
-        if row.get("result") not in ("WIN","LOSS") or row.get("odds") is None:
+        if row.get("result") not in ("WIN","LOSS"):
             continue
         rec = agg.setdefault(row["category"], {}).setdefault(row.get("side","OVER"), [0,0])
         if row["result"] == "WIN":
@@ -2968,7 +3385,7 @@ def _nhl_aggregate_graded(graded: dict) -> dict:
 def _nhl_detail_graded(graded: dict) -> list:
     out = []
     for row in graded.get("main", []) + graded.get("overflow", []) + graded.get("locks", []):
-        if row.get("result") not in ("WIN","LOSS") or row.get("odds") is None:
+        if row.get("result") not in ("WIN","LOSS"):
             continue
         out.append({k: row.get(k) for k in
                     ("name","team","category","side","stat_key","line","odds","rank","result","actual","profit")})
