@@ -625,7 +625,7 @@ async def get_shot_qualified_players(
 
     print(f"[NHL] {len(pool)} roster players in pool | {len(lines_map)} real lines for display")
     pool.sort(key=lambda x: x["oppSA"], reverse=True)
-    return pool
+    return pool, rosters
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Points picks - NHL Stats API game logs (independent of shots)
@@ -692,9 +692,13 @@ async def get_pts_picks(
     target_date: str = None,
     goal_lines_map: Dict[str, Dict] = None,
     goalie_map: Dict[str, float] = None,
+    shared_logs: Dict[int, List[Dict]] = None,
+    shared_rosters: Dict[str, List[Dict]] = None,
 ):
     """Independent points + assists + goals picks using NHL Stats API game logs.
-    Returns (points_picks, assist_picks, points_unders, assist_unders, goal_picks, goal_unders)."""
+    Returns (points_picks, assist_picks, points_unders, assist_unders, goal_picks, goal_unders).
+    shared_logs: pre-fetched {pid: logs} from the shots phase — skips redundant API calls.
+    shared_rosters: pre-fetched {team: [players]} from the shots phase — skips roster re-fetch."""
 
     pts_lines_map = pts_lines_map or {}
     ast_lines_map = ast_lines_map or {}
@@ -707,16 +711,21 @@ async def get_pts_picks(
         team_ctx[g["homeTeam"]] = {"opponent": g["awayTeam"], "homeRoad": "H"}
         team_ctx[g["awayTeam"]] = {"opponent": g["homeTeam"],  "homeRoad": "R"}
 
-    # Get all skaters on today's teams
-    roster_vals = await asyncio.gather(
-        *[get_roster(t, sem) for t in team_ctx], return_exceptions=True
-    )
-    rosters = {t: (r if isinstance(r, list) else []) for t, r in zip(team_ctx.keys(), roster_vals)}
+    # Reuse rosters from shots phase if available — avoids one get_roster call per team
+    if shared_rosters is not None:
+        rosters = shared_rosters
+    else:
+        roster_vals = await asyncio.gather(
+            *[get_roster(t, sem) for t in team_ctx], return_exceptions=True
+        )
+        rosters = {t: (r if isinstance(r, list) else []) for t, r in zip(team_ctx.keys(), roster_vals)}
 
     # Fetch multi-season game logs for all players concurrently
     all_players = []
     seen_pts = set()
     for team, players in rosters.items():
+        if team not in team_ctx:
+            continue
         ctx = team_ctx[team]
         for p in players:
             if p["id"] not in seen_pts:
@@ -724,6 +733,10 @@ async def get_pts_picks(
                 all_players.append((p, team, ctx["opponent"], ctx["homeRoad"]))
 
     async def fetch_logs(pid):
+        # Reuse shots-phase logs — they already contain goals/assists/points/toi/homeRoad/opponent
+        if shared_logs is not None and pid in shared_logs:
+            return shared_logs[pid]
+        # Player not in shots pool (rare) — fetch fresh
         async with sem:
             async with httpx.AsyncClient(timeout=30) as c:
                 results = await asyncio.gather(
@@ -1058,7 +1071,7 @@ async def run_picks(target_date: str = None) -> Dict:
     league_sa = round(sum(_sa_vals) / len(_sa_vals), 2) if _sa_vals else 0.0
 
     # Build player pool from NHL skater season averages
-    pool = await get_shot_qualified_players(games, sa_map, sem_nhl, season, lines_map)
+    pool, skater_rosters = await get_shot_qualified_players(games, sa_map, sem_nhl, season, lines_map)
     _progress = {"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35}
 
     if not pool:
@@ -1170,7 +1183,7 @@ async def run_picks(target_date: str = None) -> Dict:
 
     pts_all, ast_all, pts_unders, ast_unders, goal_all, goal_unders_all = await get_pts_picks(
         games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date, goal_lines_map,
-        goalie_map=goalie_map)
+        goalie_map=goalie_map, shared_logs=logs_map, shared_rosters=skater_rosters)
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
     saves_all, saves_unders = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map, target_date)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
