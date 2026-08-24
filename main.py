@@ -1539,11 +1539,18 @@ async def run_picks(target_date: str = None) -> Dict:
             # logs rather than turning the entire member page into a 500.
             logger.exception("NHL snapshot Track Record payload failed")
             _track_record = None
+        try:
+            _gp_record = _nhl_gp_record_payload()
+        except Exception:
+            logger.exception("NHL snapshot GP Record payload failed")
+            _gp_record = None
         _inject = (
             '<script>window.__INITIAL_PICKS__ = '
             + _json.dumps(_result).replace('</', '<\\/')
             + ';window.__INITIAL_TRACK_RECORD__ = '
             + _json.dumps(_track_record).replace('</', '<\\/')
+            + ';window.__INITIAL_GP_RECORD__ = '
+            + _json.dumps(_gp_record).replace('</', '<\\/')
             + ';</script></head>'
         )
         _snapshot_html = HTML.replace('</head>', _inject, 1)
@@ -1786,7 +1793,7 @@ body.is-admin #parlayCard{display:block}
 
 <nav>
   <div class="logo">Money <span>Picks</span> Arena</div>
-  <div style="display:flex;gap:8px;align-items:center"><button onclick="document.getElementById('nhl-track-section').scrollIntoView({behavior:'smooth',block:'start'})" style="background:#065f46;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128202; Track Record</button><button class="admin-only" onclick="openNhlMyBets()" style="background:#0e7490;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128176; My Bets</button></div>
+  <div style="display:flex;gap:8px;align-items:center"><button onclick="openNhlGPRecord()" style="background:#0e7490;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128302; GP Record</button><button onclick="document.getElementById('nhl-track-section').scrollIntoView({behavior:'smooth',block:'start'})" style="background:#065f46;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128202; Track Record</button><button class="admin-only" onclick="openNhlMyBets()" style="background:#0e7490;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128176; My Bets</button></div>
 </nav>
 
 <style>
@@ -2891,8 +2898,6 @@ function renderNhlTrackDay(){
   var selDate=dp?dp.value:'';
   var dates=_nhlTrkData.dates||[];
   var dayData=selDate?dates.find(function(d){return d.date===selDate;}):null;
-  var gpDay=dayData&&dayData.gp?dayData.gp:null;
-  var gpHtml=_nhlGpHtml(gpDay);
   var sumEl=document.getElementById('nhlTrkSummary'),bodyEl=document.getElementById('nhlTrkBody');
   if(!sumEl||!bodyEl) return;
   var rows=[];
@@ -2901,7 +2906,7 @@ function renderNhlTrackDay(){
   var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
   var _withOdds=decided.filter(function(r){return r.odds!=null;});
   if(!decided.length&&selDate){
-    sumEl.innerHTML=gpHtml+'<p style="color:#94a3b8;padding:12px;text-align:center">No graded player picks for '+selDate+'. Games may not be final yet.</p>';
+    sumEl.innerHTML='<p style="color:#94a3b8;padding:12px;text-align:center">No graded player picks for '+selDate+'. Games may not be final yet.</p>';
     bodyEl.innerHTML='';return;
   }
   var stake=_nhlTrkData.stake||20;
@@ -2912,7 +2917,7 @@ function renderNhlTrackDay(){
   var roi=totalStaked?(netPL/totalStaked*100):null;
   var rate=decided.length?(wins/decided.length*100):null;
   var plColor=netPL>=0?'#4ade80':'#f87171';
-  sumEl.innerHTML=gpHtml+'<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+  sumEl.innerHTML='<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
     +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
     +'<span style="font-family:monospace;font-weight:800;color:'+plColor+'">Net '+(netPL>=0?'+$':'-$')+Math.abs(netPL).toFixed(0)+'</span>'
@@ -3028,7 +3033,168 @@ document.addEventListener('DOMContentLoaded',function(){
     if(bot) bot.style.display=!atBot?'block':'none';}
   window.addEventListener('scroll',_sc,{passive:true});_sc();
 });
+
+// ── Standalone NHL Game Predictor Record ─────────────────────────────────────
+var _nhlGpRecordData=null,_nhlGpRecordTab='daily',_nhlGpRecordDate='';
+function _nhlGpToday(){return new Date().toISOString().slice(0,10);}
+function _nhlGpDateLabel(dt){
+  var a=(dt||'').split('-');
+  if(a.length!==3) return dt||'';
+  var m=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return m[parseInt(a[1],10)-1]+' '+parseInt(a[2],10)+', '+a[0];
+}
+function _nhlGpPct(w,l){var n=(w||0)+(l||0);return n?Math.round((w||0)/n*100)+'%':'—';}
+function _nhlGpWlp(w,l,p){
+  return '<span style="color:#4ade80;font-weight:900">'+(w||0)+'W</span>'
+    +'<span style="color:#64748b"> - </span><span style="color:#f87171;font-weight:900">'+(l||0)+'L</span>'
+    +((p||0)?'<span style="color:#facc15;font-weight:800"> - '+p+'P</span>':'');
+}
+function _nhlGpResult(v){
+  if(!v) return '<span style="color:#64748b;font-weight:800">PENDING</span>';
+  var c=v==='WIN'?'#4ade80':(v==='LOSS'?'#f87171':'#facc15');
+  return '<span style="color:'+c+';font-weight:900">'+v+'</span>';
+}
+function _nhlGpInitialFromTrack(d){
+  var out=[];
+  (d&&d.dates||[]).forEach(function(day){
+    var gp=day.gp;if(!gp) return;
+    var games=(gp.detail||[]).map(function(p){
+      return {
+        home_abbr:p.homeTeam||'',away_abbr:p.awayTeam||'',
+        home_team:p.homeFull||p.homeTeam||'',away_team:p.awayFull||p.awayTeam||'',
+        pick:p.pickTeam||'',pick_prob:p.pickProb,win_prob_home:p.winProbHome!=null?p.winProbHome*100:null,
+        proj_home:p.projHome,proj_away:p.projAway,proj_total:p.projTotal,
+        book_total:p.bookTotal,total_pick:p.ouRec,home_ml:p.homeMl,away_ml:p.awayMl,
+        ml_book:p.mlBook||'',total_book:p.totBook||'',actual_home:p.actualHome,actual_away:p.actualAway,
+        actual_total:p.actualTotal,team_result:p.mlResult,ou_result:p.ouResult,start_time:p.startTime||''
+      };
+    });
+    out.push({date:day.date,locked:true,games:games,
+      team_w:gp.mlWins||0,team_l:gp.mlLosses||0,team_p:gp.mlPushes||0,
+      ou_w:gp.ouWins||0,ou_l:gp.ouLosses||0,ou_p:gp.ouPushes||0});
+  });
+  out.sort(function(a,b){return b.date.localeCompare(a.date);});
+  return {daily:out};
+}
+function _nhlGpDay(dt){
+  var a=(_nhlGpRecordData&&_nhlGpRecordData.daily)||[];
+  for(var i=0;i<a.length;i++) if(a[i].date===dt) return a[i];
+  return null;
+}
+function _nhlGpAggregate(days){
+  var a={tw:0,tl:0,tp:0,ow:0,ol:0,op:0,homeW:0,homeL:0,awayW:0,awayL:0,overW:0,overL:0,underW:0,underL:0};
+  (days||[]).forEach(function(day){(day.games||[]).forEach(function(g){
+    if(g.team_result==='WIN') a.tw++; else if(g.team_result==='LOSS') a.tl++; else if(g.team_result==='PUSH') a.tp++;
+    if(g.ou_result==='WIN') a.ow++; else if(g.ou_result==='LOSS') a.ol++; else if(g.ou_result==='PUSH') a.op++;
+    if(g.team_result==='WIN'||g.team_result==='LOSS'){
+      if(g.pick===g.home_abbr) a.homeW+=(g.team_result==='WIN'?1:0),a.homeL+=(g.team_result==='LOSS'?1:0);
+      else a.awayW+=(g.team_result==='WIN'?1:0),a.awayL+=(g.team_result==='LOSS'?1:0);
+    }
+    if(g.ou_result==='WIN'||g.ou_result==='LOSS'){
+      if(g.total_pick==='OVER') a.overW+=(g.ou_result==='WIN'?1:0),a.overL+=(g.ou_result==='LOSS'?1:0);
+      if(g.total_pick==='UNDER') a.underW+=(g.ou_result==='WIN'?1:0),a.underL+=(g.ou_result==='LOSS'?1:0);
+    }
+  });});
+  return a;
+}
+function _nhlGpSummary(a){
+  return '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">'
+    +'<div style="flex:1;min-width:220px;background:#071f17;border:1px solid rgba(52,211,153,.28);border-radius:12px;padding:14px;text-align:center">'
+    +'<div style="color:#6ee7b7;font-size:.66rem;font-weight:900;letter-spacing:.08em">TEAM WIN / LOSS</div>'
+    +'<div style="font-size:1.15rem;margin-top:5px">'+_nhlGpWlp(a.tw,a.tl,a.tp)+'</div>'
+    +'<div style="color:#94a3b8;font-size:.74rem;margin-top:4px">'+_nhlGpPct(a.tw,a.tl)+' hit rate</div></div>'
+    +'<div style="flex:1;min-width:220px;background:#07192b;border:1px solid rgba(56,189,248,.28);border-radius:12px;padding:14px;text-align:center">'
+    +'<div style="color:#7dd3fc;font-size:.66rem;font-weight:900;letter-spacing:.08em">PROJECTED TOTAL O/U</div>'
+    +'<div style="font-size:1.15rem;margin-top:5px">'+_nhlGpWlp(a.ow,a.ol,a.op)+'</div>'
+    +'<div style="color:#94a3b8;font-size:.74rem;margin-top:4px">'+_nhlGpPct(a.ow,a.ol)+' hit rate</div></div></div>'
+    +'<div style="font-size:.64rem;color:#64748b;margin:-5px 0 12px">Accuracy only · no stake or ROI accounting · pushes excluded from hit rates</div>';
+}
+function _nhlGpSplits(a){
+  function tile(label,w,l){return '<div style="flex:1;min-width:125px;background:#0a1120;border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center"><div style="color:#94a3b8;font-size:.58rem;font-weight:800">'+label+'</div><div style="margin-top:4px">'+_nhlGpWlp(w,l,0)+'</div><div style="color:#64748b;font-size:.64rem;margin-top:2px">'+_nhlGpPct(w,l)+'</div></div>';}
+  return '<div style="font-size:.64rem;color:#a78bfa;font-weight:900;letter-spacing:.08em;margin:10px 0 6px">PREDICTOR SPLITS</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap">'+tile('HOME TEAM PICKS',a.homeW,a.homeL)+tile('AWAY TEAM PICKS',a.awayW,a.awayL)+tile('OVER CALLS',a.overW,a.overL)+tile('UNDER CALLS',a.underW,a.underL)+'</div>';
+}
+function _nhlGpGamesHtml(games){
+  if(!games||!games.length) return '<p style="color:#64748b;padding:18px;text-align:center">No saved games for this date.</p>';
+  var rows=games.map(function(g){
+    var final=(g.actual_home!=null&&g.actual_away!=null)
+      ?g.away_abbr+' '+g.actual_away+' &mdash; '+g.home_abbr+' '+g.actual_home:'Pending';
+    var mlOdds=g.pick===g.home_abbr?g.home_ml:g.away_ml;
+    var total=(g.total_pick&&g.book_total!=null)?g.total_pick+' '+g.book_total:'No total call';
+    return '<tr><td style="color:#e2e8f0;font-weight:800">'+g.away_abbr+' @ '+g.home_abbr+'</td>'
+      +'<td style="color:#94a3b8">'+final+'</td><td style="color:#cbd5e1">'+(g.pick||'—')
+      +(g.pick_prob!=null?' ('+g.pick_prob+'%)':'')+(mlOdds!=null?' · '+(mlOdds>0?'+':'')+mlOdds:'')+'</td>'
+      +'<td>'+_nhlGpResult(g.team_result)+'</td><td style="color:#cbd5e1">'+total+'</td>'
+      +'<td style="color:#94a3b8">'+(g.actual_total!=null?g.actual_total:'—')+'</td><td>'+_nhlGpResult(g.ou_result)+'</td></tr>';
+  }).join('');
+  return '<div style="overflow-x:auto"><table class="nhl-trk-tbl"><thead><tr><th>Matchup</th><th>Final</th><th>ML Pick</th><th>ML</th><th>Total Call</th><th>Total</th><th>O/U</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
+function _nhlGpToolbar(){
+  var tabs=[['daily','Daily'],['weekly','Last 7 Days'],['monthly','This Month'],['alltime','All Time']];
+  var h='<div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px">';
+  tabs.forEach(function(t){var on=_nhlGpRecordTab===t[0];h+='<button onclick="_nhlGpSetTab(&#39;'+t[0]+'&#39;)" style="background:'+(on?'#065f46':'#1e293b')+';color:#fff;border:none;border-radius:8px;padding:8px 13px;font-weight:800;font-size:.76rem;cursor:pointer">'+t[1]+'</button>';});
+  return h+'</div>';
+}
+function _nhlGpRender(){
+  var head=document.getElementById('nhlGpRecordHead'),body=document.getElementById('nhlGpRecordBody');if(!head||!body)return;
+  var daily=(_nhlGpRecordData&&_nhlGpRecordData.daily)||[];
+  head.innerHTML=_nhlGpToolbar();
+  if(!daily.length){body.innerHTML='<p style="color:#94a3b8;padding:18px">No Game Predictor record has been graded yet. A day is banked after its games are final.</p>';return;}
+  if(_nhlGpRecordTab==='daily'){
+    var dt=_nhlGpRecordDate||daily[0].date;
+    var day=_nhlGpDay(dt);
+    var picker='<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:13px"><label style="color:#94a3b8;font-size:.78rem;font-weight:800">DATE <input type="date" value="'+dt+'" max="'+_nhlGpToday()+'" onchange="_nhlGpGotoDay(this.value)" style="margin-left:6px;background:#020617;border:1px solid #334155;color:#fff;border-radius:7px;padding:7px 9px"></label><button onclick="_nhlGpLoad(true)" style="background:#0e7490;color:#fff;border:none;border-radius:7px;padding:7px 12px;font-size:.76rem;font-weight:800;cursor:pointer">&#8635; Grade &amp; Get Results</button></div>';
+    if(!day){body.innerHTML=picker+'<p style="color:#94a3b8;padding:14px">No saved Game Predictor slate for '+_nhlGpDateLabel(dt)+'.</p>';return;}
+    var a=_nhlGpAggregate([day]);
+    body.innerHTML=picker+_nhlGpSummary(a)+_nhlGpGamesHtml(day.games);
+    return;
+  }
+  var today=_nhlGpToday(),days=[];
+  if(_nhlGpRecordTab==='weekly'){
+    var start=new Date(today+'T12:00:00');start.setDate(start.getDate()-6);
+    days=daily.filter(function(d){var x=new Date(d.date+'T12:00:00');return x>=start&&x<=new Date(today+'T23:59:59');});
+  }else if(_nhlGpRecordTab==='monthly'){
+    var ym=today.slice(0,7);days=daily.filter(function(d){return d.date.slice(0,7)===ym;});
+  }else days=daily.slice();
+  if(!days.length){body.innerHTML='<p style="color:#94a3b8;padding:18px">No graded Game Predictor days in this range yet.</p>';return;}
+  var all=[];days.forEach(function(d){all=all.concat(d.games||[]);});
+  var ag=_nhlGpAggregate(days);
+  var dayRows=days.map(function(d){var da=_nhlGpAggregate([d]);return '<tr><td>'+_nhlGpDateLabel(d.date)+'</td><td>'+_nhlGpWlp(da.tw,da.tl,da.tp)+'</td><td>'+_nhlGpPct(da.tw,da.tl)+'</td><td>'+_nhlGpWlp(da.ow,da.ol,da.op)+'</td><td>'+_nhlGpPct(da.ow,da.ol)+'</td><td>'+((d.games||[]).length)+'</td></tr>';}).join('');
+  body.innerHTML=_nhlGpSummary(ag)+_nhlGpSplits(ag)+'<div style="font-size:.64rem;color:#a78bfa;font-weight:900;letter-spacing:.08em;margin:16px 0 6px">DAILY RESULTS</div><div style="overflow-x:auto"><table class="nhl-trk-tbl"><thead><tr><th>Date</th><th>Team ML</th><th>Rate</th><th>Totals O/U</th><th>Rate</th><th>Games</th></tr></thead><tbody>'+dayRows+'</tbody></table></div>';
+}
+function _nhlGpSetTab(tab){_nhlGpRecordTab=tab;_nhlGpRender();}
+function _nhlGpGotoDay(dt){_nhlGpRecordDate=dt;_nhlGpRecordTab='daily';_nhlGpRender();}
+async function _nhlGpLoad(manual){
+  var body=document.getElementById('nhlGpRecordBody');if(body)body.innerHTML='<p style="color:#94a3b8;padding:20px">Loading Game Predictor record...</p>';
+  try{
+    if(!manual&&window.__INITIAL_GP_RECORD__){_nhlGpRecordData=window.__INITIAL_GP_RECORD__;}
+    else if(!manual&&window.__INITIAL_TRACK_RECORD__){_nhlGpRecordData=_nhlGpInitialFromTrack(window.__INITIAL_TRACK_RECORD__);}
+    else{
+      var qs=manual?'?grade=true&date_str='+encodeURIComponent(_nhlGpRecordDate||_nhlGpToday()):'';
+      var r=await fetch('/api/gp-record'+qs);if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
+      _nhlGpRecordData=await r.json();
+    }
+    var ds=(_nhlGpRecordData.daily||[]);if(!_nhlGpRecordDate&&ds.length)_nhlGpRecordDate=ds[0].date;_nhlGpRender();
+  }catch(e){if(body)body.innerHTML='<p style="color:#f87171;padding:18px">Could not load GP Record: '+(e.message||'request failed')+'</p>';}
+}
+function openNhlGPRecord(){
+  var sec=document.getElementById('nhl-gp-record-section');if(!sec)return;
+  sec.style.display='block';sec.scrollIntoView({behavior:'smooth',block:'start'});
+  if(_nhlGpRecordData)_nhlGpRender();else _nhlGpLoad(false);
+}
 </script>
+<!-- Standalone NHL Game Predictor Record -->
+<div id="nhl-gp-record-section" style="display:none;max-width:960px;margin:0 auto;padding:0 16px 24px">
+  <div class="card" style="padding:20px 22px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px;flex-wrap:wrap">
+      <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#128302; NHL Game Predictor Record</h2>
+      <button onclick="document.getElementById('nhl-gp-record-section').style.display='none'" style="background:#1e293b;border:none;color:#94a3b8;border-radius:8px;padding:7px 11px;font-size:.9rem;cursor:pointer">&#215;</button>
+    </div>
+    <p style="color:#64748b;font-size:.74rem;margin:0 0 14px">Permanent pre-game model accuracy. Team winner and projected total are tracked separately; no stake or ROI accounting.</p>
+    <div id="nhlGpRecordHead"></div>
+    <div id="nhlGpRecordBody"><p style="color:#94a3b8;padding:18px">Open GP Record to load results.</p></div>
+  </div>
+</div>
 <!-- NHL Track Record — always visible below picks -->
 <div id="nhl-track-section" style="max-width:960px;margin:0 auto 0;padding:0 16px 40px">
   <div class="card" style="padding:20px 22px">
@@ -3530,6 +3696,59 @@ def _nhl_gp_summary(detail: list) -> dict:
     }
 
 
+def _nhl_gp_record_payload() -> dict:
+    """Build the standalone GP Record payload from the existing GP ledger."""
+    daily = []
+    for saved in _nhl_load_gp_snapshots():
+        date_str = saved.get("date")
+        if not date_str:
+            continue
+        detail = saved.get("detail") or []
+        games = []
+        for p in detail:
+            home = p.get("homeTeam", "")
+            away = p.get("awayTeam", "")
+            pick = p.get("pickTeam", "")
+            games.append({
+                "game_id": p.get("gameId"),
+                "home_abbr": home, "away_abbr": away,
+                "home_team": p.get("homeFull") or home,
+                "away_team": p.get("awayFull") or away,
+                "pick": pick,
+                "pick_prob": p.get("pickProb"),
+                "win_prob_home": (p.get("winProbHome") * 100
+                                  if p.get("winProbHome") is not None
+                                  else None),
+                "proj_home": p.get("projHome"),
+                "proj_away": p.get("projAway"),
+                "proj_total": p.get("projTotal"),
+                "book_total": p.get("bookTotal"),
+                "total_pick": p.get("ouRec"),
+                "home_ml": p.get("homeMl"),
+                "away_ml": p.get("awayMl"),
+                "ml_book": p.get("mlBook", ""),
+                "total_book": p.get("totBook", ""),
+                "actual_home": p.get("actualHome"),
+                "actual_away": p.get("actualAway"),
+                "actual_total": p.get("actualTotal"),
+                "team_result": p.get("mlResult"),
+                "ou_result": p.get("ouResult"),
+                "start_time": p.get("startTime", ""),
+            })
+        summary = _nhl_gp_summary(detail)
+        daily.append({
+            "date": date_str,
+            "locked": bool(saved.get("locked")),
+            "games": games,
+            "team_w": summary["mlWins"], "team_l": summary["mlLosses"],
+            "team_p": summary["mlPushes"],
+            "ou_w": summary["ouWins"], "ou_l": summary["ouLosses"],
+            "ou_p": summary["ouPushes"],
+        })
+    daily.sort(key=lambda x: x["date"], reverse=True)
+    return {"daily": daily, "updated_at": datetime.utcnow().isoformat() + "Z"}
+
+
 def _nhl_update_gp_ledger(include_date: str = ""):
     """Grade unlocked historical GP snapshots and lock completed dates."""
     today = date.today().isoformat()
@@ -3918,6 +4137,16 @@ async def verify_token_nhl(request: Request):
 async def whoami(request: Request, token: str = ""):
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     return {"is_admin": _is_admin_token(tok)}
+
+@app.get("/api/gp-record")
+async def nhl_gp_record(grade: bool = False, date_str: str = ""):
+    """Standalone, read-only NHL Game Predictor record."""
+    if grade:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _nhl_update_gp_ledger, date_str)
+    else:
+        _bt_th.Thread(target=_nhl_update_gp_ledger, args=(date_str,), daemon=True).start()
+    return JSONResponse(_nhl_gp_record_payload())
 
 @app.get("/api/track-record")
 async def nhl_track_record(grade: bool = False, date_str: str = ""):
