@@ -444,7 +444,7 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                     # Main O/U markets
                     r2 = await c.get(
                         f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                        params={"apiKey": api_key, "regions": "us,us2",
+                        params={"apiKey": api_key, "regions": "us,us2,eu,ca",
                                 "markets": ("player_shots_on_goal,player_points,"
                                             "player_assists,player_total_saves"),
                                 "oddsFormat": "american"})
@@ -480,7 +480,7 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                     try:
                         rg = await c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2",
+                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
                                     "markets": "player_goal_scorer_anytime",
                                     "oddsFormat": "american"})
                         if rg.status_code == 200:
@@ -3371,7 +3371,7 @@ async def api_odds_debug(dt: str = None, admin: str = ""):
                     for ev in win[:3]:
                         r2 = await c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2",
+                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
                                     "markets": MKTS, "oddsFormat": "american"})
                         info = {"event": f"{ev.get('away_team')} @ {ev.get('home_team')}",
                                 "odds_status": r2.status_code,
