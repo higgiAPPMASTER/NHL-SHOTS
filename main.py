@@ -57,16 +57,16 @@ NHL_API      = "https://api-web.nhle.com/v1"
 NHL_STATS    = "https://api.nhle.com/stats/rest/en"
 ODDS_API     = "https://api.the-odds-api.com/v4"
 
-MIN_SPG       = 1.5   # shots/game season average to qualify
+MIN_SPG       = 1.5   # retained historical threshold; no longer used as a book-line fallback
 MIN_GP        = 10    # minimum games played for valid average
 
 MIN_GAMES     = 2     # min games required for hit-rate calc
 RECENT_DAYS   = 14    # player must have a game within this many days to count as "playing today"
-HIT_THRESH         = 70.0  # % hit rate to qualify (shots always vs 1.5 base line)
+HIT_THRESH         = 70.0  # % hit rate to qualify against the posted sportsbook line
 HIT_THRESH_PTS     = 65.0  # % hit rate to qualify (points)
-PTS_LINE      = 0.5   # 1+ point = hit
-AST_LINE      = 0.5   # 1+ assist = hit
-SAVES_LINE    = 24.5  # baseline goalie saves line when no book line posted
+PTS_LINE      = 0.5   # legacy default only; published picks require a book line
+AST_LINE      = 0.5   # legacy default only; published picks require a book line
+SAVES_LINE    = 24.5  # legacy default only; published picks require a book line
 HIT_THRESH_AST     = 60.0  # % hit rate to qualify (assists)
 HIT_THRESH_GOALS   = 50.0  # % hit rate to qualify (goals scored)
 HIT_THRESH_SAVES   = 55.0  # % hit rate to qualify (goalie saves)
@@ -699,11 +699,12 @@ async def get_opp_goalie_svpct(season: str) -> Dict[str, float]:
 async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     """Fetch real shots on goal lines from The Odds API.
     Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
-    Falls back to empty dict (algorithm still runs using 1.5 baseline).
+    Returns empty maps when books have not posted lines; no estimated props are
+    published in that case.
     """
     api_key = os.environ.get("ODDS_API_KEY", "")
     if not api_key:
-        print("[Lines] ODDS_API_KEY not set — using 1.5 baseline estimates")
+        print("[Lines] ODDS_API_KEY not set — no sportsbook props can be published")
         return {}, {}, {}, {}, {}
 
     _oc = _odds_cache_get("nhl", target_date)
@@ -863,8 +864,7 @@ async def get_shot_qualified_players(
     season: str = "20252026",
     lines_map: Dict = None,
 ) -> List[Dict]:
-    """Build pool from ALL roster players using 1.5 as the algorithm line.
-    Real sportsbook lines (from lines_map) are attached for display only."""
+    """Build the skater pool; only posted book lines can become shot picks."""
     if lines_map is None:
         lines_map = {}
 
@@ -882,7 +882,8 @@ async def get_shot_qualified_players(
     pool: List[Dict] = []
     seen: set = set()
 
-    # Always use ALL roster players - line=1.5 is the algorithm base
+    # Keep the complete active-player pool for shared game-log work, but leave
+    # players without a book line out of the published Shots market.
     for team, players in rosters.items():
         ctx = team_ctx.get(team, {})
         opp = ctx.get("opponent", "")
@@ -891,8 +892,9 @@ async def get_shot_qualified_players(
             if p["id"] in seen:
                 continue
             seen.add(p["id"])
-            # Look up real sportsbook line for display only
-            real_line, real_odds, line_source = None, "", "Est"
+            # Look up the actual sportsbook line.  There is deliberately no
+            # 1.5 estimate: the analyzer skips a player without this line.
+            real_line, real_odds, line_source = None, "", "No book line"
             real_under_odds = ""
             for odds_name, sb_info in lines_map.items():
                 if _match_odds_name(odds_name, [p]):
@@ -901,24 +903,23 @@ async def get_shot_qualified_players(
                     real_under_odds = sb_info.get("under_odds", "")
                     line_source     = sb_info.get("source", "OddsAPI")
                     break
-            alg_line = real_line if real_line is not None else 1.5
             pool.append({
                 "name":       p["name"],
                 "pid":        p["id"],
                 "team":       team,
                 "opponent":   opp,
                 "homeRoad":   hr,
-                "line":       alg_line,   # real book line when available, else 1.5
+                "line":       real_line,
                 "realLine":   real_line,
                 "realOdds":   real_odds,
                 "realUnderOdds": real_under_odds,
                 "lineSource": line_source,
-                "estLine":    alg_line,
+                "estLine":    None,
                 "spg":        0,
                 "oppSA":      sa_map.get(opp, 0.0),
             })
 
-    print(f"[NHL] {len(pool)} roster players in pool | {len(lines_map)} real lines for display")
+    print(f"[NHL] {len(pool)} roster players in pool | {len(lines_map)} posted shot lines")
     pool.sort(key=lambda x: x["oppSA"], reverse=True)
     return pool, rosters
 
@@ -1068,16 +1069,6 @@ async def get_pts_picks(
         def build_pick(stat_key, base_line, thresh, lines_map, mkt_label):
             """Normalized pick for one market (points or assists). Returns None
             if the player doesn't clear the threshold."""
-            h3 = sum(1 for g in r_logs if g[stat_key] > base_line)
-            r3 = round(h3 / len(r_logs) * 100, 1)
-            avg3 = round(sum(g[stat_key] for g in r_logs) / len(r_logs), 2)
-            h2 = sum(1 for g in c_logs if g[stat_key] > base_line) if c_logs else 0
-            r2 = round(h2 / len(c_logs) * 100, 1) if c_logs else 0
-            avg2 = round(sum(g[stat_key] for g in c_logs) / len(c_logs), 2) if c_logs else 0
-            # Qualify on career H/A vs opp if we have it, else last-10 H/A
-            qualifies = (r2 >= thresh) if len(c_logs) >= MIN_GAMES else (r3 >= thresh)
-            over_ok = bool(qualifies)
-            score = round((r2 + r3) / 2 if c_logs else r3, 1)
             real_line, real_odds, under_odds = None, "", ""
             for odds_name, sb_info in (lines_map or {}).items():
                 if _match_odds_name(odds_name, [{"name": player["name"]}]):
@@ -1085,17 +1076,24 @@ async def get_pts_picks(
                     real_odds = sb_info.get("odds", "")
                     under_odds = sb_info.get("under_odds", "")
                     break
-            vsl_hits, vsl_total, vsl_rate = 0, 0, 0.0
-            gap, tag = None, ""
-            if real_line is not None and r_logs:
-                vsl_hits = sum(1 for g in r_logs if g[stat_key] > real_line)
-                vsl_total = len(r_logs)
-                vsl_rate = round(vsl_hits / vsl_total * 100, 1) if vsl_total else 0.0
-                gap = round(avg3 - real_line, 2)
-                tag = _book_tag(real_line, avg3, vsl_rate)
+            if real_line is None:
+                return None
+            line = real_line
+            h3 = sum(1 for g in r_logs if g[stat_key] > line)
+            r3 = round(h3 / len(r_logs) * 100, 1)
+            avg3 = round(sum(g[stat_key] for g in r_logs) / len(r_logs), 2)
+            h2 = sum(1 for g in c_logs if g[stat_key] > line) if c_logs else 0
+            r2 = round(h2 / len(c_logs) * 100, 1) if c_logs else 0
+            avg2 = round(sum(g[stat_key] for g in c_logs) / len(c_logs), 2) if c_logs else 0
+            # Qualify on career H/A vs opp if we have it, else last-10 H/A.
+            qualifies = (r2 >= thresh) if len(c_logs) >= MIN_GAMES else (r3 >= thresh)
+            over_ok = bool(qualifies)
+            score = round((r2 + r3) / 2 if c_logs else r3, 1)
+            vsl_hits, vsl_total, vsl_rate = h3, len(r_logs), r3
+            gap = round(avg3 - line, 2)
+            tag = _book_tag(line, avg3, vsl_rate)
             # Under track — vs-opp OR any-opp H/A (so genuine fades surface)
-            uline = real_line if real_line is not None else base_line
-            uf = _under_fields(logs, stat_key, uline, hr, opp)
+            uf = _under_fields(logs, stat_key, line, hr, opp)
             if not over_ok and not uf["underOk"]:
                 return None
             # Game log for the per-card dropdown (vs opp if available, else L10 H/A)
@@ -1105,7 +1103,7 @@ async def get_pts_picks(
             # Signal factors
             toi_avg_sec = round(sum(g.get("toi_sec", 0) for g in r_logs) / len(r_logs)) if r_logs else 0
             pp_toi_avg_sec = round(sum(g.get("pp_toi_sec", 0) for g in r_logs) / len(r_logs)) if r_logs else 0
-            hot_hits_p, hot_total_p = _hot_streak(logs, stat_key, base_line, hr, 5)
+            hot_hits_p, hot_total_p = _hot_streak(logs, stat_key, line, hr, 5)
             rest_days_p = _days_rest(logs, target_date)
             opp_sv = goalie_map.get(opp)
             return {
@@ -1113,7 +1111,7 @@ async def get_pts_picks(
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
                 "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
                 "mkt": mkt_label,
-                "dispLine": (real_line if real_line is not None else base_line),
+                "dispLine": line,
                 "avg": avg3, "avgA": avg2,
                 "rateA": r2, "hitsA": h2, "totA": len(c_logs),
                 "rateB": r3, "hitsB": h3, "totB": len(r_logs),
@@ -1228,7 +1226,9 @@ async def get_saves_picks(
                 real_odds  = sb_info.get("odds", "")
                 under_odds = sb_info.get("under_odds", "")
                 break
-        base_line = real_line if real_line is not None else SAVES_LINE
+        if real_line is None:
+            continue
+        base_line = real_line
 
         h3 = sum(1 for g in r_logs if g["saves"] > base_line)
         r3 = round(h3 / len(r_logs) * 100, 1)
@@ -1245,9 +1245,8 @@ async def get_saves_picks(
         score = round((r2 + r3) / 2 if c_logs else r3, 1)
 
         gap, tag = None, ""
-        if real_line is not None:
-            gap = round(avg3 - real_line, 2)
-            tag = _book_tag(real_line, avg3, r3)
+        gap = round(avg3 - real_line, 2)
+        tag = _book_tag(real_line, avg3, r3)
 
         g_src = c_logs or r_logs
         glog = [{"d": g["date"], "v": g["saves"]} for g in g_src]
@@ -1263,9 +1262,7 @@ async def get_saves_picks(
             "rateA": r2, "hitsA": h2, "totA": len(c_logs),
             "rateB": r3, "hitsB": h3, "totB": len(r_logs),
             "dispScore": score,
-            "vsLineHits": (h3 if real_line is not None else 0),
-            "vsLineTotal": (len(r_logs) if real_line is not None else 0),
-            "vsLineRate": (r3 if real_line is not None else 0.0),
+            "vsLineHits": h3, "vsLineTotal": len(r_logs), "vsLineRate": r3,
             "gap": gap, "tag": tag,
             **uf, "overOk": over_ok,
             "glog": glog,
@@ -1352,6 +1349,12 @@ async def run_picks(target_date: str = None) -> Dict:
         get_opp_goalie_svpct(season),
     )
     lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map = _lines_tuple
+    if not any((lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map)):
+        return {
+            "error": ("Sportsbook player lines are not posted yet for this slate. "
+                      "The NHL board will publish only after The Odds API has real lines."),
+            "picks": [], "games": games, "date": target_date,
+        }
     _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
 
     # SA rankings for display
@@ -1386,7 +1389,10 @@ async def run_picks(target_date: str = None) -> Dict:
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
         if not _played_recently(logs, target_date):
             return None
-        hr, opp, line = p["homeRoad"], p["opponent"], p["line"]
+        real_line = p.get("realLine")
+        if real_line is None:
+            return None
+        hr, opp, line = p["homeRoad"], p["opponent"], real_line
 
         # Step 2: career H/A vs today's opponent
         h2, t2, r2, avg2 = _calc_hit_rate_from_logs(logs, line, hr, opponent=opp, last_n=10)
@@ -1395,14 +1401,12 @@ async def run_picks(target_date: str = None) -> Dict:
 
         if t3 < MIN_GAMES:
             return None
-        # Use lower threshold when no real sportsbook line (season avg fallback)
         s2_ok = (t2 < MIN_GAMES) or (r2 >= HIT_THRESH)
         s3_ok = r3 >= HIT_THRESH
         over_ok = bool(s2_ok and s3_ok)
         score = round((r2 + r3) / 2 if t2 >= MIN_GAMES else r3, 1)
 
         # NEW: hit rate vs real sportsbook line (last 10 H/A) + gap + tag
-        real_line = p.get("realLine")
         vsl_hits, vsl_total, vsl_rate = 0, 0, 0.0
         gap = None
         tag = ""
@@ -1413,8 +1417,7 @@ async def run_picks(target_date: str = None) -> Dict:
             tag = _book_tag(real_line, avg3, vsl_rate)
 
         # Under track (vs-opp OR any-opp H/A) + game log for the per-card dropdown
-        uline = real_line if real_line is not None else line
-        uf = _under_fields(logs, "shots", uline, hr, opp)
+        uf = _under_fields(logs, "shots", line, hr, opp)
         if not over_ok and not uf["underOk"]:
             return None
         _ha = [g for g in logs if g["homeRoad"] == hr][:10]
@@ -1425,8 +1428,7 @@ async def run_picks(target_date: str = None) -> Dict:
         rest_days = _days_rest(logs, target_date)
         proj, opp_factor, rest_factor = _proj_count(
             avg3, t3, avg2, t2, p.get("oppSA", 0.0), league_sa, rest_days)
-        proj_line = real_line if real_line is not None else line
-        proj_edge = round(proj - proj_line, 2)
+        proj_edge = round(proj - line, 2)
         proj_pick = "OVER" if proj_edge > 0 else ("UNDER" if proj_edge < 0 else "")
 
         # Signal factors
@@ -1443,7 +1445,7 @@ async def run_picks(target_date: str = None) -> Dict:
             "vsLineHits": vsl_hits, "vsLineTotal": vsl_total, "vsLineRate": vsl_rate,
             "gap": gap, "tag": tag,
             "mkt": "Shots on Goal",
-            "dispLine": (real_line if real_line is not None else line),
+            "dispLine": line,
             "avg": avg3, "avgA": avg2,
             "rateA": r2, "hitsA": h2, "totA": t2,
             "rateB": r3, "hitsB": h3, "totB": t3,
@@ -1920,7 +1922,8 @@ function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(od
 function _legScore(c){return (c.hasOdds?1:0)*1e9+(c.rate||0)*1e4+(c.dec?Math.min(c.dec,11)*100:0);}
 function _nhlLeg(p){
   var market=p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
-  var line=(p.realLine!=null?p.realLine:(p.dispLine!=null?p.dispLine:1.5));
+  var line=p.realLine;
+  if(line==null) return null;
   var rate=(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
   var odds=p.realOdds||'';var dec=_amToDec(odds);
   return {player:p.name,team:p.team||'',opp:p.opponent||'',market:market,dir:'OVER',line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec};
@@ -1930,6 +1933,7 @@ function _parlayPool(){
   plays.forEach(function(p){
     if(!p||!p.name)return;
     var c=_nhlLeg(p);
+    if(!c)return;
     if(!_floorOk(c.odds))return;
     var cur=byP[c.player];
     if(!cur||_legScore(c)>_legScore(cur))byP[c.player]=c;
