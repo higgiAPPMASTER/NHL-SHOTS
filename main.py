@@ -2929,11 +2929,7 @@ async function loadNhlTrackRecord(manualGrade){
     // Hub-hosted snapshots include a read-only Track Record payload.  That
     // keeps results visible even when the live Render service is waking up or
     // temporarily unavailable.
-    if(window.__INITIAL_TRACK_RECORD__){
-      if(manualGrade){
-        if(body) body.innerHTML='<p style="color:#94a3b8;padding:16px">This snapshot is read-only. Updated results appear after the next scheduled refresh.</p>';
-        return;
-      }
+    if(window.__INITIAL_TRACK_RECORD__&&!manualGrade){
       _nhlTrkData=window.__INITIAL_TRACK_RECORD__;
       renderNhlTrackDay();
       return;
@@ -2960,16 +2956,21 @@ function renderNhlTrackDay(){
   var dp=document.getElementById('nhlTrkDate');
   var selDate=dp?dp.value:'';
   var dates=_nhlTrkData.dates||[];
-  var dayData=selDate?dates.find(function(d){return d.date===selDate;}):null;
+  var dayData=selDate?dates.find(function(d){return String(d.date||'').slice(0,10)===selDate;}):null;
   var sumEl=document.getElementById('nhlTrkSummary'),bodyEl=document.getElementById('nhlTrkBody');
   if(!sumEl||!bodyEl) return;
+  if(selDate&&!dayData){
+    sumEl.innerHTML='<p style="color:#facc15;padding:12px;text-align:center">No saved NHL pick snapshot exists for '+selDate+'. Historical results can only be graded from picks captured before that slate began.</p>';
+    bodyEl.innerHTML='';
+    return;
+  }
   var rows=[];
   if(dayData) rows=dayData.detail||[];
   else dates.forEach(function(d){(d.detail||[]).forEach(function(r){rows.push(r);});});
   var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
   var _withOdds=decided.filter(function(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';});
   if(!rows.length&&selDate){
-    sumEl.innerHTML='<p style="color:#94a3b8;padding:12px;text-align:center">No graded player picks for '+selDate+'. Games may not be final yet.</p>';
+    sumEl.innerHTML='<p style="color:#94a3b8;padding:12px;text-align:center">No saved player picks for '+selDate+'.</p>';
     bodyEl.innerHTML='';return;
   }
   var stake=_nhlTrkData.stake||20;
