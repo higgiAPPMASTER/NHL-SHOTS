@@ -2996,13 +2996,16 @@ function _nhlTrkCatHtml(allRows){
   var cats={},catOrder=['Shots on Goal','Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
   allRows.forEach(function(r){
     var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase();
-    var c=cats[cat]=cats[cat]||{OVER:[],UNDER:[]};
-    (c[side]||(c[side]=[])).push(r);
+    var key=cat+'|'+side;
+    (cats[key]||(cats[key]=[])).push(r);
   });
-  Object.keys(cats).forEach(function(cat){if(catOrder.indexOf(cat)<0)catOrder.push(cat);});
+  Object.keys(cats).forEach(function(key){
+    var cat=key.split('|')[0];
+    if(catOrder.indexOf(cat)<0)catOrder.push(cat);
+  });
   function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
   function money(v){return v==null?'—':(v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(0);}
-  function sideStats(list){
+  function stats(list){
     var w=list.filter(function(r){return r.result==='WIN';}).length;
     var l=list.filter(function(r){return r.result==='LOSS';}).length;
     var pending=list.length-w-l;
@@ -3010,38 +3013,27 @@ function _nhlTrkCatHtml(allRows){
     var staked=priced.length*20,roi=staked?pl/staked*100:null;
     return {w:w,l:l,pending:pending,pl:pl,roi:roi,rate:(w+l)?w/(w+l)*100:null};
   }
-  function sideBlock(label,list,color){
+  function catLabel(cat,side){return cat+' ('+(side==='OVER'?'Over':'Under')+')';}
+  function row(cat,side,list){
     if(!list.length)return '';
-    var s=sideStats(list),plColor=s.pl>=0?'#4ade80':'#f87171';
-    var rows=list.slice().sort(function(a,b){return (a.rank||999)-(b.rank||999);}).map(function(r){
-      var odds=hasOdds(r)?(Number(r.odds)>0?'+':'')+r.odds:'—';
-      var actual=r.actual!=null?' → '+r.actual:'';
-      var rc=r.result==='WIN'?'#4ade80':(r.result==='LOSS'?'#f87171':'#94a3b8');
-      var rp=r.profit!=null?money(r.profit):'—';
-      return '<div style="display:grid;grid-template-columns:minmax(145px,1.5fr) minmax(102px,1fr) minmax(52px,.55fr) minmax(66px,.65fr) minmax(58px,.55fr) minmax(52px,.5fr);gap:8px;align-items:center;padding:7px 10px;border-top:1px solid #111c2e;font-size:.74rem">'
-        +'<span style="color:#e2e8f0;font-weight:700">'+(r.name||'')+'<small style="display:block;color:#64748b;font-weight:500">'+(r.team||'')+'</small></span>'
-        +'<span style="color:#cbd5e1">'+label+' '+(r.line!=null?r.line:'—')+actual+'</span>'
-        +'<span style="font-family:monospace;color:#cbd5e1">'+odds+'</span>'
-        +'<span style="font-weight:900;color:'+rc+'">'+(r.result||'PENDING')+'</span>'
-        +'<span style="font-family:monospace;color:'+plColor+'">'+rp+'</span>'
-        +'<span style="color:#64748b;text-align:right">'+(hasOdds(r)?'priced':'no odds')+'</span></div>';
-    }).join('');
-    return '<div style="border:1px solid #1e293b;border-radius:9px;overflow-x:auto;margin:7px 0 12px">'
-      +'<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:9px 10px;background:#07101e">'
-      +'<span style="color:'+color+';font-size:.7rem;font-weight:900;letter-spacing:.06em">'+label+'</span>'
-      +'<span style="font-family:monospace;font-size:.72rem">'+s.w+'W - '+s.l+'L'+(s.pending?' · '+s.pending+' pending':'')+'</span>'
-      +'<span style="color:#94a3b8;font-size:.7rem">'+(s.rate!=null?s.rate.toFixed(1)+'%':'—')+' hit rate</span>'
-      +'<span style="color:'+plColor+';font-family:monospace;font-size:.72rem">Net '+money(s.pl)+' · ROI '+(s.roi!=null?(s.roi>=0?'+':'')+s.roi.toFixed(1)+'%':'—')+'</span></div>'
-      +'<div style="display:grid;grid-template-columns:minmax(145px,1.5fr) minmax(102px,1fr) minmax(52px,.55fr) minmax(66px,.65fr) minmax(58px,.55fr) minmax(52px,.5fr);gap:8px;padding:5px 10px;color:#64748b;font-size:.59rem;font-weight:900;text-transform:uppercase;letter-spacing:.05em"><span>Player</span><span>Pick / Actual</span><span>Odds</span><span>Result</span><span>P/L</span><span></span></div>'+rows+'</div>';
+    var s=stats(list), rate=s.rate!=null?s.rate:0;
+    var rateColor=s.rate==null?'#64748b':(s.rate>=70?'#4ade80':(s.rate>=55?'#facc15':'#f87171'));
+    var plColor=s.pl>=0?'#4ade80':'#f87171';
+    var record=s.w+' / '+(s.w+s.l);
+    if(s.pending) record+=' <span style="color:#facc15;font-size:.68rem">· '+s.pending+' pending</span>';
+    return '<tr>'
+      +'<td style="color:#e2e8f0;font-weight:700">'+catLabel(cat,side)+'</td>'
+      +'<td style="font-family:monospace;color:#cbd5e1;font-weight:800">'+record+'</td>'
+      +'<td><span class="nhl-trk-bar-wrap"><span class="nhl-trk-bar" style="display:block;width:'+rate+'%;background:'+rateColor+'"></span></span> <span style="color:'+rateColor+';font-family:monospace;font-weight:800">'+(s.rate!=null?s.rate.toFixed(1)+'%':'—')+'</span></td>'
+      +'<td style="font-family:monospace;color:'+plColor+';font-weight:800">'+money(s.pl)+'</td>'
+      +'<td style="font-family:monospace;color:'+plColor+';font-weight:800">'+(s.roi!=null?(s.roi>=0?'+':'')+s.roi.toFixed(1)+'%':'—')+'</td>'
+      +'</tr>';
   }
-  var html='';
+  var html='<div style="overflow-x:auto"><table class="nhl-trk-tbl"><thead><tr><th>Category</th><th>Record</th><th>Hit Rate</th><th>Net P/L</th><th>ROI</th></tr></thead><tbody>';
   catOrder.forEach(function(cat){
-    var c=cats[cat];if(!c)return;
-    var count=(c.OVER||[]).length+(c.UNDER||[]).length;
-    html+='<div style="margin:18px 0 5px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1e293b;padding-bottom:6px"><span style="color:#e9d5ff;font-size:.78rem;font-weight:900">&#9679; '+cat+'</span><span style="color:#64748b;font-size:.66rem">'+count+' graded plays</span></div>';
-    html+=sideBlock('OVER',c.OVER||[],'#38bdf8')+sideBlock('UNDER',c.UNDER||[],'#fb7185');
+    html+=row(cat,'OVER',cats[cat+'|OVER']||[])+row(cat,'UNDER',cats[cat+'|UNDER']||[]);
   });
-  return html;
+  return html+'</tbody></table></div>';
 }
 function _nhlTrkListHtml(decided){
   if(!decided.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
