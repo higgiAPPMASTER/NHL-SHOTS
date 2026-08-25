@@ -699,8 +699,8 @@ async def get_opp_goalie_svpct(season: str) -> Dict[str, float]:
 async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     """Fetch real shots on goal lines from The Odds API.
     Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
-    Returns empty maps when books have not posted lines; no estimated props are
-    published in that case.
+    Returns empty maps when books have not posted lines; it never invents a
+    sportsbook price or claims a model threshold is a book line.
     """
     api_key = os.environ.get("ODDS_API_KEY", "")
     if not api_key:
@@ -864,7 +864,7 @@ async def get_shot_qualified_players(
     season: str = "20252026",
     lines_map: Dict = None,
 ) -> List[Dict]:
-    """Build the skater pool; only posted book lines can become shot picks."""
+    """Build the skater pool and attach posted book lines when available."""
     if lines_map is None:
         lines_map = {}
 
@@ -1069,16 +1069,19 @@ async def get_pts_picks(
         def build_pick(stat_key, base_line, thresh, lines_map, mkt_label):
             """Normalized pick for one market (points or assists). Returns None
             if the player doesn't clear the threshold."""
-            real_line, real_odds, under_odds = None, "", ""
+            analysis_line, real_line, real_odds, under_odds, line_source = None, None, "", "", "No book line"
             for odds_name, sb_info in (lines_map or {}).items():
                 if _match_odds_name(odds_name, [{"name": player["name"]}]):
-                    real_line = sb_info.get("line")
+                    analysis_line = sb_info.get("line")
                     real_odds = sb_info.get("odds", "")
                     under_odds = sb_info.get("under_odds", "")
+                    line_source = sb_info.get("source", "OddsAPI")
                     break
-            if real_line is None:
+            if analysis_line is None:
                 return None
-            line = real_line
+            posted_line = line_source not in ("Simulation", "No book line")
+            real_line = analysis_line if posted_line or line_source == "Simulation" else None
+            line = analysis_line
             h3 = sum(1 for g in r_logs if g[stat_key] > line)
             r3 = round(h3 / len(r_logs) * 100, 1)
             avg3 = round(sum(g[stat_key] for g in r_logs) / len(r_logs), 2)
@@ -1110,6 +1113,7 @@ async def get_pts_picks(
                 "name": player["name"], "pid": player["id"], "team": team,
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
                 "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
+                "lineSource": line_source,
                 "mkt": mkt_label,
                 "dispLine": line,
                 "avg": avg3, "avgA": avg2,
@@ -1165,6 +1169,8 @@ async def get_saves_picks(
     season: str = "20252026",
     sv_lines_map: Dict[str, Dict] = None,
     target_date: str = None,
+    simulate: bool = False,
+    allow_fallback: bool = False,
 ) -> List[Dict]:
     """Goalie saves picks using NHL Stats API goalie game logs."""
     sv_lines_map = sv_lines_map or {}
@@ -1226,9 +1232,18 @@ async def get_saves_picks(
                 real_odds  = sb_info.get("odds", "")
                 under_odds = sb_info.get("under_odds", "")
                 break
+        line_source = "OddsAPI"
         if real_line is None:
-            continue
+            if not (simulate or allow_fallback):
+                continue
+            # Simulation-only fallback.  This branch is never used by the
+            # live/cron pipeline unless no book line exists; the caller marks
+            # that unpriced run separately and live cards show the estimate.
+            real_line, line_source = 24.5, "Simulation"
+            if allow_fallback and not simulate:
+                line_source = "No book line"
         base_line = real_line
+        book_line = real_line if line_source != "No book line" else None
 
         h3 = sum(1 for g in r_logs if g["saves"] > base_line)
         r3 = round(h3 / len(r_logs) * 100, 1)
@@ -1256,7 +1271,8 @@ async def get_saves_picks(
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
             "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
-            "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
+            "realLine": book_line, "realOdds": real_odds, "realUnderOdds": under_odds,
+            "lineSource": line_source,
             "mkt": "Goalie Saves", "dispLine": base_line,
             "avg": avg3, "avgA": avg2,
             "rateA": r2, "hitsA": h2, "totA": len(c_logs),
@@ -1326,7 +1342,7 @@ def _calc_hit_rate_from_logs(logs: List[Dict], line: float, home_road: str,
     return hits, total, rate, avg
 
 
-async def run_picks(target_date: str = None) -> Dict:
+async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
     global _progress
     sem_nhl = asyncio.Semaphore(SEM_NHL)
 
@@ -1349,12 +1365,17 @@ async def run_picks(target_date: str = None) -> Dict:
         get_opp_goalie_svpct(season),
     )
     lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map = _lines_tuple
-    if not any((lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map)):
-        return {
-            "error": ("Sportsbook player lines are not posted yet for this slate. "
-                      "The NHL board will publish only after The Odds API has real lines."),
-            "picks": [], "games": games, "date": target_date,
-        }
+    unpriced_mode = not any((lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map))
+    if simulate or unpriced_mode:
+        # Run Simulation always uses fallback lines.  A normal early-morning
+        # run also continues with them when books have not posted any player
+        # props yet; those live cards remain visibly unpriced and are not
+        # presented as sportsbook lines.
+        lines_map = lines_map or {}
+        pts_lines_map = pts_lines_map or {}
+        ast_lines_map = ast_lines_map or {}
+        sv_lines_map = sv_lines_map or {}
+        goal_lines_map = goal_lines_map or {}
     _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
 
     # SA rankings for display
@@ -1370,6 +1391,26 @@ async def run_picks(target_date: str = None) -> Dict:
 
     # Build player pool from NHL skater season averages
     pool, skater_rosters = await get_shot_qualified_players(games, sa_map, sem_nhl, season, lines_map)
+    if simulate or unpriced_mode:
+        fallback_source = "Simulation" if simulate else "No book line"
+        for player in pool:
+            if player.get("realLine") is None:
+                player.update({
+                    "line": 1.5, "realLine": 1.5 if simulate else None, "realOdds": "",
+                    "realUnderOdds": "", "lineSource": fallback_source,
+                    "estLine": 1.5,
+                })
+        def _fill_sim_map(existing, default_line):
+            for player in (skater_rosters or {}).values():
+                for roster_player in player:
+                    existing.setdefault(roster_player.get("name", ""), {
+                        "line": default_line, "odds": "", "under_odds": "",
+                        "source": fallback_source,
+                    })
+        _fill_sim_map(lines_map, 1.5)
+        _fill_sim_map(pts_lines_map, 1.5)
+        _fill_sim_map(ast_lines_map, 0.5)
+        _fill_sim_map(goal_lines_map, 0.5)
     _progress = {"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35}
 
     if not pool:
@@ -1389,10 +1430,11 @@ async def run_picks(target_date: str = None) -> Dict:
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
         if not _played_recently(logs, target_date):
             return None
-        real_line = p.get("realLine")
-        if real_line is None:
+        book_line = p.get("realLine")
+        analysis_line = book_line if book_line is not None else p.get("line")
+        if analysis_line is None:
             return None
-        hr, opp, line = p["homeRoad"], p["opponent"], real_line
+        hr, opp, line = p["homeRoad"], p["opponent"], analysis_line
 
         # Step 2: career H/A vs today's opponent
         h2, t2, r2, avg2 = _calc_hit_rate_from_logs(logs, line, hr, opponent=opp, last_n=10)
@@ -1410,11 +1452,11 @@ async def run_picks(target_date: str = None) -> Dict:
         vsl_hits, vsl_total, vsl_rate = 0, 0, 0.0
         gap = None
         tag = ""
-        if real_line is not None:
+        if book_line is not None:
             vsl_hits, vsl_total, vsl_rate, _ = _calc_hit_rate_from_logs(
-                logs, real_line, hr, last_n=10)
-            gap = round(avg3 - real_line, 2)
-            tag = _book_tag(real_line, avg3, vsl_rate)
+                logs, book_line, hr, last_n=10)
+            gap = round(avg3 - book_line, 2)
+            tag = _book_tag(book_line, avg3, vsl_rate)
 
         # Under track (vs-opp OR any-opp H/A) + game log for the per-card dropdown
         uf = _under_fields(logs, "shots", line, hr, opp)
@@ -1483,7 +1525,9 @@ async def run_picks(target_date: str = None) -> Dict:
         games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date, goal_lines_map,
         goalie_map=goalie_map, shared_logs=logs_map, shared_rosters=skater_rosters)
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
-    saves_all, saves_unders = await get_saves_picks(games, sa_map, sem_nhl, season, sv_lines_map, target_date)
+    saves_all, saves_unders = await get_saves_picks(
+        games, sa_map, sem_nhl, season, sv_lines_map, target_date,
+        simulate=simulate, allow_fallback=unpriced_mode and not simulate)
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
 
     # ── Game Predictor ─────────────────────────────────────────────────────
@@ -1527,7 +1571,15 @@ async def run_picks(target_date: str = None) -> Dict:
         "runTime":          datetime.utcnow().isoformat() + "Z",
         "date":             target_date,
         "game_predictions": game_preds,
+        "simulation": bool(simulate),
+        "unpriced": bool(unpriced_mode and not simulate),
     }
+    if simulate:
+        _result["simulationNotice"] = (
+            "Simulation only: model fallback lines were used because sportsbook "
+            "player props are not posted. This run is not cached or tracked."
+        )
+        return _result
     # Persist the pre-game player and GP snapshots before building the hub
     # shell, so a read-only hub snapshot can also show the current slate as
     # pending rather than waiting for the first grading pass.
@@ -1840,7 +1892,7 @@ body.is-admin #parlayCard{display:block}
       <input type="date" id="datePicker"/>
     </div>
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
-    <button class="btn-run admin-only" id="runBtn" onclick="runPicks()" style="margin-left:10px">Run Picks</button>
+    <button class="btn-run admin-only" id="runBtn" onclick="runPicks()" style="margin-left:10px">Run Simulation</button>
   </div>
 
   <div class="card" id="parlayCard" style="text-align:center;max-width:600px;margin:20px auto 0">
@@ -2004,15 +2056,15 @@ async function getPicks(){
   finally{ btn.disabled=false; btn.textContent=orig; }
 }
 
-// STEP 2: Run picks
+// STEP 2: Run an explicit, non-persistent simulation.
 async function runPicks(){
   var btn = document.getElementById('runBtn');
   var st = document.getElementById('statusMsg');
   var out = document.getElementById('out');
   var dt = document.getElementById('datePicker').value;
   btn.disabled = true;
-  btn.textContent = 'Running...';
-  st.textContent = 'Fetching games and analyzing players for ' + dt + '...';
+  btn.textContent = 'Simulating...';
+  st.textContent = 'Running a simulation for ' + dt + '...';
   out.innerHTML = '<div class="loading"><div class="spin"></div>' +
     '<p style="color:#9ca3af;margin-bottom:16px" id="prog-stage">Starting...</p>' +
     '<div style="background:rgba(245,158,11,.1);border-radius:6px;height:8px;width:280px;margin:0 auto 8px;overflow:hidden">' +
@@ -2035,7 +2087,7 @@ async function runPicks(){
 
   try {
     var _nhlTok=localStorage.getItem('__mpa_token')||'';
-    var res = await fetch('/api/picks?target_date=' + dt + '&token=' + encodeURIComponent(_nhlTok));
+    var res = await fetch('/api/picks?target_date=' + dt + '&simulate=true&token=' + encodeURIComponent(_nhlTok));
     var data = await res.json();
     if(data.no_games){
       out.innerHTML = '<div style="text-align:center;padding:40px 20px;color:#9ca3af"><h2 style="color:#f59e0b;margin-bottom:8px">No Games Today</h2><p>' + (data.message || ('No NHL games scheduled for ' + dt + '.')) + ' Check back on game day.</p></div>';
@@ -2045,14 +2097,18 @@ async function runPicks(){
       st.textContent = '';
     } else {
       renderResults(data);
-      if(st) st.textContent = data.qualified + ' players qualified -- ' + data.picks.length + ' top picks -- ' + dt;
+      if(st) st.textContent = data.simulation
+        ? 'SIMULATION ONLY — model fallback lines used; not saved or tracked'
+        : data.unpriced
+        ? 'Model picks generated — sportsbook prices unavailable'
+        : data.qualified + ' players qualified -- ' + data.picks.length + ' top picks -- ' + dt;
     }
   } catch(e) {
     out.innerHTML = '<div class="err-box">Error: ' + e.message + '</div>';
   } finally {
     clearInterval(pollTimer);
     btn.disabled = false;
-    btn.textContent = 'Run Picks';
+    btn.textContent = 'Run Simulation';
   }
 }
 
@@ -4296,16 +4352,17 @@ async def index(admin: str = "", token: str = ""):
     return HTMLResponse(_render_dashboard_shell(is_admin))
 
 @app.get("/api/picks")
-async def api_picks(request: Request, target_date: str = None, token: str = ""):
+async def api_picks(request: Request, target_date: str = None, token: str = "",
+                    simulate: bool = False):
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     if not _verify_hub_token(tok):
         raise HTTPException(status_code=401, detail="Subscription required — please log in via moneypicksarena.com")
     key = target_date or date.today().isoformat()
-    cached = _cache_get("nhl", key)
+    cached = None if simulate else _cache_get("nhl", key)
     if cached:
         return JSONResponse(cached)
-    result = await run_picks(target_date)
-    if "error" not in result:
+    result = await run_picks(target_date, simulate=simulate)
+    if "error" not in result and not simulate:
         _cache_set("nhl", key, result)
     return JSONResponse(result)
 
