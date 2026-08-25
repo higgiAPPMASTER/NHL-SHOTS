@@ -1528,6 +1528,11 @@ async def run_picks(target_date: str = None) -> Dict:
         "date":             target_date,
         "game_predictions": game_preds,
     }
+    # Persist the pre-game player and GP snapshots before building the hub
+    # shell, so a read-only hub snapshot can also show the current slate as
+    # pending rather than waiting for the first grading pass.
+    _nhl_save_gp_snapshot(target_date, _result)
+    _nhl_save_picks_snapshot(target_date, _result)
     try:
         from replit_push import push_picks_to_replit
         # Bake the picks into the page HTML so the Replit hub can serve an
@@ -1559,8 +1564,6 @@ async def run_picks(target_date: str = None) -> Dict:
         push_picks_to_replit("nhl", _result, html=_snapshot_html)
     except Exception as _e:
         print(f"[replit_push] nhl push failed: {_e}")
-    _nhl_save_gp_snapshot(target_date, _result)
-    _nhl_save_picks_snapshot(target_date, _result)
     return _result
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2908,14 +2911,15 @@ function renderNhlTrackDay(){
   if(dayData) rows=dayData.detail||[];
   else dates.forEach(function(d){(d.detail||[]).forEach(function(r){rows.push(r);});});
   var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
-  var _withOdds=decided.filter(function(r){return r.odds!=null;});
-  if(!decided.length&&selDate){
+  var _withOdds=decided.filter(function(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';});
+  if(!rows.length&&selDate){
     sumEl.innerHTML='<p style="color:#94a3b8;padding:12px;text-align:center">No graded player picks for '+selDate+'. Games may not be final yet.</p>';
     bodyEl.innerHTML='';return;
   }
   var stake=_nhlTrkData.stake||20;
   var wins=decided.filter(function(r){return r.result==='WIN';}).length;
   var losses=decided.length-wins;
+  var pending=rows.length-decided.length;
   var netPL=_withOdds.reduce(function(a,r){return a+(r.profit||0);},0);
   var totalStaked=_withOdds.length*stake;
   var roi=totalStaked?(netPL/totalStaked*100):null;
@@ -2926,49 +2930,70 @@ function renderNhlTrackDay(){
     +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
     +'<span style="font-family:monospace;font-weight:800;color:'+plColor+'">Net '+(netPL>=0?'+$':'-$')+Math.abs(netPL).toFixed(0)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:700;color:'+plColor+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
+     +(pending?'<span style="color:#facc15;font-size:.8rem;font-weight:800">'+pending+' pending</span>':'')
     +'<span style="color:#475569;font-size:.8rem">$'+stake+'/play \u00b7 $20 flat</span>'
     +'</div>';
-  bodyEl.innerHTML=_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(decided):_nhlTrkListHtml(decided);
+  bodyEl.innerHTML=_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(rows):_nhlTrkListHtml(rows);
 }
-function _nhlTrkCatHtml(decided){
-  if(!decided.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
-  var cats={};
-  decided.forEach(function(r){
-    var c=cats[r.category]=cats[r.category]||{w:0,l:0,pl:0,staked:0};
-    if(r.result==='WIN') c.w++; else c.l++;
-    c.pl+=(r.profit||0); if(r.odds!=null) c.staked+=20;
+function _nhlTrkCatHtml(allRows){
+  if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
+  var cats={},catOrder=['Shots on Goal','Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
+  allRows.forEach(function(r){
+    var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase();
+    var c=cats[cat]=cats[cat]||{OVER:[],UNDER:[]};
+    (c[side]||(c[side]=[])).push(r);
   });
-  var entries=Object.entries(cats).sort(function(a,b){
-    return ((b[1].pl/b[1].staked)||0)-((a[1].pl/a[1].staked)||0);
+  Object.keys(cats).forEach(function(cat){if(catOrder.indexOf(cat)<0)catOrder.push(cat);});
+  function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
+  function money(v){return v==null?'—':(v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(0);}
+  function sideStats(list){
+    var w=list.filter(function(r){return r.result==='WIN';}).length;
+    var l=list.filter(function(r){return r.result==='LOSS';}).length;
+    var pending=list.length-w-l;
+    var priced=list.filter(hasOdds),pl=priced.reduce(function(x,r){return x+(Number(r.profit)||0);},0);
+    var staked=priced.length*20,roi=staked?pl/staked*100:null;
+    return {w:w,l:l,pending:pending,pl:pl,roi:roi,rate:(w+l)?w/(w+l)*100:null};
+  }
+  function sideBlock(label,list,color){
+    if(!list.length)return '';
+    var s=sideStats(list),plColor=s.pl>=0?'#4ade80':'#f87171';
+    var rows=list.slice().sort(function(a,b){return (a.rank||999)-(b.rank||999);}).map(function(r){
+      var odds=hasOdds(r)?(Number(r.odds)>0?'+':'')+r.odds:'—';
+      var actual=r.actual!=null?' → '+r.actual:'';
+      var rc=r.result==='WIN'?'#4ade80':(r.result==='LOSS'?'#f87171':'#94a3b8');
+      var rp=r.profit!=null?money(r.profit):'—';
+      return '<div style="display:grid;grid-template-columns:minmax(145px,1.5fr) minmax(102px,1fr) minmax(52px,.55fr) minmax(66px,.65fr) minmax(58px,.55fr) minmax(52px,.5fr);gap:8px;align-items:center;padding:7px 10px;border-top:1px solid #111c2e;font-size:.74rem">'
+        +'<span style="color:#e2e8f0;font-weight:700">'+(r.name||'')+'<small style="display:block;color:#64748b;font-weight:500">'+(r.team||'')+'</small></span>'
+        +'<span style="color:#cbd5e1">'+label+' '+(r.line!=null?r.line:'—')+actual+'</span>'
+        +'<span style="font-family:monospace;color:#cbd5e1">'+odds+'</span>'
+        +'<span style="font-weight:900;color:'+rc+'">'+(r.result||'PENDING')+'</span>'
+        +'<span style="font-family:monospace;color:'+plColor+'">'+rp+'</span>'
+        +'<span style="color:#64748b;text-align:right">'+(hasOdds(r)?'priced':'no odds')+'</span></div>';
+    }).join('');
+    return '<div style="border:1px solid #1e293b;border-radius:9px;overflow-x:auto;margin:7px 0 12px">'
+      +'<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:9px 10px;background:#07101e">'
+      +'<span style="color:'+color+';font-size:.7rem;font-weight:900;letter-spacing:.06em">'+label+'</span>'
+      +'<span style="font-family:monospace;font-size:.72rem">'+s.w+'W - '+s.l+'L'+(s.pending?' · '+s.pending+' pending':'')+'</span>'
+      +'<span style="color:#94a3b8;font-size:.7rem">'+(s.rate!=null?s.rate.toFixed(1)+'%':'—')+' hit rate</span>'
+      +'<span style="color:'+plColor+';font-family:monospace;font-size:.72rem">Net '+money(s.pl)+' · ROI '+(s.roi!=null?(s.roi>=0?'+':'')+s.roi.toFixed(1)+'%':'—')+'</span></div>'
+      +'<div style="display:grid;grid-template-columns:minmax(145px,1.5fr) minmax(102px,1fr) minmax(52px,.55fr) minmax(66px,.65fr) minmax(58px,.55fr) minmax(52px,.5fr);gap:8px;padding:5px 10px;color:#64748b;font-size:.59rem;font-weight:900;text-transform:uppercase;letter-spacing:.05em"><span>Player</span><span>Pick / Actual</span><span>Odds</span><span>Result</span><span>P/L</span><span></span></div>'+rows+'</div>';
+  }
+  var html='';
+  catOrder.forEach(function(cat){
+    var c=cats[cat];if(!c)return;
+    var count=(c.OVER||[]).length+(c.UNDER||[]).length;
+    html+='<div style="margin:18px 0 5px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1e293b;padding-bottom:6px"><span style="color:#e9d5ff;font-size:.78rem;font-weight:900">&#9679; '+cat+'</span><span style="color:#64748b;font-size:.66rem">'+count+' graded plays</span></div>';
+    html+=sideBlock('OVER',c.OVER||[],'#38bdf8')+sideBlock('UNDER',c.UNDER||[],'#fb7185');
   });
-  var rows=entries.map(function(e){
-    var cat=e[0],c=e[1],total=c.w+c.l;
-    var rate=total?(c.w/total*100):0;
-    var roi=c.staked?(c.pl/c.staked*100):null;
-    var plColor=c.pl>=0?'#4ade80':'#f87171';
-    var barColor=rate>=70?'#4ade80':rate>=55?'#facc15':'#f87171';
-    var barW=Math.min(100,Math.round(rate));
-    return '<tr>'
-      +'<td style="color:#e2e8f0;font-weight:700">'+cat+'</td>'
-      +'<td style="font-family:monospace;color:#e2e8f0">'+c.w+'-'+c.l+'</td>'
-      +'<td><div style="display:flex;align-items:center;gap:8px">'
-      +'<div class="nhl-trk-bar-wrap"><div class="nhl-trk-bar" style="width:'+barW+'%;background:'+barColor+'"></div></div>'
-      +'<span style="color:'+barColor+';font-weight:700;font-size:.82rem">'+rate.toFixed(0)+'%</span></div></td>'
-      +'<td style="font-family:monospace;font-weight:800;color:'+plColor+'">'+(c.pl>=0?'+$':'-$')+Math.abs(c.pl).toFixed(0)+'</td>'
-      +'<td style="font-family:monospace;font-weight:700;color:'+plColor+'">'+(roi!=null?(roi>=0?'+':'')+roi.toFixed(1)+'%':'—')+'</td>'
-      +'</tr>';
-  }).join('');
-  return '<div style="overflow-x:auto"><table class="nhl-trk-tbl">'
-    +'<thead><tr><th>Category</th><th>Record</th><th>Hit Rate</th><th>Net P/L</th><th>ROI</th></tr></thead>'
-    +'<tbody>'+rows+'</tbody></table></div>';
+  return html;
 }
 function _nhlTrkListHtml(decided){
   if(!decided.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var sorted=[].concat(decided).sort(function(a,b){return(b.profit||0)-(a.profit||0);});
   var rows=sorted.map(function(r){
-    var plColor=r.result==='WIN'?'#4ade80':'#f87171';
+    var plColor=r.result==='WIN'?'#4ade80':(r.result==='LOSS'?'#f87171':'#94a3b8');
     var pl=r.profit!=null?((r.profit>=0?'+$':'-$')+Math.abs(r.profit).toFixed(0)):'—';
-    var odds=r.odds!=null?(r.odds>0?'+':'')+r.odds:'—';
+    var odds=r.odds!=null&&String(r.odds).trim()!==''?(r.odds>0?'+':'')+r.odds:'—';
     return '<tr>'
       +'<td style="color:#94a3b8;font-size:.78rem">'+r.category+'</td>'
       +'<td style="color:#e2e8f0;font-weight:700">'+r.name+'</td>'
@@ -4172,20 +4197,36 @@ def _nhl_track_record_payload() -> dict:
         "app": f"eq.{_NHL_TRK_APP}", "category": "eq.__detail__",
         "locked": "eq.true", "select": "date,detail", "limit": "365"})
     detail_by_date = {r["date"]: (r.get("detail") or []) for r in (det_rows or [])}
+    snap_rows = _nhl_sb_get("mpa_track_ledger", {
+        "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{_NHL_SNAP_CAT}",
+        "side": "eq.ALL", "select": "date,detail", "limit": "365"})
+    snapshot_by_date = {r["date"]: (r.get("detail") or []) for r in (snap_rows or [])}
     gp_by_date = {
         r["date"]: (r.get("detail") or [])
         for r in _nhl_load_gp_snapshots() if r.get("date")
     }
-    dates = sorted(set(detail_by_date) | set(gp_by_date), reverse=True)
+    dates = sorted(set(detail_by_date) | set(snapshot_by_date) | set(gp_by_date), reverse=True)
     result = []
     for d in dates:
         det = detail_by_date.get(d, [])
+        if not det and snapshot_by_date.get(d):
+            # A saved player snapshot is the source of truth for an ungraded
+            # slate.  Keep its line and odds, but mark the outcome pending.
+            det = [{
+                "name": p.get("name", ""), "team": p.get("team", ""),
+                "category": p.get("category", "?"), "side": p.get("side", "OVER"),
+                "stat_key": p.get("stat_key"), "line": p.get("line"),
+                "odds": p.get("odds"), "rank": p.get("rank"),
+                "result": None, "actual": None, "profit": None,
+            } for p in snapshot_by_date[d]]
         gp = _nhl_gp_summary(gp_by_date[d]) if d in gp_by_date else None
-        decided = [r for r in det if r.get("result") in ("WIN","LOSS") and r.get("odds") is not None]
+        decided = [r for r in det if r.get("result") in ("WIN","LOSS")]
         wins = sum(1 for r in decided if r["result"] == "WIN")
         losses = len(decided) - wins
-        net_pl = round(sum(r.get("profit") or 0 for r in decided), 2)
-        staked = len(decided) * _NHL_TRK_STAKE
+        priced = [r for r in decided
+                  if r.get("odds") is not None and str(r.get("odds")).strip() not in ("", "0")]
+        net_pl = round(sum(r.get("profit") or 0 for r in priced), 2)
+        staked = len(priced) * _NHL_TRK_STAKE
         roi = round(net_pl / staked * 100, 1) if staked else None
         cats: dict = {}
         for r in decided:
@@ -4193,8 +4234,9 @@ def _nhl_track_record_payload() -> dict:
             e = cats.setdefault(cat, {"wins":0,"losses":0,"pl":0.0,"staked":0.0})
             if r["result"] == "WIN": e["wins"] += 1
             else: e["losses"] += 1
-            e["pl"] = round(e["pl"] + (r.get("profit") or 0), 2)
-            e["staked"] += _NHL_TRK_STAKE
+            if r.get("odds") is not None and str(r.get("odds")).strip() not in ("", "0"):
+                e["pl"] = round(e["pl"] + (r.get("profit") or 0), 2)
+                e["staked"] += _NHL_TRK_STAKE
         by_cat = []
         for cat, e in cats.items():
             total = e["wins"] + e["losses"]
