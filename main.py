@@ -696,6 +696,94 @@ async def get_opp_goalie_svpct(season: str) -> Dict[str, float]:
         return {}
 
 
+async def _get_historical_shot_lines(c: httpx.AsyncClient, api_key: str,
+                                     target_date: str) -> Dict[str, Dict]:
+    """Fetch archived pre-game SOG lines for a completed NHL slate.
+
+    Historical player props are only exposed through the Odds API's event
+    endpoint (not its all-games historical odds endpoint).  The 20:00 UTC
+    snapshot is a pre-game afternoon snapshot for the normal NHL evening
+    slate, and the API returns the closest archived snapshot at or before it.
+    """
+    snapshot = f"{target_date}T20:00:00Z"
+    tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
+    event_url = f"{ODDS_API}/historical/sports/icehockey_nhl/events"
+    event_params = {
+        "apiKey": api_key, "date": snapshot, "dateFormat": "iso",
+        "commenceTimeFrom": f"{target_date}T00:00:00Z",
+        "commenceTimeTo": f"{tomorrow}T05:59:59Z",
+    }
+    try:
+        r = await c.get(event_url, params=event_params)
+        if r.status_code != 200:
+            print(f"[HistoricalLines] event lookup {r.status_code} for {target_date}")
+            return {}
+        payload = r.json()
+        events = payload.get("data", payload if isinstance(payload, list) else [])
+        events = [ev for ev in events
+                  if ev.get("commence_time", "")[:10] in (target_date, tomorrow)]
+        if not events:
+            print(f"[HistoricalLines] no archived NHL events for {target_date}")
+            return {}
+        print(f"[HistoricalLines] {len(events)} events at "
+              f"{payload.get('timestamp', snapshot)} for {target_date}")
+
+        sem = asyncio.Semaphore(6)
+
+        async def _event_shot_lines(ev: Dict) -> Dict[str, Dict]:
+            async with sem:
+                r2 = await c.get(
+                    f"{event_url}/{ev['id']}/odds",
+                    params={
+                        "apiKey": api_key, "date": snapshot,
+                        "regions": "us,ca", "markets": "player_shots_on_goal",
+                        "oddsFormat": "american",
+                    },
+                )
+            if r2.status_code != 200:
+                print(f"[HistoricalLines] event odds {r2.status_code} for "
+                      f"{ev.get('away_team')} @ {ev.get('home_team')}")
+                return {}
+            odds_payload = r2.json()
+            game = odds_payload.get("data", odds_payload)
+            found: Dict[str, Dict] = {}
+            for book in game.get("bookmakers", []):
+                for market in book.get("markets", []):
+                    if market.get("key") != "player_shots_on_goal":
+                        continue
+                    for outcome in market.get("outcomes", []):
+                        side = outcome.get("name")
+                        if side not in ("Over", "Under"):
+                            continue
+                        player = outcome.get("description", "").strip()
+                        try:
+                            line = float(outcome.get("point"))
+                        except (TypeError, ValueError):
+                            continue
+                        if not player or line <= 0:
+                            continue
+                        rec = found.setdefault(player, {
+                            "line": line, "odds": "", "under_odds": "",
+                            "source": "Historical Odds API",
+                        })
+                        if side == "Over" and not rec["odds"]:
+                            rec["odds"] = str(outcome.get("price", ""))
+                        elif side == "Under" and not rec["under_odds"]:
+                            rec["under_odds"] = str(outcome.get("price", ""))
+            return found
+
+        per_event = await asyncio.gather(*[_event_shot_lines(ev) for ev in events])
+        lines: Dict[str, Dict] = {}
+        for event_lines in per_event:
+            for player, rec in event_lines.items():
+                lines.setdefault(player, rec)
+        print(f"[HistoricalLines] {len(lines)} archived shot lines for {target_date}")
+        return lines
+    except Exception as exc:
+        print(f"[HistoricalLines] fetch error for {target_date}: {exc}")
+        return {}
+
+
 async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
     """Fetch real shots on goal lines from The Odds API.
     Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
@@ -709,8 +797,14 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
 
     _oc = _odds_cache_get("nhl", target_date)
     if _oc is not None:
-        return (_oc.get("lines", {}), _oc.get("pts", {}),
-                _oc.get("ast", {}), _oc.get("sv", {}), _oc.get("goals", {}))
+        cached_lines = _oc.get("lines", {})
+        # A past simulation could previously cache an empty live-endpoint
+        # response. Do not let that stale miss prevent the new historical
+        # player-prop lookup from running.
+        if not (date.fromisoformat(target_date) < date.today() and not cached_lines):
+            return (cached_lines, _oc.get("pts", {}),
+                    _oc.get("ast", {}), _oc.get("sv", {}), _oc.get("goals", {}))
+        print(f"[HistoricalLines] refreshing empty cached line set for {target_date}")
 
     tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
     SPORT_KEYS = ["icehockey_nhl", "icehockey_nhl_championship"]
@@ -722,6 +816,14 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
         sv_lines: Dict[str, Dict] = {}
         goal_lines: Dict[str, Dict] = {}
         async with httpx.AsyncClient(timeout=20) as c:
+            if date.fromisoformat(target_date) < date.today():
+                lines = await _get_historical_shot_lines(c, api_key, target_date)
+                if lines:
+                    _odds_cache_set("nhl", target_date, {
+                        "lines": lines, "pts": {}, "ast": {}, "sv": {}, "goals": {}})
+                    return lines, {}, {}, {}, {}
+                print(f"[HistoricalLines] no archived shot lines available; "
+                      f"simulation fallback may be used for {target_date}")
             for sport_key in SPORT_KEYS:
                 r = await c.get(
                     f"{ODDS_API}/sports/{sport_key}/events",
@@ -1127,6 +1229,13 @@ async def get_pts_picks(
                 "restDays": rest_days_p, "hotHits": hot_hits_p, "hotTotal": hot_total_p,
                 "toiAvgSec": toi_avg_sec, "ppToiAvgSec": pp_toi_avg_sec,
                 "oppGoalieSv": opp_sv,
+                "simActual": next(
+                    (g.get(stat_key) for g in logs
+                     if g.get("date") == target_date
+                     and g.get("homeRoad") == hr
+                     and g.get("opponent") == opp),
+                    None,
+                ),
             }
 
         pp = build_pick("points", PTS_LINE, HIT_THRESH_PTS, pts_lines_map, "Points (1+)")
@@ -1267,6 +1376,13 @@ async def get_saves_picks(
         glog = [{"d": g["date"], "v": g["saves"]} for g in g_src]
         rest_days_sv = _days_rest(logs, target_date)
         hot_hits_sv, hot_total_sv = _hot_streak(logs, "saves", base_line, hr, 5)
+        sim_actual_sv = next(
+            (g.get("saves") for g in logs
+             if g.get("date") == target_date
+             and g.get("homeRoad") == hr
+             and g.get("opponent") == opp),
+            None,
+        )
 
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
@@ -1284,6 +1400,7 @@ async def get_saves_picks(
             "glog": glog,
             "restDays": rest_days_sv, "hotHits": hot_hits_sv, "hotTotal": hot_total_sv,
             "toiAvgSec": 0, "ppToiAvgSec": 0, "oppGoalieSv": None,
+            "simActual": sim_actual_sv,
         }
         if over_ok: picks.append(rec)
         if uf["underOk"]: unders.append(rec)
@@ -1342,6 +1459,107 @@ def _calc_hit_rate_from_logs(logs: List[Dict], line: float, home_road: str,
     return hits, total, rate, avg
 
 
+def _nhl_sim_prop_summary(result: dict, historical: bool = False) -> dict:
+    """Grade displayed player-prop calls without writing to the record."""
+    market_lists = [
+        ("picks", "OVER", "Shots on Goal"), ("rest", "OVER", "Shots on Goal"),
+        ("shotUnders", "UNDER", "Shots on Goal"),
+        ("shotUndersRest", "UNDER", "Shots on Goal"),
+        ("ptsPicks", "OVER", "Points"), ("ptsRest", "OVER", "Points"),
+        ("ptsUnders", "UNDER", "Points"),
+        ("ptsUndersRest", "UNDER", "Points"),
+        ("astPicks", "OVER", "Assists"), ("astRest", "OVER", "Assists"),
+        ("astUnders", "UNDER", "Assists"),
+        ("astUndersRest", "UNDER", "Assists"),
+        ("goalPicks", "OVER", "Goals"), ("goalRest", "OVER", "Goals"),
+        ("goalUnders", "UNDER", "Goals"),
+        ("goalUndersRest", "UNDER", "Goals"),
+        ("savesPicks", "OVER", "Goalie Saves"),
+        ("savesRest", "OVER", "Goalie Saves"),
+        ("savesUnders", "UNDER", "Goalie Saves"),
+        ("savesUndersRest", "UNDER", "Goalie Saves"),
+    ]
+    totals = {"wins": 0, "losses": 0, "pushes": 0, "voids": 0, "pending": 0}
+    by_market = {}
+    for result_key, side, market in market_lists:
+        bucket = by_market.setdefault(
+            market, {"wins": 0, "losses": 0, "pushes": 0, "voids": 0, "pending": 0})
+        for pick in result.get(result_key) or []:
+            actual = pick.get("simActual")
+            line = pick.get("realLine")
+            if line is None:
+                line = pick.get("dispLine")
+            outcome = None
+            try:
+                if actual is not None and line is not None:
+                    actual, line = float(actual), float(line)
+                    if actual == line:
+                        outcome = "pushes"
+                    elif (side == "OVER" and actual > line) or (
+                            side == "UNDER" and actual < line):
+                        outcome = "wins"
+                    else:
+                        outcome = "losses"
+            except (TypeError, ValueError):
+                outcome = None
+            # On a completed historical slate, a current-roster player without
+            # a matching appearance did not participate in this replay. Void
+            # that call rather than misrepresenting it as still pending.
+            key = outcome or ("voids" if historical else "pending")
+            totals[key] += 1
+            bucket[key] += 1
+
+    def finish(counts):
+        decided = counts["wins"] + counts["losses"]
+        return {
+            **counts, "decided": decided,
+            "percentage": round(counts["wins"] / decided * 100, 1)
+            if decided else None,
+        }
+
+    return {
+        **finish(totals),
+        "by_market": [
+            {"market": market, **finish(counts)}
+            for market, counts in by_market.items()
+        ],
+    }
+
+
+def _nhl_simulation_stats(target_date: str, game_predictions: list,
+                          result: dict) -> dict:
+    """Build display-only historical results for a simulation date."""
+    stats = {
+        "date": target_date,
+        "team": {"wins": 0, "losses": 0, "pushes": 0, "pending": 0,
+                 "decided": 0, "percentage": None},
+        "player_props": _nhl_sim_prop_summary(
+            result, historical=target_date < date.today().isoformat()),
+        "note": (
+            "Retrospective replay only. Results are not saved to the official "
+            "pre-game record."
+        ),
+    }
+    try:
+        graded = _nhl_grade_gp_date(target_date, game_predictions or [])
+        summary = _nhl_gp_summary(graded.get("detail") or [])
+        stats["team"] = {
+            "wins": summary["mlWins"], "losses": summary["mlLosses"],
+            "pushes": summary["mlPushes"],
+            "pending": sum(
+                1 for row in graded.get("detail") or []
+                if not row.get("mlResult")
+            ),
+            "decided": summary["mlWins"] + summary["mlLosses"],
+            "percentage": summary["mlRate"],
+        }
+    except Exception as exc:
+        print(f"[nhl_sim] historical Game Predictor grading failed {target_date}: {exc}")
+        stats["team"]["pending"] = len(game_predictions or [])
+        stats["team"]["error"] = "Completed game results were unavailable."
+    return stats
+
+
 async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
     global _progress
     sem_nhl = asyncio.Semaphore(SEM_NHL)
@@ -1391,6 +1609,10 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
 
     # Build player pool from NHL skater season averages
     pool, skater_rosters = await get_shot_qualified_players(games, sa_map, sem_nhl, season, lines_map)
+    archived_shot_line_count = sum(
+        1 for player in pool
+        if player.get("lineSource") == "Historical Odds API"
+    )
     if simulate or unpriced_mode:
         fallback_source = "Simulation" if simulate else "No book line"
         for player in pool:
@@ -1472,6 +1694,13 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             avg3, t3, avg2, t2, p.get("oppSA", 0.0), league_sa, rest_days)
         proj_edge = round(proj - line, 2)
         proj_pick = "OVER" if proj_edge > 0 else ("UNDER" if proj_edge < 0 else "")
+        sim_actual = next(
+            (g.get("shots") for g in logs
+             if g.get("date") == target_date
+             and g.get("homeRoad") == hr
+             and g.get("opponent") == opp),
+            None,
+        )
 
         # Signal factors
         toi_avg_sec = round(sum(g.get("toi_sec", 0) for g in _ha) / len(_ha)) if _ha else 0
@@ -1500,6 +1729,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             "restDays": rest_days, "hotHits": hot_hits, "hotTotal": hot_total,
             "toiAvgSec": toi_avg_sec, "ppToiAvgSec": pp_toi_avg_sec,
             "oppGoalieSv": opp_sv,
+            "simActual": sim_actual,
         }
 
     completed = [0]
@@ -1572,12 +1802,22 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
         "date":             target_date,
         "game_predictions": game_preds,
         "simulation": bool(simulate),
+        "archivedShotLineCount": archived_shot_line_count,
         "unpriced": bool(unpriced_mode and not simulate),
     }
     if simulate:
+        _result["simulationStats"] = _nhl_simulation_stats(
+            target_date, game_preds, _result)
+        if archived_shot_line_count:
+            _result["simulationStats"]["lineNote"] = (
+                f"{archived_shot_line_count} archived player SOG lines were used "
+                "for this replay. A simulation estimate remains only where an "
+                "archived line was unavailable."
+            )
         _result["simulationNotice"] = (
-            "Simulation only: model fallback lines were used because sportsbook "
-            "player props are not posted. This run is not cached or tracked."
+            "Simulation only: archived player SOG lines are used where available; "
+            "other missing player lines use a model estimate. Historical results "
+            "below are display only and are not cached or tracked."
         )
         return _result
     # Persist the pre-game player and GP snapshots before building the hub
@@ -1890,6 +2130,7 @@ body.is-admin #parlayCard{display:block}
     <div class="date-row">
       <label>Date</label>
       <input type="date" id="datePicker"/>
+      <button type="button" class="admin-only" onclick="setNhlSimulationDate('2026-03-10')" style="margin-left:8px;background:#0e7490;color:#fff;border:none;border-radius:7px;padding:7px 10px;font-size:.72rem;font-weight:800;cursor:pointer">Replay Mar 10, 2026</button>
     </div>
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
     <button class="btn-run admin-only" id="runBtn" onclick="runPicks()" style="margin-left:10px">Run Simulation</button>
@@ -1946,6 +2187,11 @@ document.addEventListener('DOMContentLoaded', function(){
   }
 
 });
+
+function setNhlSimulationDate(dt){
+  var dp=document.getElementById('datePicker');
+  if(dp) dp.value=dt;
+}
 
 // STEP 1: Connect
 async function checkStatus(){
@@ -2098,7 +2344,7 @@ async function runPicks(){
     } else {
       renderResults(data);
       if(st) st.textContent = data.simulation
-        ? 'SIMULATION ONLY — model fallback lines used; not saved or tracked'
+        ? 'SIMULATION ONLY — historical results are shown below; not saved or tracked'
         : data.unpriced
         ? 'Model picks generated — sportsbook prices unavailable'
         : data.qualified + ' players qualified -- ' + data.picks.length + ' top picks -- ' + dt;
@@ -2162,6 +2408,15 @@ function _rateHtml(rate,hits,tot){
   if(!tot) return '<span class="gray">—</span>';
   return '<span class="'+rateClass(rate)+'">'+hits+'/'+tot+' ('+rate+'%)</span>';
 }
+function _nhlLineSourceBadge(p){
+  if(p.lineSource==='Historical Odds API'){
+    return '<span style="margin-left:5px;padding:2px 5px;border-radius:4px;background:rgba(59,130,246,.18);color:#93c5fd;font-size:.55rem;font-weight:900;letter-spacing:.05em">ARCHIVED</span>';
+  }
+  if(p.lineSource==='Simulation'){
+    return '<span style="margin-left:5px;color:#94a3b8;font-size:.6rem;font-weight:800">MODEL</span>';
+  }
+  return '';
+}
 function nhlCard(p,i){
   var season=(window.__NHL_SEASON__||'20252026');
   var key=_ladKey(p); window.__NHLLAD__[key]=p;
@@ -2169,7 +2424,7 @@ function nhlCard(p,i){
   var head='https://assets.nhle.com/mugs/nhl/'+season+'/'+p.team+'/'+p.pid+'.png';
   var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
   var lineHtml=(p.realLine!=null)
-    ? `<span class="ln">${p.dispLine}</span> <span class="od">${p.realOdds||''}</span>`
+    ? `<span class="ln">${p.dispLine}</span> <span class="od">${p.realOdds||''}</span>${_nhlLineSourceBadge(p)}`
     : `<span class="est">~${p.dispLine}</span>`;
   var lastStat=(p.realLine!=null&&p.vsLineTotal)
     ? `<div class="pc-stat"><div class="k">vs Book L10</div><div class="v ${rateClass(p.vsLineRate)}">${p.vsLineHits}/${p.vsLineTotal} (${p.vsLineRate}%)</div></div>`
@@ -2222,7 +2477,7 @@ function nhlUnderCard(p,i){
   var head='https://assets.nhle.com/mugs/nhl/'+season+'/'+p.team+'/'+p.pid+'.png';
   var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
   var lineHtml=(p.realLine!=null)
-    ? `<span class="ln">U ${p.dispLine}</span> <span class="od">${p.realUnderOdds||''}</span>`
+    ? `<span class="ln">U ${p.dispLine}</span> <span class="od">${p.realUnderOdds||''}</span>${_nhlLineSourceBadge(p)}`
     : `<span class="est">U ~${p.dispLine}</span>`;
   var voHtml=p.underTotVo?`<span class="${underClass(p.underRateVo)}">${p.underHitsVo}/${p.underTotVo} (${p.underRateVo}%)</span>`:'<span class="gray">—</span>';
   var anHtml=p.underTotAny?`<span class="${underClass(p.underRateAny)}">${p.underHitsAny}/${p.underTotAny} (${p.underRateAny}%)</span>`:'<span class="gray">—</span>';
@@ -2415,6 +2670,52 @@ function renderNhlGamePredictor(preds){
   h+='</div>';
   return h;
 }
+function _nhlSimRecord(counts){
+  if(!counts) return '—';
+  return '<span style="color:#4ade80;font-weight:900">'+(counts.wins||0)+'W</span>'
+    +'<span style="color:#64748b"> - </span>'
+    +'<span style="color:#f87171;font-weight:900">'+(counts.losses||0)+'L</span>'
+    +((counts.pushes||0)?'<span style="color:#facc15;font-weight:800"> - '+counts.pushes+'P</span>':'')
+    +((counts.voids||0)?'<span style="color:#94a3b8;font-weight:800"> - '+counts.voids+' void</span>':'')
+    +((counts.pending||0)?'<span style="color:#94a3b8;font-weight:800"> - '+counts.pending+' pending</span>':'');
+}
+function _nhlSimPct(counts){
+  return counts&&counts.percentage!=null?counts.percentage+'%':'—';
+}
+function renderNhlSimulationStats(stats){
+  if(!stats) return '';
+  var team=stats.team||{}, props=stats.player_props||{};
+  var rows=(props.by_market||[]).filter(function(m){
+    return (m.decided||0)+(m.pushes||0)+(m.voids||0)+(m.pending||0)>0;
+  }).map(function(m){
+    return '<tr><td style="color:#cbd5e1">'+m.market+'</td>'
+      +'<td style="font-weight:800">'+_nhlSimRecord(m)+'</td>'
+      +'<td style="font-weight:900;color:#fbbf24">'+_nhlSimPct(m)+'</td></tr>';
+  }).join('');
+  var detail=rows
+    ?'<details style="margin-top:12px"><summary style="cursor:pointer;color:#93c5fd;font-size:.75rem;font-weight:800">Player-prop result breakdown</summary>'
+      +'<div style="overflow-x:auto;margin-top:8px"><table class="nhl-trk-tbl"><thead><tr><th>Market</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>'+rows+'</tbody></table></div></details>'
+    :'';
+  return '<div style="margin:0 0 16px;padding:15px 16px;background:linear-gradient(135deg,#0c1c2c,#08111d);border:1px solid rgba(56,189,248,.35);border-radius:14px">'
+    +'<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">'
+      +'<div><div style="color:#7dd3fc;font-size:.68rem;font-weight:900;letter-spacing:.08em">HISTORICAL SIMULATION RESULTS</div>'
+      +'<div style="color:#fff;font-size:1rem;font-weight:900;margin-top:3px">'+(stats.date||'Selected date')+'</div></div>'
+      +'<div style="color:#94a3b8;font-size:.7rem;max-width:360px;text-align:right">'+(stats.note||'Simulation results are display only.')+'</div>'
+    +'</div>'
+    +(stats.lineNote?'<div style="margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(59,130,246,.12);color:#bfdbfe;font-size:.72rem;font-weight:700">'+stats.lineNote+'</div>':'')
+    +'<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:13px">'
+      +'<div style="flex:1;min-width:210px;background:#071f17;border:1px solid rgba(52,211,153,.25);border-radius:10px;padding:11px;text-align:center">'
+        +'<div style="color:#6ee7b7;font-size:.64rem;font-weight:900;letter-spacing:.07em">TEAM WINNER CALLS</div>'
+        +'<div style="margin-top:5px;font-size:1rem">'+_nhlSimRecord(team)+'</div>'
+        +'<div style="margin-top:4px;color:#e2e8f0;font-size:.84rem;font-weight:900">'+_nhlSimPct(team)+' hit rate</div>'
+      +'</div>'
+      +'<div style="flex:1;min-width:210px;background:#07192b;border:1px solid rgba(56,189,248,.25);border-radius:10px;padding:11px;text-align:center">'
+        +'<div style="color:#7dd3fc;font-size:.64rem;font-weight:900;letter-spacing:.07em">PLAYER PROPS</div>'
+        +'<div style="margin-top:5px;font-size:1rem">'+_nhlSimRecord(props)+'</div>'
+        +'<div style="margin-top:4px;color:#e2e8f0;font-size:.84rem;font-weight:900">'+_nhlSimPct(props)+' hit rate</div>'
+      +'</div>'
+    +'</div>'+detail+'</div>';
+}
 function buildPtsTable(picks, startNum){
   var thead = '<thead><tr><th>#</th><th>PLAYER</th><th>TEAM</th><th>OPP</th><th>H/A</th>' +
     '<th>BOOK</th><th>AVG vs OPP (L10)</th><th>AVG L10 H/A</th><th>HITS BOOK L10</th>' +
@@ -2519,6 +2820,8 @@ function _nhlPaint(q){
   d.shotUnders=_f(raw.shotUnders); d.ptsUnders=_f(raw.ptsUnders); d.astUnders=_f(raw.astUnders); d.goalUnders=_f(raw.goalUnders); d.savesUnders=_f(raw.savesUnders);
   d.shotUndersRest=_f(raw.shotUndersRest); d.ptsUndersRest=_f(raw.ptsUndersRest); d.astUndersRest=_f(raw.astUndersRest); d.goalUndersRest=_f(raw.goalUndersRest); d.savesUndersRest=_f(raw.savesUndersRest);
   var h = '';
+
+  if(d.simulation && d.simulationStats) h += renderNhlSimulationStats(d.simulationStats);
 
   // Chips
   h += '<div class="chips">' +
