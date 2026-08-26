@@ -189,8 +189,130 @@ async def get_today_games(target_date: str = None) -> List[Dict]:
                         "homeFull":  g["homeTeam"].get("commonName", {}).get("default", ""),
                         "awayFull":  g["awayTeam"].get("commonName", {}).get("default", ""),
                         "startTime": g.get("startTimeUTC", ""),
+                        "gameState": g.get("gameState", ""),
                     })
+    await _attach_confirmed_game_lineups(games)
     return games
+
+
+def _boxscore_lineup(boxscore: Dict, game: Dict) -> Dict:
+    """Return the dressed skaters and goalies from an NHL game boxscore."""
+    by_team = boxscore.get("playerByGameStats") or {}
+    lineup = {"skaters": {}, "goalies": {}}
+    for box_side, team_key in (("homeTeam", "homeTeam"), ("awayTeam", "awayTeam")):
+        team = game.get(team_key, "")
+        stats = by_team.get(box_side) or {}
+        skaters, goalies = [], []
+        for group in ("forwards", "defense"):
+            for player in stats.get(group, []) or []:
+                pid = player.get("playerId")
+                if pid is None:
+                    continue
+                skaters.append({
+                    "id": int(pid),
+                    "name": (player.get("name") or {}).get("default", ""),
+                })
+        for player in stats.get("goalies", []) or []:
+            pid = player.get("playerId")
+            if pid is None:
+                continue
+            goalies.append({
+                "id": int(pid),
+                "name": (player.get("name") or {}).get("default", ""),
+            })
+        if team:
+            lineup["skaters"][team] = skaters
+            lineup["goalies"][team] = goalies
+    return lineup
+
+
+async def _attach_confirmed_game_lineups(games: List[Dict]) -> None:
+    """Attach official dressed-player lists when NHL has published them.
+
+    The schedule endpoint itself does not provide lineups.  The gamecenter
+    boxscore does after a game has begun/completed, which makes it the correct
+    source for live games and historical replay.  Future/pre-game games remain
+    explicitly unavailable here and are later restricted to book-listed players.
+    """
+    if not games:
+        return
+    async with httpx.AsyncClient(follow_redirects=True) as c:
+        rows = await asyncio.gather(
+            *[_fetch(f"{NHL_API}/gamecenter/{g['gameId']}/boxscore", c) for g in games],
+            return_exceptions=True,
+        )
+    for game, boxscore in zip(games, rows):
+        if not isinstance(boxscore, dict):
+            game["lineupSource"] = "UNAVAILABLE"
+            continue
+        lineup = _boxscore_lineup(boxscore, game)
+        count = sum(len(players) for players in lineup["skaters"].values())
+        count += sum(len(players) for players in lineup["goalies"].values())
+        if count:
+            game["lineup"] = lineup
+            game["lineupSource"] = "CONFIRMED"
+            print(f"[Lineup] {game['awayTeam']} @ {game['homeTeam']}: "
+                  f"{count} confirmed dressed players")
+        else:
+            game["lineupSource"] = "UNAVAILABLE"
+
+
+def _lineup_filtered_rosters(
+    games: List[Dict],
+    rosters: Dict[str, List[Dict]],
+    line_maps: List[Dict],
+    player_group: str,
+) -> Dict[str, List[Dict]]:
+    """Keep only players established for the game-day lineup.
+
+    Official boxscore participants win whenever they exist (live/final games
+    and historical replay).  Before puck drop the NHL feed has no projected
+    lineup field, so a player must appear in a listed player-prop market.  A
+    missing lineup signal never broadens back to the full team roster.
+    """
+    game_by_team = {}
+    for game in games:
+        game_by_team[game.get("homeTeam", "")] = game
+        game_by_team[game.get("awayTeam", "")] = game
+
+    filtered: Dict[str, List[Dict]] = {}
+    locked_states = {"LIVE", "CRIT", "OFF", "FINAL"}
+    for team, roster in rosters.items():
+        game = game_by_team.get(team, {})
+        official = ((game.get("lineup") or {}).get(player_group) or {}).get(team) or []
+        if official:
+            # Preserve the full roster name when possible, but retain historical
+            # participants who have since been traded or sent down.
+            current_by_id = {int(p["id"]): p for p in roster if p.get("id") is not None}
+            eligible = [
+                current_by_id.get(int(p["id"]), p)
+                for p in official if p.get("id") is not None
+            ]
+            filtered[team] = eligible
+            game.setdefault("lineupByTeam", {})[team] = "CONFIRMED"
+            print(f"[Lineup] {team}: {len(eligible)} confirmed {player_group}")
+            continue
+
+        if game.get("gameState") in locked_states:
+            # A live/final game without an official boxscore must not fall back
+            # to the current club roster or bookmaker names.
+            filtered[team] = []
+            game.setdefault("lineupByTeam", {})[team] = "UNAVAILABLE"
+            print(f"[Lineup] {team}: official {player_group} unavailable; withholding picks")
+            continue
+
+        eligible_ids = set()
+        for lines in line_maps:
+            for odds_name in (lines or {}):
+                player = _match_odds_name(odds_name, roster)
+                if player and player.get("id") is not None:
+                    eligible_ids.add(int(player["id"]))
+        filtered[team] = [p for p in roster if int(p.get("id", -1)) in eligible_ids]
+        status = "BOOK_LISTED" if filtered[team] else "UNAVAILABLE"
+        game.setdefault("lineupByTeam", {})[team] = status
+        print(f"[Lineup] {team}: {len(filtered[team])} {player_group} "
+              f"from {status.lower().replace('_', ' ')} signal")
+    return filtered
 
 
 async def get_team_sa_map(season: str = "20252026") -> Dict[str, float]:
@@ -254,6 +376,18 @@ def _nhl_match_team_name(full_name: str) -> Optional[str]:
         if score > best_score:
             best, best_score = abbr, score
     return best if best_score >= 1 else None
+
+
+def _odds_event_matches_slate(event: Dict, games: List[Dict]) -> bool:
+    """True only when an Odds API event is one of the selected date's games."""
+    if not games:
+        return False
+    away = _nhl_match_team_name(event.get("away_team", ""))
+    home = _nhl_match_team_name(event.get("home_team", ""))
+    return any(
+        game.get("awayTeam") == away and game.get("homeTeam") == home
+        for game in games
+    )
 
 
 async def _nhl_gp_fetch_all(target_date: str, season: str) -> dict:
@@ -697,7 +831,8 @@ async def get_opp_goalie_svpct(season: str) -> Dict[str, float]:
 
 
 async def _get_historical_shot_lines(c: httpx.AsyncClient, api_key: str,
-                                     target_date: str) -> Dict[str, Dict]:
+                                     target_date: str,
+                                     games: List[Dict]) -> Dict[str, Dict]:
     """Fetch archived pre-game SOG lines for a completed NHL slate.
 
     Historical player props are only exposed through the Odds API's event
@@ -720,8 +855,11 @@ async def _get_historical_shot_lines(c: httpx.AsyncClient, api_key: str,
             return {}
         payload = r.json()
         events = payload.get("data", payload if isinstance(payload, list) else [])
-        events = [ev for ev in events
-                  if ev.get("commence_time", "")[:10] in (target_date, tomorrow)]
+        events = [
+            ev for ev in events
+            if ev.get("commence_time", "")[:10] in (target_date, tomorrow)
+            and _odds_event_matches_slate(ev, games)
+        ]
         if not events:
             print(f"[HistoricalLines] no archived NHL events for {target_date}")
             return {}
@@ -784,7 +922,7 @@ async def _get_historical_shot_lines(c: httpx.AsyncClient, api_key: str,
         return {}
 
 
-async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
+async def get_shot_lines(target_date: str, games: List[Dict] = None) -> Dict[str, Dict]:
     """Fetch real shots on goal lines from The Odds API.
     Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
     Returns empty maps when books have not posted lines; it never invents a
@@ -795,7 +933,10 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
         print("[Lines] ODDS_API_KEY not set — no sportsbook props can be published")
         return {}, {}, {}, {}, {}
 
-    _oc = _odds_cache_get("nhl", target_date)
+    games = games or []
+    # A separate cache namespace prevents older date+tomorrow mixed slates from
+    # being reused after lineup eligibility became date/game specific.
+    _oc = _odds_cache_get("nhl_lineup_v2", target_date)
     if _oc is not None:
         cached_lines = _oc.get("lines", {})
         # A past simulation could previously cache an empty live-endpoint
@@ -817,9 +958,9 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
         goal_lines: Dict[str, Dict] = {}
         async with httpx.AsyncClient(timeout=20) as c:
             if date.fromisoformat(target_date) < date.today():
-                lines = await _get_historical_shot_lines(c, api_key, target_date)
+                lines = await _get_historical_shot_lines(c, api_key, target_date, games)
                 if lines:
-                    _odds_cache_set("nhl", target_date, {
+                    _odds_cache_set("nhl_lineup_v2", target_date, {
                         "lines": lines, "pts": {}, "ast": {}, "sv": {}, "goals": {}})
                     return lines, {}, {}, {}, {}
                 print(f"[HistoricalLines] no archived shot lines available; "
@@ -830,8 +971,11 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
                     params={"apiKey": api_key, "dateFormat": "iso"})
                 if r.status_code != 200:
                     continue
-                events = [e for e in r.json()
-                          if e.get("commence_time", "")[:10] in (target_date, tomorrow)]
+                events = [
+                    e for e in r.json()
+                    if e.get("commence_time", "")[:10] in (target_date, tomorrow)
+                    and _odds_event_matches_slate(e, games)
+                ]
                 print(f"[OddsAPI] {sport_key}: {len(events)} games for {target_date}")
                 if not events:
                     continue
@@ -908,7 +1052,7 @@ async def get_shot_lines(target_date: str) -> Dict[str, Dict]:
         print(f"[Lines] {len(lines)} shot | {len(pts_lines)} point | "
               f"{len(ast_lines)} assist | {len(sv_lines)} saves | {len(goal_lines)} goals lines from The Odds API")
         if lines or pts_lines or ast_lines or sv_lines or goal_lines:
-            _odds_cache_set("nhl", target_date, {
+            _odds_cache_set("nhl_lineup_v2", target_date, {
                 "lines": lines, "pts": pts_lines,
                 "ast": ast_lines, "sv": sv_lines, "goals": goal_lines})
         return lines, pts_lines, ast_lines, sv_lines, goal_lines
@@ -965,10 +1109,12 @@ async def get_shot_qualified_players(
     sem: asyncio.Semaphore,
     season: str = "20252026",
     lines_map: Dict = None,
+    lineup_maps: List[Dict] = None,
 ) -> List[Dict]:
-    """Build the skater pool and attach posted book lines when available."""
+    """Build the game-day skater pool and attach posted book lines."""
     if lines_map is None:
         lines_map = {}
+    lineup_maps = lineup_maps or [lines_map]
 
     team_ctx: Dict[str, Dict] = {}
     for g in games:
@@ -980,6 +1126,7 @@ async def get_shot_qualified_players(
         *[get_roster(t, sem) for t in team_ctx], return_exceptions=True)
     rosters = {t: (r if isinstance(r, list) else [])
                for t, r in zip(team_ctx.keys(), roster_vals)}
+    rosters = _lineup_filtered_rosters(games, rosters, lineup_maps, "skaters")
 
     pool: List[Dict] = []
     seen: set = set()
@@ -1021,7 +1168,8 @@ async def get_shot_qualified_players(
                 "oppSA":      sa_map.get(opp, 0.0),
             })
 
-    print(f"[NHL] {len(pool)} roster players in pool | {len(lines_map)} posted shot lines")
+    print(f"[NHL] {len(pool)} lineup-eligible skaters in pool | "
+          f"{len(lines_map)} posted shot lines")
     pool.sort(key=lambda x: x["oppSA"], reverse=True)
     return pool, rosters
 
@@ -1276,9 +1424,11 @@ async def get_saves_picks(
     target_date: str = None,
     simulate: bool = False,
     allow_fallback: bool = False,
+    lineup_maps: List[Dict] = None,
 ) -> List[Dict]:
-    """Goalie saves picks using NHL Stats API goalie game logs."""
+    """Goalie saves picks using only game-day eligible goalies."""
     sv_lines_map = sv_lines_map or {}
+    lineup_maps = lineup_maps or [sv_lines_map]
 
     team_ctx: Dict[str, Dict] = {}
     for g in games:
@@ -1289,6 +1439,7 @@ async def get_saves_picks(
         *[get_goalies(t, sem) for t in team_ctx], return_exceptions=True)
     rosters = {t: (r if isinstance(r, list) else [])
                for t, r in zip(team_ctx.keys(), roster_vals)}
+    rosters = _lineup_filtered_rosters(games, rosters, lineup_maps, "goalies")
 
     all_goalies = []
     seen = set()
@@ -1666,7 +1817,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
     # Games exist — now fetch SA map, lines, and goalie SV% map in parallel.
     sa_map, _lines_tuple, goalie_map = await asyncio.gather(
         get_team_sa_map(season),
-        get_shot_lines(target_date),
+        get_shot_lines(target_date, games),
         get_opp_goalie_svpct(season),
     )
     lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map = _lines_tuple
@@ -1695,7 +1846,10 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
     league_sa = round(sum(_sa_vals) / len(_sa_vals), 2) if _sa_vals else 0.0
 
     # Build player pool from NHL skater season averages
-    pool, skater_rosters = await get_shot_qualified_players(games, sa_map, sem_nhl, season, lines_map)
+    pool, skater_rosters = await get_shot_qualified_players(
+        games, sa_map, sem_nhl, season, lines_map,
+        lineup_maps=[lines_map, pts_lines_map, ast_lines_map, goal_lines_map],
+    )
     archived_shot_line_count = sum(
         1 for player in pool
         if player.get("lineSource") == "Historical Odds API"
@@ -1717,7 +1871,11 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
                         "source": fallback_source,
                     })
         _fill_sim_map(lines_map, 1.5)
-        _fill_sim_map(pts_lines_map, 1.5)
+        # Points (1+) model/replay cards must use the 0.5 threshold.  Using
+        # 1.5 here made every fallback point OVER require two points while the
+        # card still said "Points (1+)", so the OVER board could vanish even
+        # though the UNDER board was populated.
+        _fill_sim_map(pts_lines_map, PTS_LINE)
         _fill_sim_map(ast_lines_map, 0.5)
         _fill_sim_map(goal_lines_map, 0.5)
     _progress = {"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35}
@@ -1839,7 +1997,9 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
     saves_all, saves_unders = await get_saves_picks(
         games, sa_map, sem_nhl, season, sv_lines_map, target_date,
-        simulate=simulate, allow_fallback=unpriced_mode and not simulate)
+        simulate=simulate, allow_fallback=unpriced_mode and not simulate,
+        lineup_maps=[sv_lines_map],
+    )
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
 
     # ── Game Predictor ─────────────────────────────────────────────────────
@@ -2901,7 +3061,11 @@ function _nhlPaint(q){
   h += '<div class="sec">- Games -- ' + (d.targetDate || '') + '</div><div class="games">';
   d.games.forEach(function(g){
     var t = g.startTime ? new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}) : '';
-    h += '<div class="gcard"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + '</div><div class="gt">' + t + '</div></div>';
+    var lu=g.lineupByTeam||{},a=lu[g.awayTeam]||g.lineupSource||'UNAVAILABLE',hm=lu[g.homeTeam]||g.lineupSource||'UNAVAILABLE';
+    function _luText(v){return v==='CONFIRMED'?'confirmed':v==='BOOK_LISTED'?'book-listed': 'unavailable';}
+    h += '<div class="gcard"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + '</div><div class="gt">' + t + '</div>'
+      + '<div style="margin-top:4px;color:#94a3b8;font-size:.6rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em">Lineups: '
+      + g.awayTeam + ' ' + _luText(a) + ' · ' + g.homeTeam + ' ' + _luText(hm) + '</div></div>';
   });
   h += '</div>';
 
