@@ -1211,6 +1211,8 @@ async def get_pts_picks(
             hot_hits_p, hot_total_p = _hot_streak(logs, stat_key, line, hr, 5)
             rest_days_p = _days_rest(logs, target_date)
             opp_sv = goalie_map.get(opp)
+            sim_actual, sim_void_reason = _nhl_sim_actual_from_logs(
+                logs, target_date, hr, opp, stat_key)
             return {
                 "name": player["name"], "pid": player["id"], "team": team,
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
@@ -1229,13 +1231,7 @@ async def get_pts_picks(
                 "restDays": rest_days_p, "hotHits": hot_hits_p, "hotTotal": hot_total_p,
                 "toiAvgSec": toi_avg_sec, "ppToiAvgSec": pp_toi_avg_sec,
                 "oppGoalieSv": opp_sv,
-                "simActual": next(
-                    (g.get(stat_key) for g in logs
-                     if g.get("date") == target_date
-                     and g.get("homeRoad") == hr
-                     and g.get("opponent") == opp),
-                    None,
-                ),
+                "simActual": sim_actual, "simVoidReason": sim_void_reason,
             }
 
         pp = build_pick("points", PTS_LINE, HIT_THRESH_PTS, pts_lines_map, "Points (1+)")
@@ -1376,13 +1372,8 @@ async def get_saves_picks(
         glog = [{"d": g["date"], "v": g["saves"]} for g in g_src]
         rest_days_sv = _days_rest(logs, target_date)
         hot_hits_sv, hot_total_sv = _hot_streak(logs, "saves", base_line, hr, 5)
-        sim_actual_sv = next(
-            (g.get("saves") for g in logs
-             if g.get("date") == target_date
-             and g.get("homeRoad") == hr
-             and g.get("opponent") == opp),
-            None,
-        )
+        sim_actual_sv, sim_void_reason_sv = _nhl_sim_actual_from_logs(
+            logs, target_date, hr, opp, "saves")
 
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
@@ -1400,7 +1391,7 @@ async def get_saves_picks(
             "glog": glog,
             "restDays": rest_days_sv, "hotHits": hot_hits_sv, "hotTotal": hot_total_sv,
             "toiAvgSec": 0, "ppToiAvgSec": 0, "oppGoalieSv": None,
-            "simActual": sim_actual_sv,
+            "simActual": sim_actual_sv, "simVoidReason": sim_void_reason_sv,
         }
         if over_ok: picks.append(rec)
         if uf["underOk"]: unders.append(rec)
@@ -1457,6 +1448,24 @@ def _calc_hit_rate_from_logs(logs: List[Dict], line: float, home_road: str,
     avg  = round(sum(g["shots"] for g in filtered) / total, 2)
     rate = round(hits / total * 100, 1)
     return hits, total, rate, avg
+
+
+def _nhl_sim_actual_from_logs(logs: list, target_date: str, home_road: str,
+                              opponent: str, stat_key: str) -> tuple:
+    """Return a replay stat and an explicit reason when the player is void."""
+    target_logs = [g for g in logs if g.get("date") == target_date]
+    for game in target_logs:
+        if game.get("homeRoad") == home_road and game.get("opponent") == opponent:
+            actual = game.get(stat_key)
+            if actual is not None:
+                return actual, ""
+            return None, "The NHL game log did not contain this stat."
+    if target_logs:
+        return None, (
+            f"Player appeared in a different {target_date} matchup than this "
+            "replay's expected team/opponent."
+        )
+    return None, f"No recorded NHL appearance on {target_date}."
 
 
 def _nhl_sim_prop_summary(result: dict, historical: bool = False) -> dict:
@@ -1558,6 +1567,84 @@ def _nhl_simulation_stats(target_date: str, game_predictions: list,
         stats["team"]["pending"] = len(game_predictions or [])
         stats["team"]["error"] = "Completed game results were unavailable."
     return stats
+
+
+def _nhl_historical_replay_payload(result: dict) -> dict:
+    """Shape a non-persistent simulation as a Track Record day for viewing."""
+    from collections import Counter
+
+    detail = []
+    void_reasons = Counter()
+    for result_key, category, stat_key, side, is_overflow in _NHL_TRK_LISTS:
+        for rank, pick in enumerate(result.get(result_key) or [], 1):
+            line = pick.get("realLine")
+            if line is None:
+                line = pick.get("line")
+            if line is None:
+                line = pick.get("dispLine")
+            odds = pick.get("realOdds") if side == "OVER" else pick.get("realUnderOdds")
+            actual = pick.get("simActual")
+            void_reason = ""
+            outcome = None
+            try:
+                if actual is None or line is None:
+                    outcome = "VOID"
+                    void_reason = pick.get("simVoidReason") or (
+                        "No matching historical NHL appearance was available."
+                    )
+                else:
+                    actual, line = float(actual), float(line)
+                    if actual == line:
+                        outcome = "PUSH"
+                    elif (side == "OVER" and actual > line) or (
+                            side == "UNDER" and actual < line):
+                        outcome = "WIN"
+                    else:
+                        outcome = "LOSS"
+            except (TypeError, ValueError):
+                outcome = "VOID"
+                void_reason = "The historical stat or line could not be read."
+            if outcome == "VOID":
+                void_reasons[void_reason] += 1
+            detail.append({
+                "name": pick.get("name", ""), "team": pick.get("team", ""),
+                "category": category, "stat_key": stat_key, "side": side,
+                "line": line, "odds": odds, "rank": rank,
+                "is_overflow": bool(is_overflow), "line_source": pick.get("lineSource", ""),
+                "result": outcome, "actual": actual, "void_reason": void_reason,
+                "profit": round(_nhl_american_profit(odds, _NHL_TRK_STAKE, outcome), 2)
+                if outcome in ("WIN", "LOSS", "PUSH") and odds not in (None, "", "0")
+                else None,
+            })
+
+    gp_detail = _nhl_grade_gp_date(
+        result.get("date") or result.get("targetDate") or "",
+        result.get("game_predictions") or [],
+    ).get("detail") or []
+    gp = _nhl_gp_summary(gp_detail) if gp_detail else None
+    wins = sum(1 for row in detail if row["result"] == "WIN")
+    losses = sum(1 for row in detail if row["result"] == "LOSS")
+    pushes = sum(1 for row in detail if row["result"] == "PUSH")
+    voids = sum(1 for row in detail if row["result"] == "VOID")
+    return {
+        "date": result.get("date") or result.get("targetDate"),
+        "detail": detail, "gp": gp,
+        "is_historical_replay": True,
+        "note": (
+            "Historical replay only — it is not an official pre-game snapshot "
+            "and is excluded from the permanent Track Record."
+        ),
+        "summary": {
+            "wins": wins, "losses": losses, "pushes": pushes, "voids": voids,
+            "decided": wins + losses,
+            "percentage": round(wins / (wins + losses) * 100, 1)
+            if wins + losses else None,
+            "void_reasons": [
+                {"reason": reason, "count": count}
+                for reason, count in void_reasons.most_common()
+            ],
+        },
+    }
 
 
 async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
@@ -1694,13 +1781,8 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             avg3, t3, avg2, t2, p.get("oppSA", 0.0), league_sa, rest_days)
         proj_edge = round(proj - line, 2)
         proj_pick = "OVER" if proj_edge > 0 else ("UNDER" if proj_edge < 0 else "")
-        sim_actual = next(
-            (g.get("shots") for g in logs
-             if g.get("date") == target_date
-             and g.get("homeRoad") == hr
-             and g.get("opponent") == opp),
-            None,
-        )
+        sim_actual, sim_void_reason = _nhl_sim_actual_from_logs(
+            logs, target_date, hr, opp, "shots")
 
         # Signal factors
         toi_avg_sec = round(sum(g.get("toi_sec", 0) for g in _ha) / len(_ha)) if _ha else 0
@@ -1729,7 +1811,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             "restDays": rest_days, "hotHits": hot_hits, "hotTotal": hot_total,
             "toiAvgSec": toi_avg_sec, "ppToiAvgSec": pp_toi_avg_sec,
             "oppGoalieSv": opp_sv,
-            "simActual": sim_actual,
+            "simActual": sim_actual, "simVoidReason": sim_void_reason,
         }
 
     completed = [0]
@@ -1808,6 +1890,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
     if simulate:
         _result["simulationStats"] = _nhl_simulation_stats(
             target_date, game_preds, _result)
+        _result["historicalTrackRecord"] = _nhl_historical_replay_payload(_result)
         if archived_shot_line_count:
             _result["simulationStats"]["lineNote"] = (
                 f"{archived_shot_line_count} archived player SOG lines were used "
@@ -2125,15 +2208,13 @@ body.is-admin #parlayCard{display:block}
   </div>
 
   <div class="card" style="text-align:center">
-    <h2 style="font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:700;color:#fff;margin-bottom:6px">Run Today\'s Picks</h2>
-    <p style="color:#6b7280;font-size:.88rem;margin-bottom:22px">Select a date - NHL Stats API powers all hit rates</p>
+    <h2 style="font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:700;color:#fff;margin-bottom:6px">Get NHL Picks</h2>
+    <p style="color:#6b7280;font-size:.88rem;margin-bottom:22px">Choose today for the saved board, or any completed date for a historical replay and its Track Record</p>
     <div class="date-row">
       <label>Date</label>
       <input type="date" id="datePicker"/>
-      <button type="button" class="admin-only" onclick="setNhlSimulationDate('2026-03-10')" style="margin-left:8px;background:#0e7490;color:#fff;border:none;border-radius:7px;padding:7px 10px;font-size:.72rem;font-weight:800;cursor:pointer">Replay Mar 10, 2026</button>
     </div>
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
-    <button class="btn-run admin-only" id="runBtn" onclick="runPicks()" style="margin-left:10px">Run Simulation</button>
   </div>
 
   <div class="card" id="parlayCard" style="text-align:center;max-width:600px;margin:20px auto 0">
@@ -2187,11 +2268,6 @@ document.addEventListener('DOMContentLoaded', function(){
   }
 
 });
-
-function setNhlSimulationDate(dt){
-  var dp=document.getElementById('datePicker');
-  if(dp) dp.value=dt;
-}
 
 // STEP 1: Connect
 async function checkStatus(){
@@ -2281,81 +2357,64 @@ function _renderParlay(randomize){
   out.innerHTML='<div style="background:#0e0e0e;border:1px solid #262626;border-radius:12px;overflow:hidden">'+header+rows+summary+'</div>';
 }
 
-// Get Picks: load saved picks for the chosen date (read-only, never runs the pipeline).
+// Get Picks loads today's saved board, or builds a view-only replay for any past date.
 async function getPicks(){
   var btn=document.getElementById('getBtn');
   var st=document.getElementById('statusMsg');
   var out=document.getElementById('out');
   var dt=document.getElementById('datePicker').value;
   var orig=btn.textContent;
+  var isHistorical=dt&&dt<new Date().toISOString().slice(0,10);
   btn.disabled=true; btn.textContent='Loading...';
-  if(st) st.textContent='Loading saved picks for '+dt+'...';
+  if(st) st.textContent=isHistorical?'Building historical picks and Track Record for '+dt+'...':'Loading saved picks for '+dt+'...';
+  var pollTimer=null;
+  if(isHistorical&&out){
+    out.innerHTML='<div class="loading"><div class="spin"></div>'
+      +'<p style="color:#9ca3af;margin-bottom:16px" id="prog-stage">Starting historical replay...</p>'
+      +'<div style="background:rgba(245,158,11,.1);border-radius:6px;height:8px;width:280px;margin:0 auto 8px;overflow:hidden">'
+      +'<div id="prog-bar" style="height:100%;width:5%;background:#f59e0b;border-radius:6px;transition:width .5s"></div></div>'
+      +'<p style="color:#6b7280;font-size:.8rem" id="prog-pct">5%</p></div>';
+    pollTimer=setInterval(async function(){
+      try{
+        var pr=await fetch('/api/progress'),pd=await pr.json();
+        var bar=document.getElementById('prog-bar'),stage=document.getElementById('prog-stage'),pct=document.getElementById('prog-pct');
+        if(bar)bar.style.width=pd.pct+'%';
+        if(stage)stage.textContent=pd.stage;
+        if(pct)pct.textContent=pd.pct+'%';
+      }catch(e){}
+    },2000);
+  }
   try{
     var _nhlTok=localStorage.getItem('__mpa_token')||'';
-    var res=await fetch('/api/cached?target_date='+dt+'&token='+encodeURIComponent(_nhlTok));
+    var url=isHistorical
+      ?'/api/picks?target_date='+encodeURIComponent(dt)+'&simulate=true&token='+encodeURIComponent(_nhlTok)
+      :'/api/cached?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok);
+    var res=await fetch(url);
     if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
     if(!res.ok){ throw new Error('Could not load picks.'); }
     var data=await res.json();
-    renderResults(data);
-    if(st && data.picks){ st.textContent=(data.qualified||0)+' players qualified -- '+data.picks.length+' top picks -- '+(data.date||''); }
-  }catch(e){ if(st) st.textContent=''; alert(e.message||'Could not load picks. Please try again.'); }
-  finally{ btn.disabled=false; btn.textContent=orig; }
-}
-
-// STEP 2: Run an explicit, non-persistent simulation.
-async function runPicks(){
-  var btn = document.getElementById('runBtn');
-  var st = document.getElementById('statusMsg');
-  var out = document.getElementById('out');
-  var dt = document.getElementById('datePicker').value;
-  btn.disabled = true;
-  btn.textContent = 'Simulating...';
-  st.textContent = 'Running a simulation for ' + dt + '...';
-  out.innerHTML = '<div class="loading"><div class="spin"></div>' +
-    '<p style="color:#9ca3af;margin-bottom:16px" id="prog-stage">Starting...</p>' +
-    '<div style="background:rgba(245,158,11,.1);border-radius:6px;height:8px;width:280px;margin:0 auto 8px;overflow:hidden">' +
-    '<div id="prog-bar" style="height:100%;width:5%;background:#f59e0b;border-radius:6px;transition:width .5s"></div></div>' +
-    '<p style="color:#6b7280;font-size:.8rem" id="prog-pct">5%</p></div>';
-
-  // Poll progress every 2 seconds
-  var pollTimer = setInterval(async function(){
-    try{
-      var pr = await fetch('/api/progress');
-      var pd = await pr.json();
-      var bar = document.getElementById('prog-bar');
-      var stg = document.getElementById('prog-stage');
-      var pct = document.getElementById('prog-pct');
-      if(bar){ bar.style.width = pd.pct + '%'; }
-      if(stg){ stg.textContent = pd.stage; }
-      if(pct){ pct.textContent = pd.pct + '%'; }
-    }catch(e){}
-  }, 2000);
-
-  try {
-    var _nhlTok=localStorage.getItem('__mpa_token')||'';
-    var res = await fetch('/api/picks?target_date=' + dt + '&simulate=true&token=' + encodeURIComponent(_nhlTok));
-    var data = await res.json();
     if(data.no_games){
-      out.innerHTML = '<div style="text-align:center;padding:40px 20px;color:#9ca3af"><h2 style="color:#f59e0b;margin-bottom:8px">No Games Today</h2><p>' + (data.message || ('No NHL games scheduled for ' + dt + '.')) + ' Check back on game day.</p></div>';
-      st.textContent = '';
-    } else if(data.error){
-      out.innerHTML = '<div class="err-box">' + data.error + '</div>';
-      st.textContent = '';
-    } else {
-      renderResults(data);
-      if(st) st.textContent = data.simulation
-        ? 'SIMULATION ONLY — historical results are shown below; not saved or tracked'
-        : data.unpriced
-        ? 'Model picks generated — sportsbook prices unavailable'
-        : data.qualified + ' players qualified -- ' + data.picks.length + ' top picks -- ' + dt;
+      if(out)out.innerHTML='<div style="text-align:center;padding:40px 20px;color:#9ca3af"><h2 style="color:#f59e0b;margin-bottom:8px">No NHL Games</h2><p>'+(data.message||('No NHL games scheduled for '+dt+'.'))+'</p></div>';
+      if(st)st.textContent='';
+      return;
     }
-  } catch(e) {
-    out.innerHTML = '<div class="err-box">Error: ' + e.message + '</div>';
-  } finally {
-    clearInterval(pollTimer);
-    btn.disabled = false;
-    btn.textContent = 'Run Simulation';
-  }
+    if(data.error) throw new Error(data.error);
+    renderResults(data);
+    if(isHistorical&&data.historicalTrackRecord){
+      _nhlTrkReplay=data.historicalTrackRecord;
+      var trkDate=document.getElementById('nhlTrkDate');
+      if(trkDate)trkDate.value=dt;
+      _nhlTrkDayName();
+      if(!_nhlTrkData)_nhlTrkData={dates:[],stake:20};
+      renderNhlTrackDay();
+    }
+    if(st && data.picks){
+      st.textContent=isHistorical
+        ?'HISTORICAL REPLAY — pick board and Track Record updated for '+dt+'; not added to the official record'
+        :(data.qualified||0)+' players qualified -- '+data.picks.length+' top picks -- '+(data.date||'');
+    }
+  }catch(e){ if(st) st.textContent=''; alert(e.message||'Could not load picks. Please try again.'); }
+  finally{if(pollTimer)clearInterval(pollTimer);btn.disabled=false;btn.textContent=orig;}
 }
 
 function rateClass(r){ return r >= 90 ? 'green' : r >= 80 ? 'gold' : 'red-txt'; }
@@ -3218,7 +3277,7 @@ function downloadNhlMyBetsCSV(){
   document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
 }
 // ── NHL Track Record ──────────────────────────────────────────────────────────
-var _nhlTrkData=null,_nhlTrkTabMode='cat';
+var _nhlTrkData=null,_nhlTrkReplay=null,_nhlTrkTabMode='cat';
 function _nhlTrkDayName(){
   var dp=document.getElementById('nhlTrkDate'),dn=document.getElementById('nhlTrkDayName');
   if(!dp||!dn) return;
@@ -3259,11 +3318,14 @@ function renderNhlTrackDay(){
   var dp=document.getElementById('nhlTrkDate');
   var selDate=dp?dp.value:'';
   var dates=_nhlTrkData.dates||[];
-  var dayData=selDate?dates.find(function(d){return String(d.date||'').slice(0,10)===selDate;}):null;
+  var savedDay=selDate?dates.find(function(d){return String(d.date||'').slice(0,10)===selDate;}):null;
+  var replayDay=selDate&&_nhlTrkReplay&&String(_nhlTrkReplay.date||'').slice(0,10)===selDate?_nhlTrkReplay:null;
+  var dayData=replayDay||savedDay;
+  var isReplay=!!replayDay;
   var sumEl=document.getElementById('nhlTrkSummary'),bodyEl=document.getElementById('nhlTrkBody');
   if(!sumEl||!bodyEl) return;
   if(selDate&&!dayData){
-    sumEl.innerHTML='<p style="color:#facc15;padding:12px;text-align:center">No saved NHL pick snapshot exists for '+selDate+'. Historical results can only be graded from picks captured before that slate began.</p>';
+    sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 10px">No saved official NHL pick snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.78rem;margin:0">Choose that date above and click <b style="color:#67e8f9">Get Picks</b> to show its historical pick board and replay Track Record.</p></div>';
     bodyEl.innerHTML='';
     return;
   }
@@ -3279,21 +3341,30 @@ function renderNhlTrackDay(){
   var stake=_nhlTrkData.stake||20;
   var wins=decided.filter(function(r){return r.result==='WIN';}).length;
   var losses=decided.length-wins;
-  var pending=rows.length-decided.length;
+  var pushes=rows.filter(function(r){return r.result==='PUSH';}).length;
+  var voids=rows.filter(function(r){return r.result==='VOID';}).length;
+  var pending=rows.length-decided.length-pushes-voids;
   var netPL=_withOdds.reduce(function(a,r){return a+(r.profit||0);},0);
   var totalStaked=_withOdds.length*stake;
   var roi=totalStaked?(netPL/totalStaked*100):null;
   var rate=decided.length?(wins/decided.length*100):null;
   var plColor=netPL>=0?'#4ade80':'#f87171';
-  sumEl.innerHTML='<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+  var replayNote=isReplay?'<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(56,189,248,.35);border-radius:10px;background:rgba(14,116,144,.1);color:#bae6fd;font-size:.76rem;font-weight:700">'+(dayData.note||'Historical replay only — excluded from the official Track Record.')+'</div>':'';
+  var voidNotes=isReplay&&voids&&dayData.summary&&dayData.summary.void_reasons
+    ?'<div style="margin:-4px 0 14px;padding:10px 12px;border-radius:10px;background:#111827;color:#cbd5e1;font-size:.76rem"><b style="color:#facc15">'+voids+' void call'+(voids===1?'':'s')+'</b> — '+dayData.summary.void_reasons.map(function(v){return v.count+'× '+v.reason;}).join(' · ')+'</div>'
+    :'';
+  sumEl.innerHTML=replayNote+'<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
     +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
     +'<span style="font-family:monospace;font-weight:800;color:'+plColor+'">Net '+(netPL>=0?'+$':'-$')+Math.abs(netPL).toFixed(0)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:700;color:'+plColor+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
+      +(pushes?'<span style="color:#facc15;font-size:.8rem;font-weight:800">'+pushes+' push</span>':'')
+      +(voids?'<span style="color:#94a3b8;font-size:.8rem;font-weight:800">'+voids+' void</span>':'')
      +(pending?'<span style="color:#facc15;font-size:.8rem;font-weight:800">'+pending+' pending</span>':'')
     +'<span style="color:#475569;font-size:.8rem">$'+stake+'/play \u00b7 $20 flat</span>'
-    +'</div>';
-  bodyEl.innerHTML=_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(rows):_nhlTrkListHtml(rows);
+      +'</div>'+voidNotes;
+  bodyEl.innerHTML=(isReplay&&dayData.gp?_nhlGpHtml(dayData.gp):'')
+    +(_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(rows):_nhlTrkListHtml(rows));
 }
 function _nhlTrkCatHtml(allRows){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
@@ -3312,10 +3383,12 @@ function _nhlTrkCatHtml(allRows){
   function stats(list){
     var w=list.filter(function(r){return r.result==='WIN';}).length;
     var l=list.filter(function(r){return r.result==='LOSS';}).length;
-    var pending=list.length-w-l;
+    var push=list.filter(function(r){return r.result==='PUSH';}).length;
+    var voids=list.filter(function(r){return r.result==='VOID';}).length;
+    var pending=list.length-w-l-push-voids;
     var priced=list.filter(hasOdds),pl=priced.reduce(function(x,r){return x+(Number(r.profit)||0);},0);
     var staked=priced.length*20,roi=staked?pl/staked*100:null;
-    return {w:w,l:l,pending:pending,pl:pl,roi:roi,rate:(w+l)?w/(w+l)*100:null};
+    return {w:w,l:l,push:push,voids:voids,pending:pending,pl:pl,roi:roi,rate:(w+l)?w/(w+l)*100:null};
   }
   function catLabel(cat,side){return cat+' ('+(side==='OVER'?'Over':'Under')+')';}
   function row(cat,side,list){
@@ -3324,6 +3397,8 @@ function _nhlTrkCatHtml(allRows){
     var rateColor=s.rate==null?'#64748b':(s.rate>=70?'#4ade80':(s.rate>=55?'#facc15':'#f87171'));
     var plColor=s.pl>=0?'#4ade80':'#f87171';
     var record=s.w+' / '+(s.w+s.l);
+    if(s.push) record+=' <span style="color:#facc15;font-size:.68rem">· '+s.push+' push</span>';
+    if(s.voids) record+=' <span style="color:#94a3b8;font-size:.68rem">· '+s.voids+' void</span>';
     if(s.pending) record+=' <span style="color:#facc15;font-size:.68rem">· '+s.pending+' pending</span>';
     return '<tr>'
       +'<td style="color:#e2e8f0;font-weight:700">'+catLabel(cat,side)+'</td>'
@@ -3339,9 +3414,9 @@ function _nhlTrkCatHtml(allRows){
   });
   return html+'</tbody></table></div>';
 }
-function _nhlTrkListHtml(decided){
-  if(!decided.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
-  var sorted=[].concat(decided).sort(function(a,b){return(b.profit||0)-(a.profit||0);});
+function _nhlTrkListHtml(allRows){
+  if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
+  var sorted=[].concat(allRows).sort(function(a,b){return(b.profit||0)-(a.profit||0);});
   var rows=sorted.map(function(r){
     var plColor=r.result==='WIN'?'#4ade80':(r.result==='LOSS'?'#f87171':'#94a3b8');
     var pl=r.profit!=null?((r.profit>=0?'+$':'-$')+Math.abs(r.profit).toFixed(0)):'—';
@@ -3355,10 +3430,11 @@ function _nhlTrkListHtml(decided){
       +'<td style="color:#475569">'+((r.actual!=null)?r.actual:'—')+'</td>'
       +'<td style="font-weight:800;color:'+plColor+'">'+r.result+'</td>'
       +'<td style="font-family:monospace;font-weight:700;color:'+plColor+'">'+pl+'</td>'
+       +'<td style="color:#94a3b8;font-size:.74rem;white-space:normal">'+(r.void_reason||r.line_source||'—')+'</td>'
       +'</tr>';
   }).join('');
   return '<div style="overflow-x:auto"><table class="nhl-trk-tbl">'
-    +'<thead><tr><th>Category</th><th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th></tr></thead>'
+    +'<thead><tr><th>Category</th><th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Void reason</th></tr></thead>'
     +'<tbody>'+rows+'</tbody></table></div>';
 }
 function _nhlGpResult(r, key){
@@ -4653,6 +4729,14 @@ async def api_picks(request: Request, target_date: str = None, token: str = "",
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     if not _verify_hub_token(tok):
         raise HTTPException(status_code=401, detail="Subscription required — please log in via moneypicksarena.com")
+    if simulate:
+        try:
+            replay_date = date.fromisoformat(target_date or "")
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="A valid completed date is required")
+        if replay_date >= date.today():
+            raise HTTPException(status_code=400, detail="Historical replays are available only for completed dates")
+        target_date = replay_date.isoformat()
     key = target_date or date.today().isoformat()
     cached = None if simulate else _cache_get("nhl", key)
     if cached:
@@ -4661,6 +4745,26 @@ async def api_picks(request: Request, target_date: str = None, token: str = "",
     if "error" not in result and not simulate:
         _cache_set("nhl", key, result)
     return JSONResponse(result)
+
+
+@app.get("/api/historical-track-replay")
+async def nhl_historical_track_replay(request: Request, date_str: str,
+                                      token: str = ""):
+    """Return a view-only historical replay; never save it to the ledger."""
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not _verify_hub_token(tok) or not _is_admin_token(tok):
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        replay_date = date.fromisoformat(date_str)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="A valid historical date is required")
+    if replay_date >= date.today():
+        raise HTTPException(status_code=400, detail="Choose a completed NHL date")
+    result = await run_picks(date_str, simulate=True)
+    if result.get("error") or result.get("no_games"):
+        raise HTTPException(status_code=400, detail=result.get("error") or result.get("message") or
+                            "The historical replay could not be generated")
+    return JSONResponse(_nhl_historical_replay_payload(result))
 
 
 _CRON_BUSY_NHL = False
