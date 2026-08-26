@@ -2000,9 +2000,8 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
         simulate=simulate, allow_fallback=unpriced_mode and not simulate,
         lineup_maps=[sv_lines_map],
     )
-    _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
-
     # ── Game Predictor ─────────────────────────────────────────────────────
+    _progress = {"stage": "Building Game Predictor...", "done": len(pool), "total": len(pool), "pct": 98}
     try:
         _gp_data   = await _nhl_gp_fetch_all(target_date, season)
         game_preds = _nhl_gp_predict(games, _gp_data)
@@ -2062,6 +2061,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             "other missing player lines use a model estimate. Historical results "
             "below are display only and are not cached or tracked."
         )
+        _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
         return _result
     # Persist the pre-game player and GP snapshots before building the hub
     # shell, so a read-only hub snapshot can also show the current slate as
@@ -2099,6 +2099,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
         push_picks_to_replit("nhl", _result, html=_snapshot_html)
     except Exception as _e:
         print(f"[replit_push] nhl push failed: {_e}")
+    _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
     return _result
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3551,9 +3552,9 @@ function renderNhlTrackDay(){
     +'<span style="color:#475569;font-size:.8rem">$'+stake.toFixed(2)+'/play \u00b7 '+_withOdds.length+' priced plays</span>'
       +'</div>'+voidNotes;
   bodyEl.innerHTML=(isReplay&&dayData.gp?_nhlGpHtml(dayData.gp):'')
-    +(_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(rows):_nhlTrkListHtml(rows));
+     +(_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(rows,stake):_nhlTrkListHtml(rows));
 }
-function _nhlTrkCatHtml(allRows){
+ function _nhlTrkCatHtml(allRows,stake){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var cats={},catOrder=['Shots on Goal','Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
   allRows.forEach(function(r){
