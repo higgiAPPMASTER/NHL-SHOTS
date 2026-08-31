@@ -2385,13 +2385,32 @@ body.is-admin #parlayCard{display:block}
 
   <div class="card" id="parlayCard" style="text-align:center;max-width:600px;margin:20px auto 0">
     <h2 style="font-family:'Playfair Display',serif;font-size:1.3rem;font-weight:700;color:#fff;margin-bottom:6px">🎰 Auto Parlay Builder <span style="font-size:.7rem;color:#777;font-family:sans-serif">admin only</span></h2>
-    <p style="font-size:.74rem;color:#888;margin-bottom:14px">Best available legs from today&#39;s board — priced odds combined</p>
+    <p style="font-size:.74rem;color:#888;margin-bottom:14px">Best available legs from today&#39;s selected categories — priced odds combined</p>
     <div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">
       <label style="color:#9ca3af;font-size:.85rem;font-weight:600">Legs
         <select id="parlayLegs" style="background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:8px;padding:8px 12px;font-size:.9rem;font-weight:700;margin-left:6px">
           <option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
         </select>
       </label>
+      <div style="position:relative;display:inline-block">
+        <button class="btn-run" id="nhl-parlay-cats-btn" onclick="toggleNhlCatMenu(event)" style="background:#1f2937">&#9776; Categories (10/10) &#9662;</button>
+        <div id="nhl-parlay-cats-menu" style="display:none;position:absolute;z-index:60;top:calc(100% + 6px);left:0;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:10px;padding:10px 12px;min-width:220px;box-shadow:0 12px 34px rgba(0,0,0,.55);text-align:left">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
+            <span style="font-size:.63rem;color:#888;font-weight:800;letter-spacing:.06em">PARLAY CATEGORIES</span>
+            <span style="font-size:.63rem"><a onclick="_nhlParlayCatSetAll(true)" style="color:#63cab7;cursor:pointer;font-weight:800">All</a> <span style="color:#444">·</span> <a onclick="_nhlParlayCatSetAll(false)" style="color:#ff8a65;cursor:pointer;font-weight:800">None</a></span>
+          </div>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="SHOTS_O" checked onchange="_nhlParlayCatChanged()"> Shots on Goal — OVER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="SHOTS_U" checked onchange="_nhlParlayCatChanged()"> Shots on Goal — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="POINTS_O" checked onchange="_nhlParlayCatChanged()"> Points (1+) — OVER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="POINTS_U" checked onchange="_nhlParlayCatChanged()"> Points (1+) — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="ASSISTS_O" checked onchange="_nhlParlayCatChanged()"> Assists (1+) — OVER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="ASSISTS_U" checked onchange="_nhlParlayCatChanged()"> Assists (1+) — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="GOALS_O" checked onchange="_nhlParlayCatChanged()"> Goals (1+) — OVER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="GOALS_U" checked onchange="_nhlParlayCatChanged()"> Goals (1+) — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="SAVES_O" checked onchange="_nhlParlayCatChanged()"> Goalie Saves — OVER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="SAVES_U" checked onchange="_nhlParlayCatChanged()"> Goalie Saves — UNDER</label>
+        </div>
+      </div>
       <button class="btn-run" onclick="buildParlay()">Build Best Parlay</button>
       <button class="btn-run" onclick="generateParlay()" style="background:#1f2937">🎲 Generate New</button>
     </div>
@@ -2463,13 +2482,28 @@ function _decToAm(d){if(!d||d<=1)return null;return d>=2?'+'+Math.round((d-1)*10
 function _fmtOdds(o){if(o==null||o==='')return null;var s=String(o).trim();if(!s||s==='0')return null;return (s.charAt(0)==='-'||s.charAt(0)==='+')?s:'+'+s;}
 function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(odds);if(isNaN(a)||a===0)return true;return a>=-500;}
 function _legScore(c){return (c.hasOdds?1:0)*1e9+(c.rate||0)*1e4+(c.dec?Math.min(c.dec,11)*100:0);}
+window.NHL_PARLAY_CATS = {SHOTS_O:true,SHOTS_U:true,POINTS_O:true,POINTS_U:true,ASSISTS_O:true,ASSISTS_U:true,GOALS_O:true,GOALS_U:true,SAVES_O:true,SAVES_U:true};
+function _nhlParlayCatCount(){var n=0,t=0;for(var k in window.NHL_PARLAY_CATS){t++;if(window.NHL_PARLAY_CATS[k])n++;}return n+'/'+t;}
+function _paintNhlParlayCatBtn(){var b=document.getElementById('nhl-parlay-cats-btn');if(b)b.innerHTML='&#9776; Categories ('+_nhlParlayCatCount()+') &#9662;';}
+function toggleNhlCatMenu(e){if(e)e.stopPropagation();var m=document.getElementById('nhl-parlay-cats-menu');if(m)m.style.display=m.style.display==='block'?'none':'block';}
+function _syncNhlParlayCats(){var cbs=document.querySelectorAll('.nhl-parlay-cat-cb');for(var i=0;i<cbs.length;i++)window.NHL_PARLAY_CATS[cbs[i].value]=cbs[i].checked;}
+function _nhlParlayCatChanged(){_syncNhlParlayCats();_paintNhlParlayCatBtn();if((document.getElementById('parlayResult').innerHTML||'').trim())buildParlay();}
+function _nhlParlayCatSetAll(v){var cbs=document.querySelectorAll('.nhl-parlay-cat-cb');for(var i=0;i<cbs.length;i++)cbs[i].checked=v;_nhlParlayCatChanged();}
+document.addEventListener('DOMContentLoaded',function(){_syncNhlParlayCats();_paintNhlParlayCatBtn();});
 function _nhlLeg(p){
   var market=p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
   var line=p.realLine;
   if(line==null) return null;
-  var rate=(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
-  var odds=p.realOdds||'';var dec=_amToDec(odds);
-  return {player:p.name,team:p.team||'',opp:p.opponent||'',market:market,dir:'OVER',line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec};
+  var dir=p._parlaySide==='UNDER'?'UNDER':'OVER';
+  var rate=dir==='UNDER'
+    ?(p.underRate||p.underRateAny||p.underRateVo||0)
+    :(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
+  var odds=dir==='UNDER'?(p.realUnderOdds||''):(p.realOdds||'');var dec=_amToDec(odds);
+  return {player:p.name,team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec};
+}
+function _nhlParlayCatKey(c){
+  var base={'Shots on Goal':'SHOTS','Points (1+)':'POINTS','Assists (1+)':'ASSISTS','Goals (1+)':'GOALS','Goalie Saves':'SAVES'}[c.market]||'SHOTS';
+  return base+(c.dir==='UNDER'?'_U':'_O');
 }
 function _parlayPool(){
   var plays=window.__NHL_PLAYS__||[];var byP={};
@@ -2477,6 +2511,7 @@ function _parlayPool(){
     if(!p||!p.name)return;
     var c=_nhlLeg(p);
     if(!c)return;
+    if(window.NHL_PARLAY_CATS&&window.NHL_PARLAY_CATS[_nhlParlayCatKey(c)]===false)return;
     if(!_floorOk(c.odds))return;
     var cur=byP[c.player];
     if(!cur||_legScore(c)>_legScore(cur))byP[c.player]=c;
@@ -2492,6 +2527,9 @@ function _renderParlay(randomize){
   var n=parseInt(sel?sel.value:'3',10)||3;
   var out=document.getElementById('parlayResult');
   if(!out)return;
+  _syncNhlParlayCats();
+  var anyCat=false;for(var cat in window.NHL_PARLAY_CATS){if(window.NHL_PARLAY_CATS[cat]){anyCat=true;break;}}
+  if(!anyCat){out.innerHTML='<div style="color:#f87171;padding:10px">Pick at least one category from the Categories menu.</div>';return;}
   var cands=_parlayPool();
   if(!cands.length){out.innerHTML='<div style="color:#888;padding:10px">Run today&#39;s picks first, then build a parlay.</div>';return;}
   if(cands.length<n){out.innerHTML='<div style="color:#f87171;padding:10px">Only '+cands.length+' qualifying play'+(cands.length!==1?'s':'')+' on the board. Pick a smaller parlay.</div>';return;}
@@ -3245,7 +3283,17 @@ function _nhlPaint(q){
 
   document.getElementById('nhlBody').innerHTML = h;
   // Parlay pool always reflects the full (unfiltered) slate regardless of search.
-  window.__NHL_PLAYS__ = (raw.picks||[]).concat(raw.rest||[]).concat(raw.ptsPicks||[]).concat(raw.ptsRest||[]).concat(raw.astPicks||[]).concat(raw.astRest||[]).concat(raw.goalPicks||[]).concat(raw.goalRest||[]).concat(raw.savesPicks||[]).concat(raw.savesRest||[]);
+  function _nhlParlaySide(arr, side){return (arr||[]).map(function(p){return Object.assign({},p,{_parlaySide:side});});}
+  window.__NHL_PLAYS__ = _nhlParlaySide(raw.picks,'OVER').concat(_nhlParlaySide(raw.rest,'OVER'))
+    .concat(_nhlParlaySide(raw.ptsPicks,'OVER')).concat(_nhlParlaySide(raw.ptsRest,'OVER'))
+    .concat(_nhlParlaySide(raw.astPicks,'OVER')).concat(_nhlParlaySide(raw.astRest,'OVER'))
+    .concat(_nhlParlaySide(raw.goalPicks,'OVER')).concat(_nhlParlaySide(raw.goalRest,'OVER'))
+    .concat(_nhlParlaySide(raw.savesPicks,'OVER')).concat(_nhlParlaySide(raw.savesRest,'OVER'))
+    .concat(_nhlParlaySide(raw.shotUnders,'UNDER')).concat(_nhlParlaySide(raw.shotUndersRest,'UNDER'))
+    .concat(_nhlParlaySide(raw.ptsUnders,'UNDER')).concat(_nhlParlaySide(raw.ptsUndersRest,'UNDER'))
+    .concat(_nhlParlaySide(raw.astUnders,'UNDER')).concat(_nhlParlaySide(raw.astUndersRest,'UNDER'))
+    .concat(_nhlParlaySide(raw.goalUnders,'UNDER')).concat(_nhlParlaySide(raw.goalUndersRest,'UNDER'))
+    .concat(_nhlParlaySide(raw.savesUnders,'UNDER')).concat(_nhlParlaySide(raw.savesUndersRest,'UNDER'));
 }
 
 function nhlToggle(n){
