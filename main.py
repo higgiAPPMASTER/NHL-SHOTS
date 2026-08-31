@@ -4154,7 +4154,11 @@ def _nhl_save_picks_snapshot(date_str: str, result: dict):
                 "name": p.get("name", ""), "pid": p.get("pid"),
                 "team": p.get("team", ""), "category": cat,
                 "stat_key": sk, "side": side, "line": line,
-                "odds": odds, "score": p.get("score") or p.get("ptsScore") or 0,
+                "odds": odds,
+                # Every market uses dispScore for the live lock board. Keep
+                # that score in the frozen snapshot so grading can create the
+                # duplicate 80-100% Locks record alongside the base category.
+                "score": p.get("score") or p.get("dispScore") or p.get("ptsScore") or 0,
                 "rank": rank, "is_overflow": ovf,
             })
     if not flat:
