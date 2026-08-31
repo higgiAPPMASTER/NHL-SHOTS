@@ -3257,7 +3257,7 @@ function renderResults(d){
   window.__NHL_RAW__ = d;
   window.__NHL_SEASON__ = d.season || '20252026';
   window.__NHL_DATE__ = d.date || '';
-  document.getElementById('out').innerHTML = '<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" list="nhlPlayerOptions" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div><datalist id="nhlPlayerOptions"></datalist></div></div><div id="nhlBody"></div>';
+  document.getElementById('out').innerHTML = '<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
   _nhlPaint('');
 }
 function _nhlSafe(value){
