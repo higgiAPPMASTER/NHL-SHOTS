@@ -653,7 +653,8 @@ def _played_recently(logs: List[Dict], ref_date: str, days: int = RECENT_DAYS) -
     if not logs:
         return False
     try:
-        cutoff = date.fromisoformat(ref_date) - timedelta(days=days)
+        ref = date.fromisoformat(ref_date)
+        cutoff = ref - timedelta(days=days)
     except Exception:
         return True  # unparseable ref date -> don't over-filter
     for g in logs:
@@ -661,11 +662,30 @@ def _played_recently(logs: List[Dict], ref_date: str, days: int = RECENT_DAYS) -
         if not d:
             continue
         try:
-            if date.fromisoformat(d) >= cutoff:
+            gd = date.fromisoformat(d)
+            if cutoff <= gd < ref:
                 return True
         except Exception:
             continue
     return False
+
+
+def _pregame_logs(logs: List[Dict], ref_date: str) -> List[Dict]:
+    """Return only games completed before the selected slate date."""
+    if not ref_date:
+        return list(logs or [])
+    try:
+        ref = date.fromisoformat(ref_date)
+    except Exception:
+        return list(logs or [])
+    out = []
+    for g in logs or []:
+        try:
+            if date.fromisoformat((g.get("date") or "")[:10]) < ref:
+                out.append(g)
+        except Exception:
+            continue
+    return out
 
 
 async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
@@ -1305,9 +1325,10 @@ async def get_pts_picks(
     pts_picks, ast_picks, goal_picks, pp_picks = [], [], [], []
     pts_unders, ast_unders, goal_unders, pp_unders = [], [], [], []
     for player, team, opp, hr in all_players:
-        logs = logs_map.get(player["id"], [])
+        source_logs = logs_map.get(player["id"], [])
+        logs = _pregame_logs(source_logs, target_date)
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
-        if target_date and not _played_recently(logs, target_date):
+        if target_date and not _played_recently(source_logs, target_date):
             continue
 
         # Career H/A vs today's opponent — cap at last 10 for consistency w/ shots
@@ -1334,7 +1355,8 @@ async def get_pts_picks(
                         line_source = sb_info.get("source", "OddsAPI")
                         break
             if analysis_line is None:
-                return None
+                analysis_line = base_line
+                line_source = "No book line"
             posted_line = line_source not in ("Simulation", "Model", "No book line")
             real_line = analysis_line if posted_line or line_source == "Simulation" else None
             line = analysis_line
@@ -1366,7 +1388,7 @@ async def get_pts_picks(
             rest_days_p = _days_rest(logs, target_date)
             opp_sv = goalie_map.get(opp)
             sim_actual, sim_void_reason = _nhl_sim_actual_from_logs(
-                logs, target_date, hr, opp, stat_key)
+                source_logs, target_date, hr, opp, stat_key)
             return {
                 "name": player["name"], "pid": player["id"], "team": team,
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
@@ -1489,9 +1511,10 @@ async def get_saves_picks(
     picks = []
     unders = []
     for goalie, team, opp, hr in all_goalies:
-        logs = logs_map.get(goalie["id"], [])
+        source_logs = logs_map.get(goalie["id"], [])
+        logs = _pregame_logs(source_logs, target_date)
         # Only goalies actively playing (drops third-string/AHL/injured goalies)
-        if target_date and not _played_recently(logs, target_date):
+        if target_date and not _played_recently(source_logs, target_date):
             continue
         c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
         r_logs = [g for g in logs if g["homeRoad"] == hr][:10]
@@ -1508,14 +1531,8 @@ async def get_saves_picks(
                 break
         line_source = "OddsAPI"
         if real_line is None:
-            if not (simulate or allow_fallback):
-                continue
-            # Simulation-only fallback.  This branch is never used by the
-            # live/cron pipeline unless no book line exists; the caller marks
-            # that unpriced run separately and live cards show the estimate.
-            real_line, line_source = 24.5, "Simulation"
-            if allow_fallback and not simulate:
-                line_source = "No book line"
+            real_line = SAVES_LINE
+            line_source = "Simulation" if simulate else "No book line"
         base_line = real_line
         book_line = real_line if line_source != "No book line" else None
 
@@ -1542,7 +1559,7 @@ async def get_saves_picks(
         rest_days_sv = _days_rest(logs, target_date)
         hot_hits_sv, hot_total_sv = _hot_streak(logs, "saves", base_line, hr, 5)
         sim_actual_sv, sim_void_reason_sv = _nhl_sim_actual_from_logs(
-            logs, target_date, hr, opp, "saves")
+            source_logs, target_date, hr, opp, "saves")
 
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
@@ -1876,15 +1893,15 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
         1 for player in pool
         if player.get("lineSource") == "Historical Odds API"
     )
+    fallback_source = "Simulation" if simulate else "No book line"
+    for player in pool:
+        if player.get("realLine") is None:
+            player.update({
+                "line": 1.5, "realLine": 1.5 if simulate else None, "realOdds": "",
+                "realUnderOdds": "", "lineSource": fallback_source,
+                "estLine": 1.5,
+            })
     if simulate or unpriced_mode:
-        fallback_source = "Simulation" if simulate else "No book line"
-        for player in pool:
-            if player.get("realLine") is None:
-                player.update({
-                    "line": 1.5, "realLine": 1.5 if simulate else None, "realOdds": "",
-                    "realUnderOdds": "", "lineSource": fallback_source,
-                    "estLine": 1.5,
-                })
         def _fill_sim_map(existing, default_line):
             for player in (skater_rosters or {}).values():
                 for roster_player in player:
@@ -1915,9 +1932,10 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
 
     # ── Steps 2 & 3 - NHL Stats API hit-rate analysis ────────────────────────────
     async def analyze(p: Dict) -> Optional[Dict]:
-        logs = logs_map.get(p["pid"], [])
+        source_logs = logs_map.get(p["pid"], [])
+        logs = _pregame_logs(source_logs, target_date)
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
-        if not _played_recently(logs, target_date):
+        if not _played_recently(source_logs, target_date):
             return None
         book_line = p.get("realLine")
         analysis_line = book_line if book_line is not None else p.get("line")
@@ -1962,7 +1980,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
         proj_edge = round(proj - line, 2)
         proj_pick = "OVER" if proj_edge > 0 else ("UNDER" if proj_edge < 0 else "")
         sim_actual, sim_void_reason = _nhl_sim_actual_from_logs(
-            logs, target_date, hr, opp, "shots")
+            source_logs, target_date, hr, opp, "shots")
 
         # Signal factors
         toi_avg_sec = round(sum(g.get("toi_sec", 0) for g in _ha) / len(_ha)) if _ha else 0
@@ -2516,6 +2534,7 @@ function _decToAm(d){if(!d||d<=1)return null;return d>=2?'+'+Math.round((d-1)*10
 function _fmtOdds(o){if(o==null||o==='')return null;var s=String(o).trim();if(!s||s==='0')return null;return (s.charAt(0)==='-'||s.charAt(0)==='+')?s:'+'+s;}
 function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(odds);if(isNaN(a)||a===0)return true;return a>=-500;}
 function _legScore(c){return (c.hasOdds?1:0)*1e9+(c.rate||0)*1e4+(c.dec?Math.min(c.dec,11)*100:0);}
+function _nhlHasBookLine(p){return !!p&&p.realLine!=null&&['Simulation','Model','No book line'].indexOf(p.lineSource)<0;}
 window.NHL_PARLAY_CATS = {SHOTS_O:true,SHOTS_U:true,POINTS_O:true,POINTS_U:true,ASSISTS_O:true,ASSISTS_U:true,GOALS_O:true,GOALS_U:true,SAVES_O:true,SAVES_U:true};
 function _nhlParlayCatCount(){var n=0,t=0;for(var k in window.NHL_PARLAY_CATS){t++;if(window.NHL_PARLAY_CATS[k])n++;}return n+'/'+t;}
 function _paintNhlParlayCatBtn(){var b=document.getElementById('nhl-parlay-cats-btn');if(b)b.innerHTML='&#9776; Categories ('+_nhlParlayCatCount()+') &#9662;';}
@@ -2527,7 +2546,7 @@ document.addEventListener('DOMContentLoaded',function(){_syncNhlParlayCats();_pa
 function _nhlLeg(p){
   var market=p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
   var line=p.realLine;
-  if(line==null) return null;
+  if(!_nhlHasBookLine(p)) return null;
   var dir=p._parlaySide==='UNDER'?'UNDER':'OVER';
   var rate=dir==='UNDER'
     ?(p.underRate||p.underRateAny||p.underRateVo||0)
@@ -2767,7 +2786,7 @@ function nhlCard(p,i){
   var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
   var lineHtml=(p.realLine!=null)
     ? `<span class="ln">${p.dispLine}</span> <span class="od">${p.realOdds||''}</span>${_nhlLineSourceBadge(p)}`
-    : `<span class="est">~${p.dispLine}</span>`;
+    : `<span class="est">~${p.dispLine} MODEL</span>`;
   var lastStat=(p.realLine!=null&&p.vsLineTotal)
     ? `<div class="pc-stat"><div class="k">vs Book L10</div><div class="v ${rateClass(p.vsLineRate)}">${p.vsLineHits}/${p.vsLineTotal} (${p.vsLineRate}%)</div></div>`
     : `<div class="pc-stat"><div class="k">Under L10</div><div class="v ${rateClass(p.underRate)}">${p.underHits}/${p.underTotal} (${p.underRate}%)</div></div>`;
@@ -2820,7 +2839,7 @@ function nhlUnderCard(p,i){
   var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
   var lineHtml=(p.realLine!=null)
     ? `<span class="ln">U ${p.dispLine}</span> <span class="od">${p.realUnderOdds||''}</span>${_nhlLineSourceBadge(p)}`
-    : `<span class="est">U ~${p.dispLine}</span>`;
+    : `<span class="est">U ~${p.dispLine} MODEL</span>`;
   var voHtml=p.underTotVo?`<span class="${underClass(p.underRateVo)}">${p.underHitsVo}/${p.underTotVo} (${p.underRateVo}%)</span>`:'<span class="gray">—</span>';
   var anHtml=p.underTotAny?`<span class="${underClass(p.underRateAny)}">${p.underHitsAny}/${p.underTotAny} (${p.underRateAny}%)</span>`:'<span class="gray">—</span>';
   return `
@@ -3072,7 +3091,7 @@ function buildPtsTable(picks, startNum){
       '<td><span class="tbadge">' + p.team + '</span></td>' +
       '<td><span class="tbadge">' + p.opponent + '</span></td>' +
       '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
-      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~0.5</span>') + '</td>' +
+      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~0.5 MODEL</span>') + '</td>' +
       '<td><span class="gold">' + p.ptsOppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ptsHa10avg + '</span></td>' +
       '<td>' + fmtVsLine(p) + '</td>' +
@@ -3100,7 +3119,7 @@ function buildTable(picks, startNum){
       '<td><span class="tbadge">' + p.team + '</span></td>' +
       '<td><span class="tbadge">' + p.opponent + '</span></td>' +
       '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
-      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.estLine + '</span>') + '</td>' +
+      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.estLine + ' MODEL</span>') + '</td>' +
       '<td><span class="gold">' + p.oppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ha10avg + '</span></td>' +
       '<td>' + fmtVsLine(p) + '</td>' +
@@ -3128,7 +3147,7 @@ function buildNormTable(picks, startNum){
       '<td><span class="tbadge">' + p.team + '</span></td>' +
       '<td><span class="tbadge">' + p.opponent + '</span></td>' +
       '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
-      '<td>' + (p.realLine!=null ? '<span class="real-line">' + p.dispLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.dispLine + '</span>') + '</td>' +
+      '<td>' + (p.realLine!=null ? '<span class="real-line">' + p.dispLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.dispLine + ' MODEL</span>') + '</td>' +
       '<td><span class="gold">' + p.avgA + '</span></td>' +
       '<td><span class="gold">' + p.avg + '</span></td>' +
       '<td>' + fmtVsLine(p) + '</td>' +
@@ -3458,7 +3477,7 @@ function _nhlBetMkt(m){
 var _nhlBetN=0;
 window.__NHL_BET_SRC__=window.__NHL_BET_SRC__||{};
 function _nhlBetBtn(p,forceSide){
-  if(p.realLine==null) return '';
+  if(!_nhlHasBookLine(p)) return '';
   var mk=_nhlBetMkt(p.mkt); if(!mk[0]) return '';
   var side=forceSide||(p.pick==='UNDER'?'UNDER':'OVER');
   var odds=side==='OVER'?(p.realOdds!=null?p.realOdds:p.realUnderOdds):(p.realUnderOdds!=null?p.realUnderOdds:p.realOdds);
