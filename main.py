@@ -1755,7 +1755,8 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
     detail = []
     void_reasons = Counter()
     for result_key, category, stat_key, side, is_overflow in _NHL_TRK_LISTS:
-        for rank, pick in enumerate(result.get(result_key) or [], 1):
+        rank_start = _NHL_TRK_TOP + 1 if is_overflow else 1
+        for rank, pick in enumerate(result.get(result_key) or [], rank_start):
             line = pick.get("realLine")
             if line is None:
                 line = pick.get("line")
@@ -1801,13 +1802,19 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
         result.get("game_predictions") or [],
     ).get("detail") or []
     gp = _nhl_gp_summary(gp_detail) if gp_detail else None
-    wins = sum(1 for row in detail if row["result"] == "WIN")
-    losses = sum(1 for row in detail if row["result"] == "LOSS")
-    pushes = sum(1 for row in detail if row["result"] == "PUSH")
-    voids = sum(1 for row in detail if row["result"] == "VOID")
+    main_detail = [row for row in detail if not row.get("is_overflow")]
+    overflow_detail = [row for row in detail if row.get("is_overflow")]
+    wins = sum(1 for row in main_detail if row["result"] == "WIN")
+    losses = sum(1 for row in main_detail if row["result"] == "LOSS")
+    pushes = sum(1 for row in main_detail if row["result"] == "PUSH")
+    voids = sum(1 for row in main_detail if row["result"] == "VOID")
+    overflow_wins = sum(1 for row in overflow_detail if row["result"] == "WIN")
+    overflow_losses = sum(1 for row in overflow_detail if row["result"] == "LOSS")
+    overflow_pushes = sum(1 for row in overflow_detail if row["result"] == "PUSH")
+    overflow_voids = sum(1 for row in overflow_detail if row["result"] == "VOID")
     return {
         "date": result.get("date") or result.get("targetDate"),
-        "detail": detail, "gp": gp,
+        "detail": main_detail, "overflow_detail": overflow_detail, "gp": gp,
         "is_historical_replay": True,
         "note": (
             "Historical replay only — it is not an official pre-game snapshot "
@@ -1822,6 +1829,13 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
                 {"reason": reason, "count": count}
                 for reason, count in void_reasons.most_common()
             ],
+        },
+        "overflow_summary": {
+            "wins": overflow_wins, "losses": overflow_losses,
+            "pushes": overflow_pushes, "voids": overflow_voids,
+            "decided": overflow_wins + overflow_losses,
+            "percentage": round(overflow_wins / (overflow_wins + overflow_losses) * 100, 1)
+            if overflow_wins + overflow_losses else None,
         },
     }
 
@@ -2417,7 +2431,7 @@ body.is-admin #parlayCard{display:block}
 
 <nav>
   <div class="logo">Money <span>Picks</span> Arena</div>
-  <div style="display:flex;gap:8px;align-items:center"><button onclick="openNhlGPRecord()" style="background:#0e7490;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128302; GP Record</button><button onclick="document.getElementById('nhl-track-section').scrollIntoView({behavior:'smooth',block:'start'})" style="background:#065f46;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128202; Track Record</button><button class="admin-only" onclick="openNhlMyBets()" style="background:#0e7490;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128176; My Bets</button></div>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"><button onclick="openNhlGPRecord()" style="background:#0e7490;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128302; GP Record</button><button onclick="document.getElementById('nhl-track-section').scrollIntoView({behavior:'smooth',block:'start'})" style="background:#065f46;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128202; Track Record</button><button onclick="openNhlOverflowRecord()" style="background:#b45309;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#11088; NHL Overflow</button><button class="admin-only" onclick="openNhlMyBets()" style="background:#0e7490;color:#fff;border:none;border-radius:10px;padding:9px 16px;font-weight:800;font-size:.82rem;cursor:pointer;white-space:nowrap">&#128176; My Bets</button></div>
 </nav>
 
 <style>
@@ -2735,10 +2749,14 @@ async function getPicks(){
     if(isHistorical&&data.historicalTrackRecord){
       _nhlTrkReplay=data.historicalTrackRecord;
       var trkDate=document.getElementById('nhlTrkDate');
+      var ovfDate=document.getElementById('nhlOvfDate');
       if(trkDate)trkDate.value=dt;
+      if(ovfDate)ovfDate.value=dt;
       _nhlTrkDayName();
+      _nhlOvfDayName();
       if(!_nhlTrkData)_nhlTrkData={dates:[],stake:20};
       renderNhlTrackDay();
+      renderNhlOverflowDay();
     }
     if(st && data.picks){
       st.textContent=isHistorical
@@ -3761,16 +3779,38 @@ function downloadNhlMyBetsCSV(){
   document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
 }
 // ── NHL Track Record ──────────────────────────────────────────────────────────
-var _nhlTrkData=null,_nhlTrkReplay=null,_nhlTrkTabMode='cat';
+var _nhlTrkData=null,_nhlTrkReplay=null,_nhlTrkTabMode='cat',_nhlOvfTabMode='cat';
 function _nhlTrkDayName(){
   var dp=document.getElementById('nhlTrkDate'),dn=document.getElementById('nhlTrkDayName');
   if(!dp||!dn) return;
   try{var days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
     dn.textContent=days[new Date(dp.value+'T12:00:00').getDay()];}catch(e){dn.textContent='';}
 }
+function _nhlOvfDayName(){
+  var dp=document.getElementById('nhlOvfDate'),dn=document.getElementById('nhlOvfDayName');
+  if(!dp||!dn) return;
+  try{var days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    dn.textContent=days[new Date(dp.value+'T12:00:00').getDay()];}catch(e){dn.textContent='';}
+}
+function _nhlRecordDateChanged(sourceId){
+  var source=document.getElementById(sourceId);
+  if(!source)return;
+  var other=document.getElementById(sourceId==='nhlTrkDate'?'nhlOvfDate':'nhlTrkDate');
+  if(other)other.value=source.value;
+  _nhlTrkDayName();_nhlOvfDayName();
+  renderNhlTrackDay();renderNhlOverflowDay();
+}
+function openNhlOverflowRecord(){
+  var section=document.getElementById('nhl-overflow-section');
+  if(section)section.scrollIntoView({behavior:'smooth',block:'start'});
+  if(_nhlTrkData)renderNhlOverflowDay();
+  else loadNhlTrackRecord();
+}
 async function loadNhlTrackRecord(manualGrade){
   var body=document.getElementById('nhlTrkBody');
+  var ovfBody=document.getElementById('nhlOvfBody');
   if(body) body.innerHTML='<p style="color:#94a3b8;padding:24px">Loading\u2026</p>';
+  if(ovfBody) ovfBody.innerHTML='<p style="color:#94a3b8;padding:24px">Loading\u2026</p>';
   try{
     // Hub-hosted snapshots include a read-only Track Record payload.  That
     // keeps results visible even when the live Render service is waking up or
@@ -3778,6 +3818,7 @@ async function loadNhlTrackRecord(manualGrade){
     if(window.__INITIAL_TRACK_RECORD__&&!manualGrade){
       _nhlTrkData=window.__INITIAL_TRACK_RECORD__;
       renderNhlTrackDay();
+      renderNhlOverflowDay();
       return;
     }
     var dp=document.getElementById('nhlTrkDate');
@@ -3786,8 +3827,10 @@ async function loadNhlTrackRecord(manualGrade){
     if(!r.ok) throw new Error(await r.text());
     _nhlTrkData=await r.json();
     renderNhlTrackDay();
+    renderNhlOverflowDay();
   }catch(e){
     if(body) body.innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading track record')+'</p>';
+    if(ovfBody) ovfBody.innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading overflow track record')+'</p>';
   }
 }
 function nhlTrkSetTab(tab){
@@ -3796,6 +3839,13 @@ function nhlTrkSetTab(tab){
   if(bc) bc.style.background=tab==='cat'?'#065f46':'#1e293b';
   if(bl) bl.style.background=tab==='list'?'#065f46':'#1e293b';
   renderNhlTrackDay();
+}
+function nhlOvfSetTab(tab){
+  _nhlOvfTabMode=tab;
+  var bc=document.getElementById('nhlOvfBtnCat'),bl=document.getElementById('nhlOvfBtnList');
+  if(bc) bc.style.background=tab==='cat'?'#b45309':'#1e293b';
+  if(bl) bl.style.background=tab==='list'?'#b45309':'#1e293b';
+  renderNhlOverflowDay();
 }
 function _nhlTrkStake(){
   var n=parseFloat(localStorage.getItem('nhl_track_stake')||'20');
@@ -3806,6 +3856,7 @@ function _nhlTrkSetStake(input){
   if(!isFinite(n)||n<=0){input.value=_nhlTrkStake().toFixed(2);return;}
   localStorage.setItem('nhl_track_stake',String(Math.round(n*100)/100));
   renderNhlTrackDay();
+  renderNhlOverflowDay();
 }
 function _nhlTrkProfit(row,stake){
   if(!row||row.result!=='WIN'&&row.result!=='LOSS') return null;
@@ -3813,6 +3864,17 @@ function _nhlTrkProfit(row,stake){
   var odds=parseFloat(row.odds);
   if(!isFinite(odds)||odds===0) return null;
   return row.result==='LOSS'?-stake:(odds>0?stake*odds/100:stake*100/Math.abs(odds));
+}
+function _nhlMainRows(dayData){
+  return ((dayData&&dayData.detail)||[]).filter(function(r){
+    return !r.is_overflow&&r.category!=='NHL Overflow';
+  });
+}
+function _nhlOverflowRows(dayData){
+  if(dayData&&Array.isArray(dayData.overflow_detail))return dayData.overflow_detail;
+  return ((dayData&&dayData.detail)||[]).filter(function(r){
+    return !!r.is_overflow||r.category==='NHL Overflow';
+  });
 }
 function renderNhlTrackDay(){
   if(!_nhlTrkData) return;
@@ -3831,8 +3893,8 @@ function renderNhlTrackDay(){
     return;
   }
   var rows=[];
-  if(dayData) rows=dayData.detail||[];
-  else dates.forEach(function(d){(d.detail||[]).forEach(function(r){rows.push(r);});});
+  if(dayData) rows=_nhlMainRows(dayData);
+  else dates.forEach(function(d){_nhlMainRows(d).forEach(function(r){rows.push(r);});});
   var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
   var _withOdds=decided.filter(function(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';});
   if(!rows.length&&selDate){
@@ -3867,6 +3929,57 @@ function renderNhlTrackDay(){
       +'</div>'+voidNotes;
   bodyEl.innerHTML=(isReplay&&dayData.gp?_nhlGpHtml(dayData.gp):'')
      +(_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(rows,stake):_nhlTrkListHtml(rows));
+}
+function renderNhlOverflowDay(){
+  if(!_nhlTrkData)return;
+  var dp=document.getElementById('nhlOvfDate');
+  var selDate=dp?dp.value:'';
+  var dates=_nhlTrkData.dates||[];
+  var savedDay=selDate?dates.find(function(d){return String(d.date||'').slice(0,10)===selDate;}):null;
+  var replayDay=selDate&&_nhlTrkReplay&&String(_nhlTrkReplay.date||'').slice(0,10)===selDate?_nhlTrkReplay:null;
+  var dayData=replayDay||savedDay;
+  var isReplay=!!replayDay;
+  var sumEl=document.getElementById('nhlOvfSummary'),bodyEl=document.getElementById('nhlOvfBody');
+  if(!sumEl||!bodyEl)return;
+  if(selDate&&!dayData){
+    sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 10px">No saved official NHL overflow snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.78rem;margin:0">Choose that date above and click <b style="color:#fbbf24">Get Picks</b> to show its historical overflow replay.</p></div>';
+    bodyEl.innerHTML='';
+    return;
+  }
+  var rows=[];
+  if(dayData)rows=_nhlOverflowRows(dayData);
+  else dates.forEach(function(d){_nhlOverflowRows(d).forEach(function(r){rows.push(r);});});
+  var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
+  var withOdds=decided.filter(function(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';});
+  if(!rows.length&&selDate){
+    sumEl.innerHTML='<p style="color:#94a3b8;padding:12px;text-align:center">No ranks 11–20 overflow picks were recorded for '+selDate+'.</p>';
+    bodyEl.innerHTML='';
+    return;
+  }
+  var stake=_nhlTrkStake();
+  var wins=decided.filter(function(r){return r.result==='WIN';}).length;
+  var losses=decided.length-wins;
+  var pushes=rows.filter(function(r){return r.result==='PUSH';}).length;
+  var voids=rows.filter(function(r){return r.result==='VOID';}).length;
+  var pending=rows.length-decided.length-pushes-voids;
+  var netPL=withOdds.reduce(function(a,r){return a+(_nhlTrkProfit(r,stake)||0);},0);
+  var totalStaked=withOdds.length*stake;
+  var roi=totalStaked?(netPL/totalStaked*100):null;
+  var rate=decided.length?(wins/decided.length*100):null;
+  var plColor=netPL>=0?'#4ade80':'#f87171';
+  var replayNote=isReplay?'<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(245,158,11,.35);border-radius:10px;background:rgba(180,83,9,.1);color:#fde68a;font-size:.76rem;font-weight:700">'+(dayData.note||'Historical overflow replay only — excluded from the official Overflow Track Record.')+'</div>':'';
+  sumEl.innerHTML=replayNote+'<div style="background:#1c1408;border:1px solid #5b3d12;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+    +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
+    +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
+    +'<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" style="width:82px;background:#0b1120;border:1px solid #78350f;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>'
+    +'<span style="font-family:monospace;font-weight:800;color:'+plColor+'">Net '+(netPL>=0?'+$':'-$')+Math.abs(netPL).toFixed(2)+'</span>'
+    +(roi!=null?'<span style="font-family:monospace;font-weight:700;color:'+plColor+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
+    +(pushes?'<span style="color:#facc15;font-size:.8rem;font-weight:800">'+pushes+' push</span>':'')
+    +(voids?'<span style="color:#94a3b8;font-size:.8rem;font-weight:800">'+voids+' void</span>':'')
+    +(pending?'<span style="color:#facc15;font-size:.8rem;font-weight:800">'+pending+' pending</span>':'')
+    +'<span style="color:#64748b;font-size:.8rem">$'+stake.toFixed(2)+'/play · '+withOdds.length+' priced plays</span>'
+    +'</div>';
+  bodyEl.innerHTML=_nhlOvfTabMode==='cat'?_nhlTrkCatHtml(rows,stake):_nhlTrkListHtml(rows,true);
 }
  function _nhlTrkCatHtml(allRows,stake){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
@@ -3916,7 +4029,7 @@ function renderNhlTrackDay(){
   });
   return html+'</tbody></table></div>';
 }
-function _nhlTrkListHtml(allRows){
+function _nhlTrkListHtml(allRows,showRank){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var stake=_nhlTrkStake();
   var sorted=[].concat(allRows).sort(function(a,b){return(_nhlTrkProfit(b,stake)||0)-(_nhlTrkProfit(a,stake)||0);});
@@ -3926,6 +4039,7 @@ function _nhlTrkListHtml(allRows){
     var pl=rowProfit!=null?((rowProfit>=0?'+$':'-$')+Math.abs(rowProfit).toFixed(2)):'—';
     var odds=r.odds!=null&&String(r.odds).trim()!==''?(r.odds>0?'+':'')+r.odds:'—';
     return '<tr>'
+      +(showRank?'<td style="color:#fbbf24;font-family:monospace;font-weight:800">#'+(r.rank!=null?r.rank:'—')+'</td>':'')
       +'<td style="color:#94a3b8;font-size:.78rem">'+r.category+'</td>'
       +'<td style="color:#e2e8f0;font-weight:700">'+r.name+'</td>'
       +'<td style="color:#475569">'+r.team+'</td>'
@@ -3938,7 +4052,7 @@ function _nhlTrkListHtml(allRows){
       +'</tr>';
   }).join('');
   return '<div style="overflow-x:auto"><table class="nhl-trk-tbl">'
-    +'<thead><tr><th>Category</th><th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Void reason</th></tr></thead>'
+    +'<thead><tr>'+(showRank?'<th>Rank</th>':'')+'<th>Category</th><th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Void reason</th></tr></thead>'
     +'<tbody>'+rows+'</tbody></table></div>';
 }
 function _nhlGpResult(r, key){
@@ -3983,9 +4097,13 @@ function _nhlGpHtml(gp){
 }
 document.addEventListener('DOMContentLoaded',function(){
   var dp=document.getElementById('nhlTrkDate');
-  if(dp){dp.value=new Date().toISOString().slice(0,10);
-    dp.addEventListener('change',function(){_nhlTrkDayName();renderNhlTrackDay();});}
-  _nhlTrkDayName();
+  var op=document.getElementById('nhlOvfDate');
+  var today=new Date().toISOString().slice(0,10);
+  if(dp){dp.value=today;
+    dp.addEventListener('change',function(){_nhlRecordDateChanged('nhlTrkDate');});}
+  if(op){op.value=today;
+    op.addEventListener('change',function(){_nhlRecordDateChanged('nhlOvfDate');});}
+  _nhlTrkDayName();_nhlOvfDayName();
   loadNhlTrackRecord();
   var top=document.getElementById('nhl-btn-top'),bot=document.getElementById('nhl-btn-bot');
   function _sc(){var y=window.pageYOffset||document.documentElement.scrollTop;
@@ -4172,6 +4290,25 @@ function openNhlGPRecord(){
     </div>
     <div id="nhlTrkSummary"></div>
     <div id="nhlTrkBody"></div>
+  </div>
+</div>
+<!-- NHL Overflow Track Record — ranks 11-20 only -->
+<div id="nhl-overflow-section" style="max-width:960px;margin:0 auto 0;padding:0 16px 40px">
+  <div class="card" style="padding:20px 22px;border-color:rgba(245,158,11,.28)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px;flex-wrap:wrap">
+      <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#11088; NHL Overflow Track Record</h2>
+    </div>
+    <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px">Ranks 11–20 from every existing NHL player-prop category and side. These plays are kept out of the main Top 10 Track Record.</p>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <label style="color:#94a3b8;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Date</label>
+      <input type="date" id="nhlOvfDate" style="background:#0f172a;border:1px solid #78350f;border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:.85rem;outline:none">
+      <span id="nhlOvfDayName" style="color:#fbbf24;font-weight:700;font-size:.9rem"></span>
+      <button onclick="loadNhlTrackRecord(true)" style="background:#b45309;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">&#8635; Grade &amp; Get Results</button>
+      <button id="nhlOvfBtnCat" onclick="nhlOvfSetTab('cat')" style="background:#b45309;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">By Category</button>
+      <button id="nhlOvfBtnList" onclick="nhlOvfSetTab('list')" style="background:#1e293b;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">Full List</button>
+    </div>
+    <div id="nhlOvfSummary"></div>
+    <div id="nhlOvfBody"></div>
   </div>
 </div>
 <!-- Scroll buttons -->
@@ -4468,7 +4605,8 @@ def _nhl_save_picks_snapshot(date_str: str, result: dict):
     """Freeze all pick lists to Supabase so they survive redeploys and can be graded."""
     flat = []
     for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
-        for rank, p in enumerate(result.get(rkey) or [], 1):
+        rank_start = _NHL_TRK_TOP + 1 if ovf else 1
+        for rank, p in enumerate(result.get(rkey) or [], rank_start):
             odds = p.get("realOdds") if side == "OVER" else p.get("realUnderOdds")
             line = p.get("realLine") or p.get("line") or p.get("dispLine")
             flat.append({
@@ -4804,7 +4942,7 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
     lock_rows: list = []
     for (cat, side, is_ovf), ps in by_group.items():
         ps.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
-        for rank, p in enumerate(ps, 1):
+        for relative_rank, p in enumerate(ps, 1):
             pid = str(p.get("pid") or "")
             g = pid_games.get(pid, {}).get(date_str)
             sk = p.get("stat_key")
@@ -4826,18 +4964,28 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
                             profit = round(_nhl_american_profit(odds, _NHL_TRK_STAKE, result_val), 2)
                     except Exception:
                         pass
+            try:
+                rank = int(p.get("rank"))
+            except (TypeError, ValueError):
+                rank = relative_rank
+            if is_ovf and rank <= _NHL_TRK_TOP:
+                # Snapshots saved before the dedicated overflow tracker used
+                # relative ranks 1-10 for their ranks 11-20 lists.
+                rank += _NHL_TRK_TOP
             row = {"name": p.get("name",""), "team": p.get("team",""),
                    "category": cat, "side": side, "stat_key": sk,
                    "line": line_raw, "odds": odds, "rank": rank,
                    "result": result_val, "actual": actual, "profit": profit}
+            row["is_overflow"] = bool(is_ovf)
             if not is_ovf:
                 main_rows.append(row)
             else:
-                ovf_rows.append({**row, "category": "NHL Overflow"})
+                ovf_rows.append(row)
             # Cross-market 80-100% Locks category
             lock_score = float(p.get("dispScore") or p.get("ptsScore") or p.get("score") or 0)
             if lock_score >= 80:
-                lock_rows.append({**row, "category": "80-100% Locks"})
+                lock_rows.append({**row, "category": "80-100% Locks",
+                                  "is_overflow": bool(is_ovf)})
     return {"any_game": any_game, "all_final": all_found,
             "main": main_rows, "overflow": ovf_rows, "locks": lock_rows}
 
@@ -4851,6 +4999,9 @@ def _nhl_aggregate_graded(graded: dict) -> dict:
             rec[0] += 1
         else:
             rec[1] += 1
+    # Sentinel lets the next deployment re-grade older locked snapshots once
+    # so their stored overflow metadata is reflected in the split record.
+    agg["__ovf_v1__"] = {"ALL": [0, 0]}
     return agg
 
 def _nhl_detail_graded(graded: dict) -> list:
@@ -4859,7 +5010,8 @@ def _nhl_detail_graded(graded: dict) -> list:
         if row.get("result") not in ("WIN","LOSS"):
             continue
         out.append({k: row.get(k) for k in
-                    ("name","team","category","side","stat_key","line","odds","rank","result","actual","profit")})
+                    ("name","team","category","side","stat_key","line","odds","rank",
+                     "result","actual","profit","is_overflow")})
     return out
 
 _NHL_TRK_LOCK = _bt_th.Lock()
@@ -4868,9 +5020,14 @@ def _nhl_update_track_ledger(include_date: str = ""):
     from datetime import date as _d
     today = _d.today().isoformat()
     with _NHL_TRK_LOCK:
-        locked = {r["date"] for r in (_nhl_sb_get("mpa_track_ledger", {
+        locked_rows = _nhl_sb_get("mpa_track_ledger", {
             "app": f"eq.{_NHL_TRK_APP}", "category": "eq.__ledger__",
-            "locked": "eq.true", "select": "date", "limit": "500"}) or [])}
+            "locked": "eq.true", "select": "date,detail", "limit": "500"}) or []
+        locked = {
+            r["date"] for r in locked_rows
+            if r.get("date") and isinstance(r.get("detail"), dict)
+            and "__ovf_v1__" in r.get("detail", {})
+        }
         upserts = []
         for d in _nhl_list_snap_dates():
             if d >= today or d in locked:
@@ -5149,9 +5306,66 @@ def _nhl_track_record_payload() -> dict:
         for r in _nhl_load_gp_snapshots() if r.get("date")
     }
     dates = sorted(set(detail_by_date) | set(snapshot_by_date) | set(gp_by_date), reverse=True)
+
+    def _same_line(a, b):
+        try:
+            return float(a) == float(b)
+        except (TypeError, ValueError):
+            return str(a or "") == str(b or "")
+
+    def _split_detail(rows, snapshot):
+        """Classify old detail rows from their frozen snapshot metadata.
+
+        New detail rows carry is_overflow directly. Older locked detail rows
+        predate that field, but their same-day snapshot still retains the
+        source category, rank, side, line, and player identity.
+        """
+        out = []
+        snapshot = snapshot or []
+        for original in rows or []:
+            row = dict(original or {})
+            if "is_overflow" in row:
+                row["is_overflow"] = bool(row.get("is_overflow"))
+                out.append(row)
+                continue
+            candidates = []
+            for saved in snapshot:
+                if row.get("name") and saved.get("name") != row.get("name"):
+                    continue
+                if row.get("team") and saved.get("team") != row.get("team"):
+                    continue
+                if str(row.get("side") or "OVER").upper() != str(saved.get("side") or "OVER").upper():
+                    continue
+                if row.get("stat_key") and saved.get("stat_key") != row.get("stat_key"):
+                    continue
+                if row.get("rank") is not None and saved.get("rank") is not None:
+                    try:
+                        if int(row.get("rank")) != int(saved.get("rank")):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                if row.get("line") is not None and saved.get("line") is not None:
+                    if not _same_line(row.get("line"), saved.get("line")):
+                        continue
+                if row.get("category") not in ("NHL Overflow", "80-100% Locks"):
+                    if saved.get("category") != row.get("category"):
+                        continue
+                candidates.append(saved)
+            if candidates:
+                flags = {bool(saved.get("is_overflow")) for saved in candidates}
+                row["is_overflow"] = True if flags == {True} else False
+                if row.get("category") == "NHL Overflow":
+                    row["category"] = candidates[0].get("category") or row["category"]
+            else:
+                # A legacy overflow label is still safer than allowing it
+                # back into the main record when its snapshot is incomplete.
+                row["is_overflow"] = row.get("category") == "NHL Overflow"
+            out.append(row)
+        return out
+
     result = []
     for d in dates:
-        det = detail_by_date.get(d, [])
+        det = _split_detail(detail_by_date.get(d, []), snapshot_by_date.get(d, []))
         if not det and snapshot_by_date.get(d):
             # A saved player snapshot is the source of truth for an ungraded
             # slate.  Keep its line and odds, but mark the outcome pending.
@@ -5160,10 +5374,13 @@ def _nhl_track_record_payload() -> dict:
                 "category": p.get("category", "?"), "side": p.get("side", "OVER"),
                 "stat_key": p.get("stat_key"), "line": p.get("line"),
                 "odds": p.get("odds"), "rank": p.get("rank"),
+                "is_overflow": bool(p.get("is_overflow")),
                 "result": None, "actual": None, "profit": None,
             } for p in snapshot_by_date[d]]
+        main_det = [row for row in det if not row.get("is_overflow")]
+        overflow_det = [row for row in det if row.get("is_overflow")]
         gp = _nhl_gp_summary(gp_by_date[d]) if d in gp_by_date else None
-        decided = [r for r in det if r.get("result") in ("WIN","LOSS")]
+        decided = [r for r in main_det if r.get("result") in ("WIN","LOSS")]
         wins = sum(1 for r in decided if r["result"] == "WIN")
         losses = len(decided) - wins
         priced = [r for r in decided
@@ -5188,8 +5405,16 @@ def _nhl_track_record_payload() -> dict:
                            "roi": round(e["pl"]/e["staked"]*100,1) if e["staked"] else None,
                            "rate": round(e["wins"]/total*100,1) if total else None})
         by_cat.sort(key=lambda x: (x.get("roi") or -999), reverse=True)
+        overflow_decided = [
+            r for r in overflow_det if r.get("result") in ("WIN", "LOSS")
+        ]
+        overflow_wins = sum(1 for r in overflow_decided if r["result"] == "WIN")
+        overflow_losses = len(overflow_decided) - overflow_wins
         result.append({"date":d,"wins":wins,"losses":losses,
-                       "net_pl":net_pl,"roi":roi,"by_cat":by_cat,"detail":det,
+                       "net_pl":net_pl,"roi":roi,"by_cat":by_cat,
+                       "detail":main_det, "overflow_detail":overflow_det,
+                       "overflow_wins":overflow_wins,
+                       "overflow_losses":overflow_losses,
                        "gp":gp})
     return {"dates": result, "stake": _NHL_TRK_STAKE}
 
