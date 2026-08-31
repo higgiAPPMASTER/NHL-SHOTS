@@ -2384,6 +2384,12 @@ body.is-admin #parlayCard{display:block}
 .nhl-trk-tbl tr:hover td{background:rgba(255,255,255,.02)}
 .nhl-trk-bar-wrap{width:80px;background:#1e293b;border-radius:4px;height:8px;overflow:hidden;display:inline-block;vertical-align:middle}
 .nhl-trk-bar{height:100%;border-radius:4px}
+.nhl-jump-chip{cursor:pointer;transition:transform .15s ease,border-color .15s ease,background .15s ease}
+.nhl-jump-chip:hover{transform:translateY(-2px);border-color:#f59e0b;background:#1d1d1d}
+.nhl-game-jump{cursor:pointer;transition:border-color .15s ease,transform .15s ease}
+.nhl-game-jump:hover{border-color:#f59e0b!important;transform:translateY(-1px)}
+.nhl-scroll-anchor{scroll-margin-top:18px;height:1px}
+.nhl-game-row{scroll-margin-top:18px}
 </style>
 <div id="nhl-mybets-card" style="display:none;max-width:960px;margin:0 auto 24px;padding:0 16px">
   <div class="card" style="padding:20px 22px">
@@ -3136,6 +3142,30 @@ function buildNormTable(picks, startNum){
   return '<div class="tbl-wrap"><table>' + thead + '<tbody>' + rows + '</tbody></table></div>';
 }
 
+function _nhlJumpSlug(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');}
+function _nhlGameId(away,home){return 'nhl-game-'+_nhlJumpSlug(away)+'-'+_nhlJumpSlug(home);}
+function _nhlScrollTo(id){
+  var el=document.getElementById(id);
+  if(el)el.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function nhlJumpToGames(){_nhlScrollTo('nhl-section-games');}
+function nhlJumpToShots(){_nhlScrollTo('nhl-section-shots');}
+function nhlJumpToPoints(){_nhlScrollTo('nhl-section-points');}
+function nhlJumpToPpPoints(){_nhlScrollTo('nhl-section-pp-points');}
+function nhlJumpToAssists(){_nhlScrollTo('nhl-section-assists');}
+function nhlJumpToGoals(){_nhlScrollTo('nhl-section-goals');}
+function nhlJumpToSaves(){_nhlScrollTo('nhl-section-saves');}
+function nhlScrollToGameId(id){
+  var row=document.getElementById(id);
+  if(!row)return;
+  var panel=row.querySelector('.nhl-game-panel');
+  if(panel&&panel.style.display==='none'){
+    var toggleId=panel.id.replace('nhltoggle_','');
+    nhlToggle(toggleId);
+  }
+  row.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
 function renderResults(d){
   window.__NHL_RAW__ = d;
   window.__NHL_SEASON__ = d.season || '20252026';
@@ -3161,22 +3191,22 @@ function _nhlPaint(q){
 
   // Chips
   h += '<div class="chips">' +
-    '<div class="chip"><div class="val">' + d.games.length + '</div><div class="lbl">Games</div></div>' +
-    '<div class="chip"><div class="val">' + ((d.picks||[]).length) + '</div><div class="lbl">Shots</div></div>' +
-    '<div class="chip"><div class="val">' + ((d.ptsPicks||[]).length) + '</div><div class="lbl">Points</div></div>' +
-    '<div class="chip"><div class="val">' + ((d.ppPicks||[]).length) + '</div><div class="lbl">PP Points</div></div>' +
-    '<div class="chip"><div class="val">' + ((d.astPicks||[]).length) + '</div><div class="lbl">Assists</div></div>' +
-    '<div class="chip"><div class="val">' + ((d.goalPicks||[]).length) + '</div><div class="lbl">Goals</div></div>' +
-    '<div class="chip"><div class="val">' + ((d.savesPicks||[]).length) + '</div><div class="lbl">Saves</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToGames()" role="button" tabindex="0"><div class="val">' + d.games.length + '</div><div class="lbl">Games</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToShots()" role="button" tabindex="0"><div class="val">' + ((d.picks||[]).length) + '</div><div class="lbl">Shots</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToPoints()" role="button" tabindex="0"><div class="val">' + ((d.ptsPicks||[]).length) + '</div><div class="lbl">Points</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToPpPoints()" role="button" tabindex="0"><div class="val">' + ((d.ppPicks||[]).length) + '</div><div class="lbl">PP Points</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToAssists()" role="button" tabindex="0"><div class="val">' + ((d.astPicks||[]).length) + '</div><div class="lbl">Assists</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToGoals()" role="button" tabindex="0"><div class="val">' + ((d.goalPicks||[]).length) + '</div><div class="lbl">Goals</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToSaves()" role="button" tabindex="0"><div class="val">' + ((d.savesPicks||[]).length) + '</div><div class="lbl">Saves</div></div>' +
     '</div>';
 
   // Games
-  h += '<div class="sec">- Games -- ' + (d.targetDate || '') + '</div><div class="games">';
+  h += '<div id="nhl-section-games" class="sec">- Games -- ' + (d.targetDate || '') + '</div><div class="games">';
   d.games.forEach(function(g){
     var t = g.startTime ? new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}) : '';
     var lu=g.lineupByTeam||{},a=lu[g.awayTeam]||g.lineupSource||'UNAVAILABLE',hm=lu[g.homeTeam]||g.lineupSource||'UNAVAILABLE';
     function _luText(v){return v==='CONFIRMED'?'confirmed':v==='BOOK_LISTED'?'book-listed': 'unavailable';}
-    h += '<div class="gcard"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + '</div><div class="gt">' + t + '</div>'
+    h += '<div class="gcard nhl-game-jump" data-game-id="' + _nhlGameId(g.awayTeam,g.homeTeam) + '"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + '</div><div class="gt">' + t + '</div>'
       + '<div style="margin-top:4px;color:#94a3b8;font-size:.6rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em">Lineups: '
       + g.awayTeam + ' ' + _luText(a) + ' · ' + g.homeTeam + ' ' + _luText(hm) + '</div></div>';
   });
@@ -3235,7 +3265,7 @@ function _nhlPaint(q){
   }
 
   // SHOTS cards (OVER)
-  h += '<div class="sec">🏒 Top ' + ((d.picks||[]).length) + ' Shots on Goal — OVER</div>';
+  h += '<div id="nhl-section-shots" class="nhl-scroll-anchor"></div><div class="sec">🏒 Top ' + ((d.picks||[]).length) + ' Shots on Goal — OVER</div>';
   h += nhlCardGrid(d.picks);
   h += nhlRestBlock(d.rest, 'shots', '#4ade80');
 
@@ -3247,6 +3277,7 @@ function _nhlPaint(q){
   }
 
   // POINTS cards
+  h += '<div id="nhl-section-points" class="nhl-scroll-anchor"></div>';
   if((d.ptsPicks||[]).length){
     h += '<div class="sec">🎯 Top ' + d.ptsPicks.length + ' Points (1+)</div>';
     h += nhlCardGrid(d.ptsPicks);
@@ -3258,6 +3289,7 @@ function _nhlPaint(q){
     h += nhlUnderRestBlock(d.ptsUndersRest, 'points under', '#f87171');
   }
   // POWER PLAY POINTS cards — model 0.5 line
+  h += '<div id="nhl-section-pp-points" class="nhl-scroll-anchor"></div>';
   if((d.ppPicks||[]).length){
     h += '<div class="sec">⚡ Top ' + d.ppPicks.length + ' Power Play Points (1+) — MODEL</div>';
     h += nhlCardGrid(d.ppPicks);
@@ -3269,6 +3301,7 @@ function _nhlPaint(q){
     h += nhlUnderRestBlock(d.ppUndersRest, 'power play points under', '#f87171');
   }
   // ASSISTS cards
+  h += '<div id="nhl-section-assists" class="nhl-scroll-anchor"></div>';
   if((d.astPicks||[]).length){
     h += '<div class="sec">🅰️ Top ' + d.astPicks.length + ' Assists (1+)</div>';
     h += nhlCardGrid(d.astPicks);
@@ -3280,6 +3313,7 @@ function _nhlPaint(q){
     h += nhlUnderRestBlock(d.astUndersRest, 'assists under', '#f87171');
   }
   // GOALS cards
+  h += '<div id="nhl-section-goals" class="nhl-scroll-anchor"></div>';
   if((d.goalPicks||[]).length){
     h += '<div class="sec">⚽ Top ' + d.goalPicks.length + ' Goals (1+) — OVER</div>';
     h += nhlCardGrid(d.goalPicks);
@@ -3291,6 +3325,7 @@ function _nhlPaint(q){
     h += nhlUnderRestBlock(d.goalUndersRest, 'goals under', '#f87171');
   }
   // SAVES cards
+  h += '<div id="nhl-section-saves" class="nhl-scroll-anchor"></div>';
   if((d.savesPicks||[]).length){
     h += '<div class="sec">🧤 Top ' + d.savesPicks.length + ' Goalie Saves</div>';
     h += nhlCardGrid(d.savesPicks);
@@ -3328,22 +3363,22 @@ function _nhlPaint(q){
         return p.team===g.homeTeam || p.team===g.awayTeam ||
                p.opponent===g.homeTeam || p.opponent===g.awayTeam;
       });
-      if(!gamePlays.length) return;
       var shots = gamePlays.filter(function(p){return p.mkt==='Shots on Goal';});
       var pts   = gamePlays.filter(function(p){return p.mkt==='Points (1+)';});
       var pp    = gamePlays.filter(function(p){return p.mkt==='Power Play Points (1+)';});
       var ast   = gamePlays.filter(function(p){return p.mkt==='Assists (1+)';});
       var goals = gamePlays.filter(function(p){return p.mkt==='Goals (1+)';});
       var sv    = gamePlays.filter(function(p){return p.mkt==='Goalie Saves';});
-      h += '<div style="margin-bottom:10px">';
+       h += '<div id="' + _nhlGameId(g.awayTeam,g.homeTeam) + '" class="nhl-game-row" style="margin-bottom:10px">';
       h += '<div onclick="nhlToggle('+gi+')" style="background:#161616;border:1px solid #262626;border-radius:12px;padding:12px 18px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">';
       h += '<span style="font-weight:700;color:#fff;font-size:.92rem">' + gameName + '</span>';
       h += '<div style="display:flex;align-items:center;gap:10px">';
-      h += '<span style="background:rgba(245,158,11,.1);color:#f59e0b;padding:3px 12px;border-radius:999px;font-size:.75rem;font-weight:700">';
-      h += shots.length + ' shots | ' + pts.length + ' pts | ' + ast.length + ' ast | ' + goals.length + ' goals | ' + sv.length + ' sv</span>';
+       h += '<span style="background:rgba(245,158,11,.1);color:#f59e0b;padding:3px 12px;border-radius:999px;font-size:.75rem;font-weight:700">';
+       h += shots.length + ' shots | ' + pts.length + ' pts | ' + pp.length + ' pp pts | ' + ast.length + ' ast | ' + goals.length + ' goals | ' + sv.length + ' sv</span>';
       h += '<button id="nhltoggle_btn_'+gi+'" onclick="event.stopPropagation();nhlToggle('+gi+')" style="background:none;border:1px solid #374151;color:#9ca3af;border-radius:6px;padding:3px 12px;font-size:.72rem;cursor:pointer">Expand</button>';
       h += '</div></div>';
-      h += '<div id="nhltoggle_'+gi+'" style="display:none;margin-top:6px">';
+       h += '<div id="nhltoggle_'+gi+'" class="nhl-game-panel" style="display:none;margin-top:6px">';
+       if(!gamePlays.length) h += '<div style="color:#6b7280;font-size:.78rem;padding:12px">No qualifying plays for this game.</div>';
       if(shots.length){
         h += '<div style="font-size:.72rem;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;padding:8px 12px 4px">Shots on Goal</div>';
         h += buildTable(shots, 1);
@@ -3373,6 +3408,9 @@ function _nhlPaint(q){
   }
 
   document.getElementById('nhlBody').innerHTML = h;
+  document.querySelectorAll('#nhlBody .nhl-game-jump').forEach(function(card){
+    card.onclick=function(){nhlScrollToGameId(card.getAttribute('data-game-id'));};
+  });
   // Parlay pool always reflects the full (unfiltered) slate regardless of search.
   function _nhlParlaySide(arr, side){return (arr||[]).map(function(p){return Object.assign({},p,{_parlaySide:side});});}
   window.__NHL_PLAYS__ = _nhlParlaySide(raw.picks,'OVER').concat(_nhlParlaySide(raw.rest,'OVER'))
