@@ -3941,9 +3941,16 @@ function openNhlSpecialRecord(){
 }
 function openNhlHistoricalSpecialRecord(){
   var section=document.getElementById('nhl-historical-special-section');
+  if(section)section.style.display='block';
   if(section)section.scrollIntoView({behavior:'smooth',block:'start'});
   if(_nhlHistSpData)renderNhlHistoricalSpecialDay();
   else loadNhlHistoricalSpecialRecord();
+}
+function _nhlOpenHistoricalForDate(){
+  var official=document.getElementById('nhlSpDate'),hist=document.getElementById('nhlHistSpDate');
+  if(hist&&official)hist.value=official.value;
+  _nhlHistSpDayName();
+  openNhlHistoricalSpecialRecord();
 }
 async function loadNhlTrackRecord(manualGrade){
   var body=document.getElementById('nhlTrkBody');
@@ -4004,6 +4011,8 @@ async function loadNhlHistoricalSpecialRecord(manualGrade){
     var r=await fetch('/api/historical-special-track-record'+qs);
     if(!r.ok)throw new Error(await r.text());
     _nhlHistSpData=await r.json();
+    var section=document.getElementById('nhl-historical-special-section');
+    if(section)section.style.display=manualGrade||(_nhlHistSpData.dates||[]).length?'block':'none';
     renderNhlHistoricalSpecialDay();
   }catch(e){
     if(body)body.innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading Historical Special Results')+'</p>';
@@ -4084,7 +4093,7 @@ function renderNhlSpecialDay(){
   var sumEl=document.getElementById('nhlSpSummary'),bodyEl=document.getElementById('nhlSpBody');
   if(!sumEl||!bodyEl)return;
   if(selDate&&!day){
-    sumEl.innerHTML='<p style="color:#facc15;padding:12px;text-align:center">No saved Special Plays snapshot exists for '+selDate+'.</p>';
+    sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 8px">No official Special Plays snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.76rem;margin:0 0 10px">If this is the historical board shown above, it is tracked in the separate replay record.</p><button onclick="_nhlOpenHistoricalForDate()" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 13px;font-weight:800;cursor:pointer">View Historical Special Results</button></div>';
     bodyEl.innerHTML='';return;
   }
   var rows=[];
@@ -4415,7 +4424,6 @@ document.addEventListener('DOMContentLoaded',function(){
     hsp.addEventListener('change',function(){_nhlHistSpDayName();renderNhlHistoricalSpecialDay();});}
   _nhlTrkDayName();_nhlOvfDayName();_nhlSpDayName();_nhlHistSpDayName();
   loadNhlTrackRecord();
-  loadNhlHistoricalSpecialRecord();
   var top=document.getElementById('nhl-btn-top'),bot=document.getElementById('nhl-btn-bot');
   function _sc(){var y=window.pageYOffset||document.documentElement.scrollTop;
     var atBot=(y+window.innerHeight)>=document.body.scrollHeight-50;
@@ -4628,7 +4636,7 @@ function openNhlGPRecord(){
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px;flex-wrap:wrap">
       <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#11088; Special Plays Track Record</h2>
     </div>
-    <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px">Permanent results for every play displayed in Special — Best Plays. Kept separate from the main, Overflow, and Locks totals.</p>
+    <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px"><b style="color:#fde047">OFFICIAL PREGAME RECORD</b> · Permanent results for every play displayed in Special — Best Plays. Kept separate from the main, Overflow, Locks, and replay totals.</p>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
       <label style="color:#94a3b8;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Date</label>
       <input type="date" id="nhlSpDate" style="background:#0f172a;border:1px solid #854d0e;border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:.85rem;outline:none">
@@ -4643,12 +4651,12 @@ function openNhlGPRecord(){
   </div>
 </div>
 <!-- Historical Special Results — replay-only, never official -->
-<div id="nhl-historical-special-section" style="max-width:960px;margin:0 auto 0;padding:0 16px 40px">
+<div id="nhl-historical-special-section" style="display:none;max-width:960px;margin:0 auto 0;padding:0 16px 40px">
   <div class="card" style="padding:20px 22px;border-color:rgba(59,130,246,.35)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px;flex-wrap:wrap">
       <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#128338; Historical Special Results</h2>
     </div>
-    <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px">Permanent results for Special — Best Plays created by historical replays. Isolated from the official Special, main, Overflow, Locks, parlay, and simulation totals.</p>
+    <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px"><b style="color:#93c5fd">REPLAY ARCHIVE</b> · Permanent results for Special — Best Plays created by historical replays. Isolated from the official pregame Special, main, Overflow, Locks, parlay, and simulation totals.</p>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
       <label style="color:#94a3b8;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Replay Date</label>
       <input type="date" id="nhlHistSpDate" style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:.85rem;outline:none">
