@@ -2891,9 +2891,6 @@ function nhlCard(p,i){
   var lineHtml=(p.realLine!=null)
     ? `<span class="ln">${p.dispLine}</span> <span class="od">${p.realOdds||''}</span>${_nhlLineSourceBadge(p)}`
     : `<span class="est">~${p.dispLine}</span>`;
-  var lastStat=(p.realLine!=null&&p.vsLineTotal)
-    ? `<div class="pc-stat"><div class="k">vs Book L10</div><div class="v ${rateClass(p.vsLineRate)}">${p.vsLineHits}/${p.vsLineTotal} (${p.vsLineRate}%)</div></div>`
-    : `<div class="pc-stat"><div class="k">Under L10</div><div class="v ${rateClass(p.underRate)}">${p.underHits}/${p.underTotal} (${p.underRate}%)</div></div>`;
   return `
    <div class="pick-card ${_accFor(p.mkt)}">
      <div class="pc-rank">${i}</div>
@@ -2915,8 +2912,8 @@ function nhlCard(p,i){
      <div class="pc-stats">
        <div class="pc-stat"><div class="k">Career vs ${p.opponent}</div><div class="v">${_rateHtml(p.rateA,p.hitsA,p.totA)}</div></div>
        <div class="pc-stat"><div class="k">L10 ${ha?'Home':'Away'}</div><div class="v">${_rateHtml(p.rateB,p.hitsB,p.totB)}</div></div>
-       <div class="pc-stat"><div class="k">Avg</div><div class="v gold">${p.avg}</div></div>
-       ${lastStat}
+        <div class="pc-stat"><div class="k">L10 Avg</div><div class="v gold">${p.avg}</div></div>
+        <div class="pc-stat"><div class="k">Avg vs ${p.opponent}</div><div class="v gold">${p.totA?p.avgA:'—'}</div></div>
      </div>
      <div class="pc-foot"><span class="pc-score">${p.dispScore}</span>
        <span style="display:flex;gap:6px">${_nhlBetBtn(p)}<button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></span></div>
