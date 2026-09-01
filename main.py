@@ -64,7 +64,7 @@ MIN_GAMES     = 2     # min games required for hit-rate calc
 RECENT_DAYS   = 14    # player must have a game within this many days to count as "playing today"
 HIT_THRESH         = 70.0  # % hit rate to qualify against the posted sportsbook line
 HIT_THRESH_PTS     = 60.0  # % hit rate to qualify for Points
-HIT_THRESH_PP      = 65.0  # % hit rate to qualify for model-only Power Play Points
+HIT_THRESH_PP      = 50.0  # % hit rate to qualify for model-only Power Play Points
 PP_MIN_USAGE_GAMES = 2     # floor; PP time must also appear in >= half the recent sample
 PP_MIN_AVG_TOI_SEC = 30    # excludes one-off/end-of-power-play appearances
 PTS_LINE      = 0.5   # legacy default only; published picks require a book line
@@ -106,7 +106,7 @@ def _cache_get(app: str, date_key: str):
     try:
         if p.exists() and (time.time() - p.stat().st_mtime) < _CACHE_TTL:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if app == "nhl" and data.get("_nhlCacheVersion") != 2:
+            if app == "nhl" and data.get("_nhlCacheVersion") != 3:
                 print(f"[Cache] STALE SCHEMA {app}/{date_key}")
                 return None
             print(f"[Cache] FILE HIT {app}/{date_key}")
@@ -1230,6 +1230,65 @@ async def _pts_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[
     return logs
 
 
+async def _nhl_pp_role_logs(
+    player_ids: List[int], season: str, target_date: str
+) -> Dict[int, List[Dict]]:
+    """Recent game-level PP TOI from the NHL Stats powerplay report.
+
+    The api-web player game-log includes PP points but not powerPlayToi, so PP
+    role cannot be inferred from that feed. Query only today's roster in small
+    batches and stop before the target date to keep replays pre-game accurate.
+    """
+    result: Dict[int, List[Dict]] = {int(pid): [] for pid in player_ids}
+    if not player_ids:
+        return result
+    cutoff = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
+    batches = [player_ids[i:i + 20] for i in range(0, len(player_ids), 20)]
+    sem = asyncio.Semaphore(6)
+
+    async def fetch_batch(batch: List[int], game_type: int) -> List[Dict]:
+        ids = ",".join(str(int(pid)) for pid in batch)
+        exp = (
+            f"seasonId={season} and gameTypeId={game_type} "
+            f'and gameDate<="{cutoff}" and playerId in ({ids})'
+        )
+        params = {
+            "isAggregate": "false", "isGame": "true",
+            "sort": json.dumps([{"property": "gameDate", "direction": "DESC"}]),
+            "start": 0, "limit": 2500, "cayenneExp": exp,
+        }
+        async with sem:
+            try:
+                async with httpx.AsyncClient(timeout=30) as c:
+                    r = await c.get(
+                        f"{NHL_STATS}/skater/powerplay", params=params,
+                        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+                    )
+                    r.raise_for_status()
+                    return r.json().get("data", [])
+            except Exception as exc:
+                print(f"[PP Role] fetch error ({game_type}, {len(batch)} players): {exc}")
+                return []
+
+    rows = await asyncio.gather(*[
+        fetch_batch(batch, game_type)
+        for batch in batches for game_type in (2, 3)
+    ])
+    for group in rows:
+        for row in group:
+            pid = int(row.get("playerId") or 0)
+            if pid in result:
+                result[pid].append({
+                    "date": row.get("gameDate", ""),
+                    "pp_toi_sec": int(row.get("ppTimeOnIce") or 0),
+                })
+    for logs in result.values():
+        logs.sort(key=lambda x: x["date"], reverse=True)
+    print(f"[PP Role] verified game-level PP TOI for "
+          f"{sum(bool(v) for v in result.values())}/{len(result)} roster players")
+    return result
+
+
 async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[Dict]:
     """Goalie game logs — saves = shotsAgainst - goalsAgainst (parallel gtype fetch)."""
     datas = await asyncio.gather(
@@ -1324,7 +1383,10 @@ async def get_pts_picks(
         return logs
 
     log_tasks = {p["id"]: fetch_logs(p["id"]) for p, *_ in all_players}
-    log_results = await asyncio.gather(*log_tasks.values(), return_exceptions=True)
+    log_results, pp_role_map = await asyncio.gather(
+        asyncio.gather(*log_tasks.values(), return_exceptions=True),
+        _nhl_pp_role_logs(list(log_tasks.keys()), season, target_date),
+    )
     logs_map = {pid: (r if isinstance(r, list) else []) for pid, r in zip(log_tasks.keys(), log_results)}
 
     pts_picks, ast_picks, goal_picks, pp_picks = [], [], [], []
@@ -1346,7 +1408,7 @@ async def get_pts_picks(
         # PP role is team usage, so verify it across the player's most recent
         # games regardless of venue. A regular PP skater must receive PP time
         # in at least half the sample and average meaningful PP deployment.
-        pp_role_logs = logs[:10]
+        pp_role_logs = pp_role_map.get(player["id"], [])[:10]
         pp_usage_total = len(pp_role_logs)
         pp_usage_games = sum(
             1 for g in pp_role_logs if (g.get("pp_toi_sec") or 0) > 0
@@ -2155,7 +2217,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             player_profiles.append(profile)
 
     _result = {
-        "_nhlCacheVersion": 2,
+        "_nhlCacheVersion": 3,
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
@@ -2942,7 +3004,7 @@ function _nhlLineSourceBadge(p){
 }
 function _nhlQualText(p){
   var m=String(p.mkt||'');
-  var threshold=m==='Points (1+)'?60:(m==='Power Play Points (1+)'?65:(m==='Assists (1+)'?60:(m==='Goals (1+)'?50:(m==='Goalie Saves'?55:70))));
+  var threshold=m==='Points (1+)'?60:(m==='Power Play Points (1+)'?50:(m==='Assists (1+)'?60:(m==='Goals (1+)'?50:(m==='Goalie Saves'?55:70))));
   var ha=p.homeRoad==='H'?'Home':'Away';
   var l10Hits=Number(p.hitsB||0),l10Total=Number(p.totB||0),l10Rate=Number(p.rateB||0);
   var oppHits=Number(p.hitsA||0),oppTotal=Number(p.totA||0),oppRate=Number(p.rateA||0);
