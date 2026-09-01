@@ -65,6 +65,8 @@ RECENT_DAYS   = 14    # player must have a game within this many days to count a
 HIT_THRESH         = 70.0  # % hit rate to qualify against the posted sportsbook line
 HIT_THRESH_PTS     = 60.0  # % hit rate to qualify for Points
 HIT_THRESH_PP      = 65.0  # % hit rate to qualify for model-only Power Play Points
+PP_MIN_USAGE_GAMES = 2     # floor; PP time must also appear in >= half the recent sample
+PP_MIN_AVG_TOI_SEC = 30    # excludes one-off/end-of-power-play appearances
 PTS_LINE      = 0.5   # legacy default only; published picks require a book line
 AST_LINE      = 0.5   # legacy default only; published picks require a book line
 SAVES_LINE    = 24.5  # legacy default only; published picks require a book line
@@ -104,6 +106,9 @@ def _cache_get(app: str, date_key: str):
     try:
         if p.exists() and (time.time() - p.stat().st_mtime) < _CACHE_TTL:
             data = json.loads(p.read_text(encoding="utf-8"))
+            if app == "nhl" and data.get("_nhlCacheVersion") != 2:
+                print(f"[Cache] STALE SCHEMA {app}/{date_key}")
+                return None
             print(f"[Cache] FILE HIT {app}/{date_key}")
             return data
     except Exception as e:
@@ -1338,6 +1343,24 @@ async def get_pts_picks(
 
         if len(r_logs) < MIN_GAMES:
             continue
+        # PP role is team usage, so verify it across the player's most recent
+        # games regardless of venue. A regular PP skater must receive PP time
+        # in at least half the sample and average meaningful PP deployment.
+        pp_role_logs = logs[:10]
+        pp_usage_total = len(pp_role_logs)
+        pp_usage_games = sum(
+            1 for g in pp_role_logs if (g.get("pp_toi_sec") or 0) > 0
+        )
+        pp_role_avg_sec = (
+            round(sum(g.get("pp_toi_sec", 0) for g in pp_role_logs)
+                  / pp_usage_total)
+            if pp_usage_total else 0
+        )
+        pp_role_ok = bool(
+            pp_usage_games >= PP_MIN_USAGE_GAMES
+            and pp_usage_games * 2 >= pp_usage_total
+            and pp_role_avg_sec >= PP_MIN_AVG_TOI_SEC
+        )
 
         def build_pick(stat_key, base_line, thresh, lines_map, mkt_label,
                        model_only=False, allow_model_fallback=False,
@@ -1449,10 +1472,17 @@ async def get_pts_picks(
             if gp["overOk"]: goal_picks.append(gp)
             if gp["underOk"]: goal_unders.append(gp)
 
-        ppp = build_pick(
-            "powerPlayPoints", PTS_LINE, HIT_THRESH_PP, {},
-            "Power Play Points (1+)", model_only=True)
+        # PP Points must come from a verified regular special-teams player,
+        # not merely a lineup-eligible skater with a one-off PP appearance.
+        ppp = None
+        if pp_role_ok:
+            ppp = build_pick(
+                "powerPlayPoints", PTS_LINE, HIT_THRESH_PP, {},
+                "Power Play Points (1+)", model_only=True)
         if ppp:
+            ppp["ppUsageGames"] = pp_usage_games
+            ppp["ppUsageTotal"] = pp_usage_total
+            ppp["ppToiAvgSec"] = pp_role_avg_sec
             if ppp["overOk"]: pp_picks.append(ppp)
             if ppp["underOk"]: pp_unders.append(ppp)
 
@@ -2125,6 +2155,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             player_profiles.append(profile)
 
     _result = {
+        "_nhlCacheVersion": 2,
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
@@ -2926,11 +2957,15 @@ function _nhlQualText(p){
     :(!useOpp&&m==='Points (1+)'&&oppTotal>=2)
       ?' · vs '+opp+' '+oppHits+'/'+oppTotal+' below threshold'
       :'';
-  return _nhlEsc(basis)+': '+hits+'/'+total+' ('+rate+'%) ≥ '+threshold+'%'+_nhlEsc(note);
+  var ppNote=(m==='Power Play Points (1+)'&&p.ppUsageGames!=null)
+    ?' · PP role '+p.ppUsageGames+'/'+(p.ppUsageTotal||10)+' recent games':'';
+  return _nhlEsc(basis)+': '+hits+'/'+total+' ('+rate+'%) ≥ '+threshold+'%'+_nhlEsc(note+ppNote);
 }
 function _nhlUnderWhy(p){
   var basis=p.underBasis||'L10 Home/Away';
-  return _nhlEsc(basis)+': '+Number(p.underHits||0)+'/'+Number(p.underTotal||0)+' ('+Number(p.underRate||0)+'%) ≥ 60%';
+  var ppNote=(String(p.mkt||'')==='Power Play Points (1+)'&&p.ppUsageGames!=null)
+    ?' · PP role '+p.ppUsageGames+'/'+(p.ppUsageTotal||10)+' recent games':'';
+  return _nhlEsc(basis)+': '+Number(p.underHits||0)+'/'+Number(p.underTotal||0)+' ('+Number(p.underRate||0)+'%) ≥ 60%'+_nhlEsc(ppNote);
 }
 function nhlCard(p,i){
   var season=(window.__NHL_SEASON__||'20252026');
@@ -3446,11 +3481,16 @@ function _nhlPaint(q){
   }
   q=(q||'').toLowerCase().trim();
   function _f(a){return q?(a||[]).filter(function(p){return (p.name||'').toLowerCase().indexOf(q)>=0;}):(a||[]);}
+  function _ppRoleEligible(p){
+    var games=Number(p&&p.ppUsageGames||0),total=Number(p&&p.ppUsageTotal||0);
+    var avg=Number(p&&p.ppToiAvgSec||0);
+    return total>=2&&games>=2&&games*2>=total&&avg>=30;
+  }
   var d={}; for(var _k in raw){ d[_k]=raw[_k]; }
-  d.picks=_f(raw.picks); d.ptsPicks=_f(raw.ptsPicks); d.ppPicks=_f(raw.ppPicks); d.astPicks=_f(raw.astPicks); d.goalPicks=_f(raw.goalPicks); d.savesPicks=_f(raw.savesPicks);
-  d.rest=_f(raw.rest); d.ptsRest=_f(raw.ptsRest); d.ppRest=_f(raw.ppRest); d.astRest=_f(raw.astRest); d.goalRest=_f(raw.goalRest); d.savesRest=_f(raw.savesRest);
-  d.shotUnders=_f(raw.shotUnders); d.ptsUnders=_f(raw.ptsUnders); d.ppUnders=_f(raw.ppUnders); d.astUnders=_f(raw.astUnders); d.goalUnders=_f(raw.goalUnders); d.savesUnders=_f(raw.savesUnders);
-  d.shotUndersRest=_f(raw.shotUndersRest); d.ptsUndersRest=_f(raw.ptsUndersRest); d.ppUndersRest=_f(raw.ppUndersRest); d.astUndersRest=_f(raw.astUndersRest); d.goalUndersRest=_f(raw.goalUndersRest); d.savesUndersRest=_f(raw.savesUndersRest);
+  d.picks=_f(raw.picks); d.ptsPicks=_f(raw.ptsPicks); d.ppPicks=_f(raw.ppPicks).filter(_ppRoleEligible); d.astPicks=_f(raw.astPicks); d.goalPicks=_f(raw.goalPicks); d.savesPicks=_f(raw.savesPicks);
+  d.rest=_f(raw.rest); d.ptsRest=_f(raw.ptsRest); d.ppRest=_f(raw.ppRest).filter(_ppRoleEligible); d.astRest=_f(raw.astRest); d.goalRest=_f(raw.goalRest); d.savesRest=_f(raw.savesRest);
+  d.shotUnders=_f(raw.shotUnders); d.ptsUnders=_f(raw.ptsUnders); d.ppUnders=_f(raw.ppUnders).filter(_ppRoleEligible); d.astUnders=_f(raw.astUnders); d.goalUnders=_f(raw.goalUnders); d.savesUnders=_f(raw.savesUnders);
+  d.shotUndersRest=_f(raw.shotUndersRest); d.ptsUndersRest=_f(raw.ptsUndersRest); d.ppUndersRest=_f(raw.ppUndersRest).filter(_ppRoleEligible); d.astUndersRest=_f(raw.astUndersRest); d.goalUndersRest=_f(raw.goalUndersRest); d.savesUndersRest=_f(raw.savesUndersRest);
   var h = '';
 
   if(d.simulation && d.simulationStats) h += renderNhlSimulationStats(d.simulationStats);
