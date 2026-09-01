@@ -63,7 +63,8 @@ MIN_GP        = 10    # minimum games played for valid average
 MIN_GAMES     = 2     # min games required for hit-rate calc
 RECENT_DAYS   = 14    # player must have a game within this many days to count as "playing today"
 HIT_THRESH         = 70.0  # % hit rate to qualify against the posted sportsbook line
-HIT_THRESH_PTS     = 65.0  # % hit rate to qualify (points and power-play points)
+HIT_THRESH_PTS     = 60.0  # % hit rate to qualify for Points
+HIT_THRESH_PP      = 65.0  # % hit rate to qualify for model-only Power Play Points
 PTS_LINE      = 0.5   # legacy default only; published picks require a book line
 AST_LINE      = 0.5   # legacy default only; published picks require a book line
 SAVES_LINE    = 24.5  # legacy default only; published picks require a book line
@@ -1437,7 +1438,7 @@ async def get_pts_picks(
             if gp["underOk"]: goal_unders.append(gp)
 
         ppp = build_pick(
-            "powerPlayPoints", PTS_LINE, HIT_THRESH_PTS, {},
+            "powerPlayPoints", PTS_LINE, HIT_THRESH_PP, {},
             "Power Play Points (1+)", model_only=True)
         if ppp:
             if ppp["overOk"]: pp_picks.append(ppp)
@@ -2912,8 +2913,8 @@ function nhlCard(p,i){
      <div class="pc-stats">
        <div class="pc-stat"><div class="k">Career vs ${p.opponent}</div><div class="v">${_rateHtml(p.rateA,p.hitsA,p.totA)}</div></div>
        <div class="pc-stat"><div class="k">L10 ${ha?'Home':'Away'}</div><div class="v">${_rateHtml(p.rateB,p.hitsB,p.totB)}</div></div>
-        <div class="pc-stat"><div class="k">L10 Avg</div><div class="v gold">${p.avg}</div></div>
         <div class="pc-stat"><div class="k">Avg vs ${p.opponent}</div><div class="v gold">${p.totA?p.avgA:'—'}</div></div>
+        <div class="pc-stat"><div class="k">L10 Avg</div><div class="v gold">${p.avg}</div></div>
      </div>
      <div class="pc-foot"><span class="pc-score">${p.dispScore}</span>
        <span style="display:flex;gap:6px">${_nhlBetBtn(p)}<button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></span></div>
