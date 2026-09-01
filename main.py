@@ -1784,9 +1784,7 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
             except (TypeError, ValueError):
                 outcome = "VOID"
                 void_reason = "The historical stat or line could not be read."
-            if outcome == "VOID":
-                void_reasons[void_reason] += 1
-            detail.append({
+            base_row = {
                 "name": pick.get("name", ""), "team": pick.get("team", ""),
                 "category": category, "stat_key": stat_key, "side": side,
                 "line": line, "odds": odds, "rank": rank,
@@ -1795,7 +1793,24 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
                 "profit": round(_nhl_american_profit(odds, _NHL_TRK_STAKE, outcome), 2)
                 if outcome in ("WIN", "LOSS", "PUSH") and odds not in (None, "", "0")
                 else None,
-            })
+            }
+            if outcome == "VOID":
+                void_reasons[void_reason] += 1
+            detail.append(base_row)
+            # Historical replays must mirror the official grader: a qualifying
+            # 80-100% pick is counted once in its native market and once in the
+            # Locks category, while retaining its main/overflow source pool.
+            try:
+                lock_score = float(
+                    pick.get("dispScore") or pick.get("ptsScore")
+                    or pick.get("score") or 0
+                )
+            except (TypeError, ValueError):
+                lock_score = 0.0
+            if lock_score >= 80:
+                detail.append({**base_row, "category": "80-100% Locks"})
+                if outcome == "VOID":
+                    void_reasons[void_reason] += 1
 
     gp_detail = _nhl_grade_gp_date(
         result.get("date") or result.get("targetDate") or "",
@@ -5368,15 +5383,25 @@ def _nhl_track_record_payload() -> dict:
         det = _split_detail(detail_by_date.get(d, []), snapshot_by_date.get(d, []))
         if not det and snapshot_by_date.get(d):
             # A saved player snapshot is the source of truth for an ungraded
-            # slate.  Keep its line and odds, but mark the outcome pending.
-            det = [{
-                "name": p.get("name", ""), "team": p.get("team", ""),
-                "category": p.get("category", "?"), "side": p.get("side", "OVER"),
-                "stat_key": p.get("stat_key"), "line": p.get("line"),
-                "odds": p.get("odds"), "rank": p.get("rank"),
-                "is_overflow": bool(p.get("is_overflow")),
-                "result": None, "actual": None, "profit": None,
-            } for p in snapshot_by_date[d]]
+            # slate. Keep its line and odds, mark the outcome pending, and
+            # mirror qualifying rows into Locks exactly as the grader will.
+            det = []
+            for p in snapshot_by_date[d]:
+                pending_row = {
+                    "name": p.get("name", ""), "team": p.get("team", ""),
+                    "category": p.get("category", "?"), "side": p.get("side", "OVER"),
+                    "stat_key": p.get("stat_key"), "line": p.get("line"),
+                    "odds": p.get("odds"), "rank": p.get("rank"),
+                    "is_overflow": bool(p.get("is_overflow")),
+                    "result": None, "actual": None, "profit": None,
+                }
+                det.append(pending_row)
+                try:
+                    lock_score = float(p.get("score") or 0)
+                except (TypeError, ValueError):
+                    lock_score = 0.0
+                if lock_score >= 80:
+                    det.append({**pending_row, "category": "80-100% Locks"})
         main_det = [row for row in det if not row.get("is_overflow")]
         overflow_det = [row for row in det if row.get("is_overflow")]
         gp = _nhl_gp_summary(gp_by_date[d]) if d in gp_by_date else None
