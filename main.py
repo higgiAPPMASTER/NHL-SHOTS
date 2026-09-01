@@ -645,6 +645,22 @@ def _nhl_gp_predict(games: list, gp_data: dict) -> list:
     return preds
 
 
+def _nhl_pre_game_logs(logs: List[Dict], target_date: str) -> List[Dict]:
+    """Return only logs available before a target game's date.
+
+    Historical replay uses the same player-form calculations as the live
+    pipeline, but must not let the target game's result (or later games) leak
+    into that pre-game decision.
+    """
+    if not target_date:
+        return list(logs or [])
+    cutoff = str(target_date)[:10]
+    return [
+        g for g in (logs or [])
+        if str(g.get("date") or "")[:10] < cutoff
+    ]
+
+
 def _played_recently(logs: List[Dict], ref_date: str, days: int = RECENT_DAYS) -> bool:
     """True if the player has at least one game within `days` of ref_date.
     NHL doesn't post confirmed lineups pre-game, so this is our proxy for
@@ -661,7 +677,10 @@ def _played_recently(logs: List[Dict], ref_date: str, days: int = RECENT_DAYS) -
         if not d:
             continue
         try:
-            if date.fromisoformat(d) >= cutoff:
+            # A historical replay cannot use the target game's appearance, or
+            # a later appearance, to decide whether the player was recently
+            # active before puck drop.
+            if cutoff <= date.fromisoformat(d) < date.fromisoformat(ref_date):
                 return True
         except Exception:
             continue
@@ -1305,10 +1324,11 @@ async def get_pts_picks(
     pts_picks, ast_picks, goal_picks, pp_picks = [], [], [], []
     pts_unders, ast_unders, goal_unders, pp_unders = [], [], [], []
     for player, team, opp, hr in all_players:
-        logs = logs_map.get(player["id"], [])
+        full_logs = logs_map.get(player["id"], [])
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
-        if target_date and not _played_recently(logs, target_date):
+        if target_date and not _played_recently(full_logs, target_date):
             continue
+        logs = _nhl_pre_game_logs(full_logs, target_date)
 
         # Career H/A vs today's opponent — cap at last 10 for consistency w/ shots
         c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
@@ -1370,7 +1390,7 @@ async def get_pts_picks(
             rest_days_p = _days_rest(logs, target_date)
             opp_sv = goalie_map.get(opp)
             sim_actual, sim_void_reason = _nhl_sim_actual_from_logs(
-                logs, target_date, hr, opp, stat_key)
+                full_logs, target_date, hr, opp, stat_key)
             return {
                 "name": player["name"], "pid": player["id"], "team": team,
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
@@ -1495,10 +1515,11 @@ async def get_saves_picks(
     picks = []
     unders = []
     for goalie, team, opp, hr in all_goalies:
-        logs = logs_map.get(goalie["id"], [])
+        full_logs = logs_map.get(goalie["id"], [])
         # Only goalies actively playing (drops third-string/AHL/injured goalies)
-        if target_date and not _played_recently(logs, target_date):
+        if target_date and not _played_recently(full_logs, target_date):
             continue
+        logs = _nhl_pre_game_logs(full_logs, target_date)
         c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
         r_logs = [g for g in logs if g["homeRoad"] == hr][:10]
         if len(r_logs) < MIN_GAMES:
@@ -1548,7 +1569,7 @@ async def get_saves_picks(
         rest_days_sv = _days_rest(logs, target_date)
         hot_hits_sv, hot_total_sv = _hot_streak(logs, "saves", base_line, hr, 5)
         sim_actual_sv, sim_void_reason_sv = _nhl_sim_actual_from_logs(
-            logs, target_date, hr, opp, "saves")
+            full_logs, target_date, hr, opp, "saves")
 
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
@@ -1950,10 +1971,11 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
 
     # ── Steps 2 & 3 - NHL Stats API hit-rate analysis ────────────────────────────
     async def analyze(p: Dict) -> Optional[Dict]:
-        logs = logs_map.get(p["pid"], [])
+        full_logs = logs_map.get(p["pid"], [])
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
-        if not _played_recently(logs, target_date):
+        if not _played_recently(full_logs, target_date):
             return None
+        logs = _nhl_pre_game_logs(full_logs, target_date)
         book_line = p.get("realLine")
         analysis_line = book_line if book_line is not None else p.get("line")
         if analysis_line is None:
@@ -1997,7 +2019,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
         proj_edge = round(proj - line, 2)
         proj_pick = "OVER" if proj_edge > 0 else ("UNDER" if proj_edge < 0 else "")
         sim_actual, sim_void_reason = _nhl_sim_actual_from_logs(
-            logs, target_date, hr, opp, "shots")
+            full_logs, target_date, hr, opp, "shots")
 
         # Signal factors
         toi_avg_sec = round(sum(g.get("toi_sec", 0) for g in _ha) / len(_ha)) if _ha else 0
@@ -2143,8 +2165,9 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
                 "archived line was unavailable."
             )
         _result["simulationNotice"] = (
-            "Simulation only: archived player SOG lines are used where available; "
-            "other missing player lines use a model estimate. Historical results "
+            "Point-in-time simulation: player-form data uses only games before "
+            f"{target_date}; archived player SOG lines are used where available, "
+            "while missing player lines use a model estimate. Historical results "
             "below are display only and are not cached or tracked."
         )
         _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
