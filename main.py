@@ -2438,8 +2438,8 @@ body.is-admin #parlayCard{display:block}
 .lad-sub{color:#9ca3af;font-size:.8rem;margin-bottom:14px}
 .lad-close{float:right;background:none;border:1px solid #333;color:#9ca3af;border-radius:8px;padding:4px 10px;cursor:pointer;font-weight:700}
 .lad-glog{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 14px}
-.glchip{background:#0e0e0e;border:1px solid #242424;border-radius:8px;padding:6px 8px;text-align:center;min-width:44px}
-.glchip .d{font-size:.56rem;color:#6b7280}
+.glchip{background:#0e0e0e;border:1px solid #242424;border-radius:8px;padding:7px 9px;text-align:center;min-width:76px}
+.glchip .d{font-size:.68rem;color:#9ca3af;white-space:nowrap}
 .glchip .v{font-weight:800;font-size:.95rem;margin-top:2px;color:#e5e7eb}
 .glchip.hit{border-color:rgba(74,222,128,.35)}
 .glchip.hit .v{color:#4ade80}
@@ -2459,7 +2459,7 @@ body.is-admin #parlayCard{display:block}
 .lad-market-stat .k{color:#6b7280;font-size:.56rem;text-transform:uppercase;letter-spacing:.03em}
 .lad-market-stat .v{font-size:.76rem;font-weight:800;margin-top:3px;white-space:nowrap}
 .lad-market-games{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
-.lad-market-games .glchip{min-width:38px;padding:4px 5px}
+.lad-market-games .glchip{min-width:76px;padding:6px 7px}
 .lad-unavailable{color:#6b7280;font-size:.72rem;line-height:1.45;padding:8px 0 2px}
 @media(max-width:620px){.lad-market-grid{grid-template-columns:1fr}.nhl-lookup-row{align-items:stretch}.nhl-lookup-btn{padding-inline:10px}}
 </style>
@@ -2479,13 +2479,30 @@ body.is-admin #parlayCard{display:block}
 .nhl-bets-tbl tr:last-child td{border-bottom:none}
 .nhl-bets-tbl tr:hover td{background:rgba(255,255,255,.02)}
 /* NHL Track Record */
-.nhl-trk-tbl{width:100%;border-collapse:collapse;font-size:.82rem}
-.nhl-trk-tbl th{padding:10px 12px;text-align:left;color:#67e8f9;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;background:#0a0f1a;white-space:nowrap;border-bottom:1px solid rgba(103,232,249,.2)}
-.nhl-trk-tbl td{padding:9px 12px;border-bottom:1px solid #0f172a;white-space:nowrap}
+.nhl-trk-tbl{width:100%;border-collapse:collapse;font-size:.92rem}
+.nhl-trk-tbl th{padding:12px 14px;text-align:left;color:#8be9ff;font-size:.74rem;font-weight:800;text-transform:uppercase;letter-spacing:.1em;background:#09111f;white-space:nowrap;border-bottom:1px solid rgba(103,232,249,.25)}
+.nhl-trk-tbl td{padding:11px 14px;border-bottom:1px solid rgba(30,41,59,.8);white-space:nowrap;vertical-align:middle}
 .nhl-trk-tbl tr:last-child td{border-bottom:none}
 .nhl-trk-tbl tr:hover td{background:rgba(255,255,255,.02)}
-.nhl-trk-bar-wrap{width:80px;background:#1e293b;border-radius:4px;height:8px;overflow:hidden;display:inline-block;vertical-align:middle}
+.nhl-trk-bar-wrap{width:100px;background:#1e293b;border-radius:4px;height:9px;overflow:hidden;display:inline-block;vertical-align:middle}
 .nhl-trk-bar{height:100%;border-radius:4px}
+.nhl-trk-group{margin:0 0 18px;border:1px solid #263449;border-left:4px solid var(--trk-accent,#22d3ee);border-radius:16px;overflow:hidden;background:linear-gradient(145deg,rgba(15,23,42,.96),rgba(10,15,26,.98));box-shadow:0 8px 22px rgba(0,0,0,.16)}
+.nhl-trk-group-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:15px 18px;background:linear-gradient(90deg,color-mix(in srgb,var(--trk-accent,#22d3ee) 14%,transparent),transparent);border-bottom:1px solid rgba(148,163,184,.14)}
+.nhl-trk-group-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.nhl-trk-group-kicker{font-size:.68rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.14em;font-weight:800}
+.nhl-trk-group-name{font-size:1.08rem;color:#fff;font-weight:900;letter-spacing:.01em}
+.nhl-trk-group-side{font-size:.72rem;font-weight:900;letter-spacing:.1em;padding:4px 9px;border-radius:999px;color:var(--trk-accent,#67e8f9);border:1px solid color-mix(in srgb,var(--trk-accent,#67e8f9) 55%,transparent);background:color-mix(in srgb,var(--trk-accent,#67e8f9) 12%,transparent)}
+.nhl-trk-group-summary{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:#cbd5e1;font-size:.82rem;font-weight:700}
+.nhl-trk-group-rate{font-size:1.08rem;font-family:monospace;font-weight:900;color:var(--trk-accent,#67e8f9)}
+.nhl-trk-group-pl{font-family:monospace;font-weight:900}
+.nhl-trk-table-scroll{overflow-x:auto}
+.nhl-trk-note{color:#94a3b8!important;font-size:.78rem!important;white-space:normal!important;min-width:150px}
+.nhl-trk-result{display:inline-block;min-width:66px;text-align:center;padding:4px 8px;border-radius:999px;font-size:.72rem;letter-spacing:.05em;font-weight:900}
+.nhl-trk-result.win{color:#86efac;background:rgba(34,197,94,.14);border:1px solid rgba(74,222,128,.32)}
+.nhl-trk-result.loss{color:#fca5a5;background:rgba(239,68,68,.14);border:1px solid rgba(248,113,113,.32)}
+.nhl-trk-result.push{color:#fde68a;background:rgba(234,179,8,.14);border:1px solid rgba(250,204,21,.32)}
+.nhl-trk-result.void,.nhl-trk-result.pending{color:#cbd5e1;background:rgba(100,116,139,.14);border:1px solid rgba(148,163,184,.24)}
+@media(max-width:680px){.nhl-trk-group-head{padding:13px 14px}.nhl-trk-group-name{font-size:1rem}.nhl-trk-tbl{font-size:.86rem}.nhl-trk-tbl th{font-size:.68rem;padding:10px}.nhl-trk-tbl td{padding:10px}}
 .nhl-jump-chip{cursor:pointer;transition:transform .15s ease,border-color .15s ease,background .15s ease}
 .nhl-jump-chip:hover{transform:translateY(-2px);border-color:#f59e0b;background:#1d1d1d}
 .nhl-game-jump{cursor:pointer;transition:border-color .15s ease,transform .15s ease}
@@ -3017,6 +3034,13 @@ function _nhlRecordsForPlayer(target){
 function _nhlMarketStat(label,value){
   return '<div class="lad-market-stat"><div class="k">'+label+'</div><div class="v">'+value+'</div></div>';
 }
+function _nhlGameDateLabel(raw){
+  var s=String(raw||'').slice(0,10),m=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(!m)return String(raw||'');
+  var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var month=parseInt(m[2],10),day=parseInt(m[3],10);
+  return months[month-1]+' '+day+', '+m[1];
+}
 function _nhlMarketCard(label,record,opponent){
   if(!record){
     var missing=label==='Goalie Saves'?'No goalie-saves record available for this player.':'No qualifying '+label.toLowerCase()+' record available in this board snapshot.';
@@ -3027,7 +3051,7 @@ function _nhlMarketCard(label,record,opponent){
   var recent=record.totB?_rateHtml(record.rateB,record.hitsB,record.totB):'<span class="gray">No history</span>';
   var games=(record.glog||[]).map(function(g){
     var hit=record.dispLine!=null&&Number(g.v)>Number(record.dispLine);
-    return '<div class="glchip '+(hit?'hit':'miss')+'"><div class="d">'+_nhlSafe(String(g.d||'').slice(5))+'</div><div class="v">'+_nhlSafe(g.v)+'</div></div>';
+    return '<div class="glchip '+(hit?'hit':'miss')+'"><div class="d">'+_nhlSafe(_nhlGameDateLabel(g.d))+'</div><div class="v">'+_nhlSafe(g.v)+'</div></div>';
   }).join('');
   if(!games)games='<span class="gray">No recent game values available.</span>';
   var under=(record.underTotal?record.underHits+'/'+record.underTotal+' ('+record.underRate+'%)':'—');
@@ -4070,28 +4094,59 @@ function renderNhlOverflowDay(){
 function _nhlTrkListHtml(allRows,showRank){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var stake=_nhlTrkStake();
-  var sorted=[].concat(allRows).sort(function(a,b){return(_nhlTrkProfit(b,stake)||0)-(_nhlTrkProfit(a,stake)||0);});
-  var rows=sorted.map(function(r){
-    var plColor=r.result==='WIN'?'#4ade80':(r.result==='LOSS'?'#f87171':'#94a3b8');
-    var rowProfit=_nhlTrkProfit(r,stake);
-    var pl=rowProfit!=null?((rowProfit>=0?'+$':'-$')+Math.abs(rowProfit).toFixed(2)):'—';
-    var odds=r.odds!=null&&String(r.odds).trim()!==''?(r.odds>0?'+':'')+r.odds:'—';
-    return '<tr>'
-      +(showRank?'<td style="color:#fbbf24;font-family:monospace;font-weight:800">#'+(r.rank!=null?r.rank:'—')+'</td>':'')
-      +'<td style="color:#94a3b8;font-size:.78rem">'+r.category+'</td>'
-      +'<td style="color:#e2e8f0;font-weight:700">'+r.name+'</td>'
-      +'<td style="color:#475569">'+r.team+'</td>'
-      +'<td style="color:#cbd5e1">'+(r.side||'')+(r.line!=null?' '+r.line:'')+'</td>'
-      +'<td style="font-family:monospace;color:#94a3b8">'+odds+'</td>'
-      +'<td style="color:#475569">'+((r.actual!=null)?r.actual:'—')+'</td>'
-      +'<td style="font-weight:800;color:'+plColor+'">'+r.result+'</td>'
-      +'<td style="font-family:monospace;font-weight:700;color:'+plColor+'">'+pl+'</td>'
-       +'<td style="color:#94a3b8;font-size:.74rem;white-space:normal">'+(r.void_reason||r.line_source||'—')+'</td>'
-      +'</tr>';
-  }).join('');
-  return '<div style="overflow-x:auto"><table class="nhl-trk-tbl">'
-    +'<thead><tr>'+(showRank?'<th>Rank</th>':'')+'<th>Category</th><th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Void reason</th></tr></thead>'
-    +'<tbody>'+rows+'</tbody></table></div>';
+   var catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
+   var catColors={'Shots on Goal':'#fbbf24','Points':'#60a5fa','Power Play Points':'#c084fc','Assists':'#a78bfa','Goals':'#fb7185','Goalie Saves':'#34d399','NHL Overflow':'#f59e0b','80-100% Locks':'#facc15'};
+   var groups={},order=[];
+   allRows.forEach(function(r){
+     var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase(),key=cat+'|'+side;
+     if(!groups[key]){groups[key]=[];order.push(key);}
+     groups[key].push(r);
+   });
+   function orderKey(key){
+     var bits=key.split('|'),idx=catOrder.indexOf(bits[0]);
+     return (idx<0?catOrder.length:idx)*2+(bits[1]==='UNDER'?1:0);
+   }
+   order.sort(function(a,b){return orderKey(a)-orderKey(b);});
+   function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
+   function money(v){return v==null?'—':(v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(2);}
+   function groupBlock(key){
+     var bits=key.split('|'),cat=bits[0],side=bits[1],list=groups[key].slice().sort(function(a,b){
+       var ar=a.rank==null?999:Number(a.rank),br=b.rank==null?999:Number(b.rank);
+       return ar-br||(a.name||'').localeCompare(b.name||'');
+     });
+     var w=list.filter(function(r){return r.result==='WIN';}).length;
+     var l=list.filter(function(r){return r.result==='LOSS';}).length;
+     var push=list.filter(function(r){return r.result==='PUSH';}).length;
+     var voids=list.filter(function(r){return r.result==='VOID';}).length;
+     var pending=list.length-w-l-push-voids;
+     var priced=list.filter(hasOdds),pl=priced.reduce(function(x,r){return x+(_nhlTrkProfit(r,stake)||0);},0);
+     var rate=(w+l)?(w/(w+l)*100):null, accent=catColors[cat]||'#22d3ee';
+     var meta=w+'W · '+l+'L'+(push?' · '+push+'P':'')+(voids?' · '+voids+'V':'')+(pending?' · '+pending+' pending':'');
+     var rows=list.map(function(r){
+       var rowProfit=_nhlTrkProfit(r,stake),result=(r.result||'PENDING').toUpperCase();
+       var resultClass=result.toLowerCase(),plColor=result==='WIN'?'#4ade80':(result==='LOSS'?'#f87171':'#94a3b8');
+       var odds=r.odds!=null&&String(r.odds).trim()!==''?(r.odds>0?'+':'')+r.odds:'—';
+       return '<tr>'
+         +(showRank?'<td style="color:#fbbf24;font-family:monospace;font-weight:900">#'+(r.rank!=null?r.rank:'—')+'</td>':'')
+         +'<td style="color:#f8fafc;font-weight:850;font-size:.96rem">'+r.name+'</td>'
+         +'<td style="color:#94a3b8;font-weight:800">'+r.team+'</td>'
+         +'<td style="color:#e2e8f0;font-weight:800">'+(r.side||'')+(r.line!=null?' '+r.line:'')+'</td>'
+         +'<td style="font-family:monospace;color:#cbd5e1;font-weight:700">'+odds+'</td>'
+         +'<td style="color:#cbd5e1;font-weight:700">'+((r.actual!=null)?r.actual:'—')+'</td>'
+         +'<td><span class="nhl-trk-result '+resultClass+'">'+result+'</span></td>'
+         +'<td style="font-family:monospace;font-weight:900;color:'+plColor+'">'+(rowProfit!=null?money(rowProfit):'—')+'</td>'
+         +'<td class="nhl-trk-note">'+(r.void_reason||r.line_source||'—')+'</td>'
+         +'</tr>';
+     }).join('');
+     return '<section class="nhl-trk-group" style="--trk-accent:'+accent+'">'
+       +'<div class="nhl-trk-group-head"><div class="nhl-trk-group-title">'
+       +'<span class="nhl-trk-group-kicker">Category</span><span class="nhl-trk-group-name">'+cat+'</span><span class="nhl-trk-group-side">'+side+'</span></div>'
+       +'<div class="nhl-trk-group-summary"><span>'+meta+'</span><span class="nhl-trk-group-rate">'+(rate!=null?rate.toFixed(1)+'%':'—')+'</span><span class="nhl-trk-group-pl" style="color:'+(pl>=0?'#4ade80':'#f87171')+'">'+money(pl)+'</span></div></div>'
+       +'<div class="nhl-trk-table-scroll"><table class="nhl-trk-tbl"><thead><tr>'
+       +(showRank?'<th>Rank</th>':'')+'<th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Note</th>'
+       +'</tr></thead><tbody>'+rows+'</tbody></table></div></section>';
+   }
+   return order.map(groupBlock).join('');
 }
 function _nhlGpResult(r, key){
   var v=r&&r[key]; if(!v) return '<span style="color:#64748b">PENDING</span>';
