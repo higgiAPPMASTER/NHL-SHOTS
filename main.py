@@ -106,7 +106,7 @@ def _cache_get(app: str, date_key: str):
     try:
         if p.exists() and (time.time() - p.stat().st_mtime) < _CACHE_TTL:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if app == "nhl" and data.get("_nhlCacheVersion") != 3:
+            if app == "nhl" and data.get("_nhlCacheVersion") != 4:
                 print(f"[Cache] STALE SCHEMA {app}/{date_key}")
                 return None
             print(f"[Cache] FILE HIT {app}/{date_key}")
@@ -2094,7 +2094,11 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
 
         if t3 < MIN_GAMES:
             return None
-        s2_ok = (t2 < MIN_GAMES) or (r2 >= HIT_THRESH)
+        # If the player has faced this opponent before, that history must
+        # agree with the L10 H/A signal. A 0/1 or other failed opponent sample
+        # is a real negative signal, not an excuse to bypass the gate. Only a
+        # true no-history case (0 games) may pass without the opponent check.
+        s2_ok = (t2 == 0) or (r2 >= HIT_THRESH)
         s3_ok = r3 >= HIT_THRESH
         over_ok = bool(s2_ok and s3_ok)
         score = round((r2 + r3) / 2 if t2 >= MIN_GAMES else r3, 1)
@@ -2217,7 +2221,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             player_profiles.append(profile)
 
     _result = {
-        "_nhlCacheVersion": 3,
+        "_nhlCacheVersion": 4,
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
