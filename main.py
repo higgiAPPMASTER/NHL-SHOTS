@@ -985,6 +985,34 @@ def _under_fields(logs, stat_key, uline, hr, opp):
     }
 
 
+def _nhl_goal_under_rank_fields(under_fields: dict, goal_avg: float,
+                                toi_avg_sec: int, pp_toi_avg_sec: int) -> tuple:
+    """Rank goal-under fades toward meaningful player roles without gate changes.
+
+    Goals Under 0.5 otherwise favors low-minute depth players because their
+    under-rate is naturally high.  Use goal production, TOI, and PP deployment
+    as a conservative offensive-role proxy, while retaining fade reliability
+    and opponent history.
+    """
+    try:
+        under_rate = float(under_fields.get("underRate") or 0.0)
+        opp_rate = float(
+            under_fields.get("underRateVo")
+            if (under_fields.get("underTotVo") or 0) >= MIN_GAMES
+            else under_fields.get("underRateAny") or 0.0
+        )
+        production = max(0.0, min(100.0, float(goal_avg or 0) / 0.75 * 100.0))
+        toi = max(0.0, min(100.0, float(toi_avg_sec or 0) / 1200.0 * 100.0))
+        pp = max(0.0, min(100.0, float(pp_toi_avg_sec or 0) / 180.0 * 100.0))
+        usage_score = round(production * 0.65 + (toi * 0.75 + pp * 0.25) * 0.35, 1)
+        rank_score = round(
+            under_rate * 0.35 + opp_rate * 0.15 + usage_score * 0.50, 1
+        )
+        return rank_score, usage_score, opp_rate
+    except (TypeError, ValueError):
+        return under_fields.get("underRate") or 0.0, 0.0, 0.0
+
+
 def _parse_toi(s: str) -> int:
     """'MM:SS' → seconds. Returns 0 on failure."""
     try:
@@ -1756,6 +1784,11 @@ async def get_pts_picks(
             # Signal factors
             toi_avg_sec = round(sum(g.get("toi_sec", 0) for g in r_logs) / len(r_logs)) if r_logs else 0
             pp_toi_avg_sec = round(sum(g.get("pp_toi_sec", 0) for g in r_logs) / len(r_logs)) if r_logs else 0
+            goal_under_rank, usage_score, matchup_under_rate = (
+                _nhl_goal_under_rank_fields(
+                    uf, avg3, toi_avg_sec, pp_toi_avg_sec
+                )
+            )
             hot_hits_p, hot_total_p = _hot_streak(logs, stat_key, line, hr, 5)
             rest_days_p = _days_rest(logs, target_date)
             opp_sv = goalie_map.get(opp)
@@ -1775,6 +1808,9 @@ async def get_pts_picks(
                 "vsLineHits": vsl_hits, "vsLineTotal": vsl_total, "vsLineRate": vsl_rate,
                 "gap": gap, "tag": tag,
                 **uf, "overOk": over_ok,
+                "underRankScore": goal_under_rank if stat_key == "goals" else None,
+                "underUsageScore": usage_score if stat_key == "goals" else None,
+                "underMatchupRate": matchup_under_rate if stat_key == "goals" else None,
                 "glog": glog,
                 "restDays": rest_days_p, "hotHits": hot_hits_p, "hotTotal": hot_total_p,
                 "toiAvgSec": toi_avg_sec, "ppToiAvgSec": pp_toi_avg_sec,
@@ -1829,7 +1865,14 @@ async def get_pts_picks(
     pp_picks.sort(key=lambda x: (x["dispScore"], x["oppSA"]), reverse=True)
     pts_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
     ast_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
-    goal_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
+    goal_unders.sort(
+        key=lambda x: (
+            x.get("underRankScore") if x.get("underRankScore") is not None
+            else x["underRate"],
+            x["underRate"], x["underTotal"],
+        ),
+        reverse=True,
+    )
     pp_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
     print(f"[PTS] {len(pts_picks)} points | {len(ast_picks)} assists | {len(goal_picks)} goals | "
           f"{len(pp_picks)} power-play points | {len(pts_unders)} pts unders | "
@@ -3384,7 +3427,9 @@ function _nhlUnderWhy(p){
   var basis=p.underBasis||'L10 Home/Away';
   var ppNote=(String(p.mkt||'')==='Power Play Points (1+)'&&p.ppUsageGames!=null)
     ?' · PP role '+p.ppUsageGames+'/'+(p.ppUsageTotal||10)+' recent games':'';
-  return _nhlEsc(basis)+': '+Number(p.underHits||0)+'/'+Number(p.underTotal||0)+' ('+Number(p.underRate||0)+'%) ≥ 60%'+_nhlEsc(ppNote);
+  var roleNote=(String(p.mkt||'')==='Goals (1+)'&&p.underRankScore!=null)
+    ?' · role-weighted rank '+Number(p.underRankScore).toFixed(1)+' · '+_fmtToi(p.toiAvgSec)+' TOI'+(p.ppToiAvgSec>60?' / '+_fmtToi(p.ppToiAvgSec)+' PP':''):'';
+  return _nhlEsc(basis)+': '+Number(p.underHits||0)+'/'+Number(p.underTotal||0)+' ('+Number(p.underRate||0)+'%) ≥ 60%'+_nhlEsc(ppNote+roleNote);
 }
 function nhlCard(p,i){
   var season=(window.__NHL_SEASON__||'20252026');
@@ -4799,7 +4844,7 @@ function renderNhlOverflowDay(){
   });
   return html+'</tbody></table></div>';
 }
-function _nhlTrkListHtml(allRows,showRank){
+ function _nhlTrkListHtml(allRows,showRank,showRankStats){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var stake=_nhlTrkStake();
    var catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks','Shot Plays','Point Plays','Assist Plays','Goal Plays','Save Plays'];
@@ -4857,13 +4902,14 @@ function _nhlTrkListHtml(allRows,showRank){
           +'<td class="nhl-trk-note">'+note+'</td>'
          +'</tr>';
      }).join('');
-      return '<details class="nhl-trk-group" style="--trk-accent:'+accent+'">'
+       return '<details class="nhl-trk-group" style="--trk-accent:'+accent+'">'
         +'<summary class="nhl-trk-group-head"><div class="nhl-trk-group-title">'
        +'<span class="nhl-trk-group-kicker">Category</span><span class="nhl-trk-group-name">'+cat+'</span><span class="nhl-trk-group-side">'+side+'</span></div>'
         +'<div class="nhl-trk-group-summary"><span>'+meta+'</span><span class="nhl-trk-group-rate">'+(rate!=null?rate.toFixed(1)+'%':'—')+'</span><span class="nhl-trk-group-pl" style="color:'+(pl>=0?'#4ade80':'#f87171')+'">'+money(pl)+'</span><span class="nhl-trk-group-toggle" aria-hidden="true">+</span></div></summary>'
        +'<div class="nhl-trk-table-scroll"><table class="nhl-trk-tbl"><thead><tr>'
        +(showRank?'<th>Rank</th>':'')+'<th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Note</th>'
-        +'</tr></thead><tbody>'+rows+'</tbody></table></div></details>';
+         +'</tr></thead><tbody>'+rows+'</tbody></table></div>'
+         +(showRankStats?_nhlRankStatsHtml(list,stake):'')+'</details>';
    }
    return order.map(groupBlock).join('');
 }
@@ -5109,52 +5155,30 @@ function _nhlHistSelectedDays(){
     return d>='2025-10-01'&&d<='2026-06-30';
   });
 }
-function _nhlHistRankHtml(allRows,stake){
-  var catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves'];
-  var cats={},keys=[];
-  allRows.forEach(function(r){
-    if(r.is_overflow||r.category==='NHL Overflow'||r.category==='80-100% Locks')return;
-    var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase(),key=cat+'|'+side;
-    if(!cats[key]){cats[key]=[];keys.push(key);}
-    cats[key].push(r);
-  });
-  keys.sort(function(a,b){
-    var aa=a.split('|'),bb=b.split('|');
-    var ai=catOrder.indexOf(aa[0]),bi=catOrder.indexOf(bb[0]);
-    ai=ai<0?catOrder.length:ai;bi=bi<0?catOrder.length:bi;
-    return ai-bi||(aa[1]==='UNDER'?1:0)-(bb[1]==='UNDER'?1:0);
-  });
+function _nhlRankStatsHtml(list,stake){
   function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
   function money(v){return (v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(2);}
-  function cell(list,rank){
+  var cells=[];
+  for(var rank=1;rank<=10;rank++){
     var priced=list.filter(function(r){
       return Number(r.rank)===rank&&hasOdds(r)&&(r.result==='WIN'||r.result==='LOSS');
     });
-    if(!priced.length)return '<td style="color:#475569;text-align:center">—</td>';
+    if(!priced.length){
+      cells.push('<div style="padding:7px 6px;border:1px solid #1e293b;border-radius:7px;color:#475569;text-align:center"><b>#'+rank+'</b><br>—</div>');
+      continue;
+    }
     var w=priced.filter(function(r){return r.result==='WIN';}).length,l=priced.length-w;
     var pl=priced.reduce(function(sum,r){return sum+(_nhlTrkProfit(r,stake)||0);},0);
     var roi=pl/(priced.length*stake)*100,rate=w/priced.length*100;
-    var rateColor=rate>=70?'#4ade80':(rate>=55?'#facc15':'#f87171');
-    var plColor=pl>=0?'#4ade80':'#f87171';
-    return '<td style="min-width:116px;text-align:center;vertical-align:middle">'
-      +'<div style="color:'+rateColor+';font-family:monospace;font-weight:900;font-size:.8rem">'+rate.toFixed(1)+'%</div>'
-      +'<div style="color:#cbd5e1;font-family:monospace;font-size:.66rem;margin-top:2px">'+w+'-'+l+' · n='+priced.length+'</div>'
-      +'<div style="color:'+plColor+';font-family:monospace;font-size:.66rem;margin-top:2px">'+money(pl)+' · '+(roi>=0?'+':'')+roi.toFixed(1)+'% ROI</div>'
-      +'</td>';
+    var rateColor=rate>=70?'#4ade80':(rate>=55?'#facc15':'#f87171'),plColor=pl>=0?'#4ade80':'#f87171';
+    cells.push('<div style="padding:7px 6px;border:1px solid #1e293b;border-radius:7px;text-align:center">'
+      +'<b style="color:#fbbf24">#'+rank+'</b><br><strong style="color:'+rateColor+'">'+rate.toFixed(1)+'%</strong>'
+      +'<br><span style="color:#cbd5e1;font-family:monospace;font-size:.66rem">'+w+'-'+l+' · n='+priced.length+'</span>'
+      +'<br><span style="color:'+plColor+';font-family:monospace;font-size:.66rem">'+money(pl)+' · '+(roi>=0?'+':'')+roi.toFixed(1)+'% ROI</span></div>');
   }
-  if(!keys.length)return '';
-  var html='<details open style="margin:0 0 14px;border:1px solid rgba(59,130,246,.35);border-radius:11px;background:#080f1f">'
-    +'<summary style="cursor:pointer;list-style:none;padding:11px 13px;color:#bfdbfe;font-size:.78rem;font-weight:900;user-select:none">▸ RANK PERFORMANCE VS ARCHIVED BOOK <span style="color:#64748b;font-weight:600">· model/unpriced rows excluded · ROI uses $'+stake.toFixed(2)+'/play</span></summary>'
-    +'<div style="overflow-x:auto;padding:0 10px 10px"><table class="nhl-trk-tbl" style="min-width:1050px"><thead><tr><th style="text-align:left">Category / Side</th>';
-  for(var rank=1;rank<=10;rank++)html+='<th style="text-align:center">#'+rank+'</th>';
-  html+='</tr></thead><tbody>';
-  keys.forEach(function(key){
-    var bits=key.split('|'),cat=bits[0],side=bits[1];
-    html+='<tr><td style="white-space:nowrap;color:#e2e8f0;font-weight:800">'+_nhlEsc(cat)+' <span style="color:'+(side==='OVER'?'#4ade80':'#fbbf24')+'">('+(side==='OVER'?'Over':'Under')+')</span></td>';
-    for(var rank=1;rank<=10;rank++)html+=cell(cats[key],rank);
-    html+='</tr>';
-  });
-  return html+'</tbody></table></div></details>';
+  return '<div style="margin-top:12px;padding:10px;border:1px solid rgba(59,130,246,.25);border-radius:9px;background:#080f1f">'
+    +'<div style="color:#93c5fd;font-size:.68rem;font-weight:900;margin-bottom:7px">RANK PERFORMANCE VS ARCHIVED BOOK <span style="color:#64748b;font-weight:600">· model/unpriced excluded · $'+stake.toFixed(2)+'/play</span></div>'
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px">'+cells.join('')+'</div></div>';
 }
 function renderNhlHistoricalAnalysis(){
   var sum=document.getElementById('nhlHistSummary'),body=document.getElementById('nhlHistBody');
@@ -5187,7 +5211,9 @@ function renderNhlHistoricalAnalysis(){
     +'<span style="font-family:monospace;font-weight:800;color:'+color+'">Net '+(net>=0?'+$':'-$')+Math.abs(net).toFixed(2)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:800;color:'+color+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
     +'<span style="color:#64748b;font-size:.76rem">'+priced.length+' priced · '+(decided.length-priced.length)+' model/unpriced · '+overflow.length+' overflow</span></div>';
-   body.innerHTML=_nhlHistRankHtml(rows,stake)+(_nhlHistTab==='cat'?_nhlTrkCatHtml(rows,stake):_nhlTrkListHtml(rows,true));
+   body.innerHTML=_nhlHistTab==='cat'
+     ?_nhlTrkCatHtml(rows,stake)
+     :_nhlTrkListHtml(rows,true,true);
 }
 async function loadNhlHistoricalAnalysis(){
   var body=document.getElementById('nhlHistBody');
