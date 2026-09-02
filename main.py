@@ -2939,30 +2939,35 @@ body.is-admin #parlayCard{display:block}
 .nhl-bets-tbl tr:last-child td{border-bottom:none}
 .nhl-bets-tbl tr:hover td{background:rgba(255,255,255,.02)}
 /* NHL Track Record */
-.nhl-trk-tbl{width:100%;border-collapse:collapse;font-size:.92rem}
-.nhl-trk-tbl th{padding:12px 14px;text-align:left;color:#8be9ff;font-size:.74rem;font-weight:800;text-transform:uppercase;letter-spacing:.1em;background:#09111f;white-space:nowrap;border-bottom:1px solid rgba(103,232,249,.25)}
-.nhl-trk-tbl td{padding:11px 14px;border-bottom:1px solid rgba(30,41,59,.8);white-space:nowrap;vertical-align:middle}
+ .nhl-trk-tbl{width:100%;border-collapse:collapse;font-size:.78rem;table-layout:auto}
+ .nhl-trk-tbl th{padding:9px 10px;text-align:left;color:#8be9ff;font-size:.64rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em;background:#09111f;white-space:nowrap;border-bottom:1px solid rgba(103,232,249,.25)}
+ .nhl-trk-tbl td{padding:9px 10px;border-bottom:1px solid rgba(30,41,59,.8);white-space:normal;vertical-align:top;overflow-wrap:anywhere}
 .nhl-trk-tbl tr:last-child td{border-bottom:none}
 .nhl-trk-tbl tr:hover td{background:rgba(255,255,255,.02)}
 .nhl-trk-bar-wrap{width:100px;background:#1e293b;border-radius:4px;height:9px;overflow:hidden;display:inline-block;vertical-align:middle}
 .nhl-trk-bar{height:100%;border-radius:4px}
-.nhl-trk-group{margin:0 0 18px;border:1px solid #263449;border-left:4px solid var(--trk-accent,#22d3ee);border-radius:16px;overflow:hidden;background:linear-gradient(145deg,rgba(15,23,42,.96),rgba(10,15,26,.98));box-shadow:0 8px 22px rgba(0,0,0,.16)}
+ .nhl-trk-group{margin:0 0 12px;border:1px solid #263449;border-left:4px solid var(--trk-accent,#22d3ee);border-radius:13px;overflow:hidden;background:linear-gradient(145deg,rgba(15,23,42,.96),rgba(10,15,26,.98));box-shadow:0 6px 16px rgba(0,0,0,.14)}
+ .nhl-trk-group>summary{list-style:none;cursor:pointer;outline:none}
+ .nhl-trk-group>summary::-webkit-details-marker{display:none}
+ .nhl-trk-group>summary:hover{background:rgba(255,255,255,.035)}
+ .nhl-trk-group-toggle{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border:1px solid rgba(148,163,184,.32);border-radius:6px;color:#cbd5e1;font-size:1rem;line-height:1;font-weight:900;flex:0 0 auto}
+ .nhl-trk-group[open] .nhl-trk-group-toggle{color:var(--trk-accent,#67e8f9);border-color:var(--trk-accent,#67e8f9)}
 .nhl-trk-group-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:15px 18px;background:linear-gradient(90deg,color-mix(in srgb,var(--trk-accent,#22d3ee) 14%,transparent),transparent);border-bottom:1px solid rgba(148,163,184,.14)}
 .nhl-trk-group-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .nhl-trk-group-kicker{font-size:.68rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.14em;font-weight:800}
-.nhl-trk-group-name{font-size:1.08rem;color:#fff;font-weight:900;letter-spacing:.01em}
-.nhl-trk-group-side{font-size:.72rem;font-weight:900;letter-spacing:.1em;padding:4px 9px;border-radius:999px;color:var(--trk-accent,#67e8f9);border:1px solid color-mix(in srgb,var(--trk-accent,#67e8f9) 55%,transparent);background:color-mix(in srgb,var(--trk-accent,#67e8f9) 12%,transparent)}
-.nhl-trk-group-summary{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:#cbd5e1;font-size:.82rem;font-weight:700}
-.nhl-trk-group-rate{font-size:1.08rem;font-family:monospace;font-weight:900;color:var(--trk-accent,#67e8f9)}
+ .nhl-trk-group-name{font-size:.92rem;color:#fff;font-weight:900;letter-spacing:.01em}
+ .nhl-trk-group-side{font-size:.64rem;font-weight:900;letter-spacing:.08em;padding:3px 7px;border-radius:999px;color:var(--trk-accent,#67e8f9);border:1px solid color-mix(in srgb,var(--trk-accent,#67e8f9) 55%,transparent);background:color-mix(in srgb,var(--trk-accent,#67e8f9) 12%,transparent)}
+ .nhl-trk-group-summary{display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:#cbd5e1;font-size:.72rem;font-weight:700}
+ .nhl-trk-group-rate{font-size:.88rem;font-family:monospace;font-weight:900;color:var(--trk-accent,#67e8f9)}
 .nhl-trk-group-pl{font-family:monospace;font-weight:900}
 .nhl-trk-table-scroll{overflow-x:auto}
-.nhl-trk-note{color:#94a3b8!important;font-size:.78rem!important;white-space:normal!important;min-width:150px}
-.nhl-trk-result{display:inline-block;min-width:66px;text-align:center;padding:4px 8px;border-radius:999px;font-size:.72rem;letter-spacing:.05em;font-weight:900}
+ .nhl-trk-note{color:#94a3b8!important;font-size:.68rem!important;line-height:1.25;white-space:normal!important;min-width:0;max-width:220px;overflow-wrap:anywhere}
+ .nhl-trk-result{display:inline-block;min-width:56px;text-align:center;padding:3px 6px;border-radius:999px;font-size:.64rem;letter-spacing:.04em;font-weight:900}
 .nhl-trk-result.win{color:#86efac;background:rgba(34,197,94,.14);border:1px solid rgba(74,222,128,.32)}
 .nhl-trk-result.loss{color:#fca5a5;background:rgba(239,68,68,.14);border:1px solid rgba(248,113,113,.32)}
 .nhl-trk-result.push{color:#fde68a;background:rgba(234,179,8,.14);border:1px solid rgba(250,204,21,.32)}
 .nhl-trk-result.void,.nhl-trk-result.pending{color:#cbd5e1;background:rgba(100,116,139,.14);border:1px solid rgba(148,163,184,.24)}
-@media(max-width:680px){.nhl-trk-group-head{padding:13px 14px}.nhl-trk-group-name{font-size:1rem}.nhl-trk-tbl{font-size:.86rem}.nhl-trk-tbl th{font-size:.68rem;padding:10px}.nhl-trk-tbl td{padding:10px}}
+ @media(max-width:680px){.nhl-trk-group-head{padding:11px 12px}.nhl-trk-group-name{font-size:.86rem}.nhl-trk-tbl{font-size:.72rem}.nhl-trk-tbl th{font-size:.58rem;padding:8px 6px}.nhl-trk-tbl td{padding:8px 6px}.nhl-trk-note{max-width:150px;font-size:.62rem!important}}
 .nhl-jump-chip{cursor:pointer;transition:transform .15s ease,border-color .15s ease,background .15s ease}
 .nhl-jump-chip:hover{transform:translateY(-2px);border-color:#f59e0b;background:#1d1d1d}
 .nhl-game-jump{cursor:pointer;transition:border-color .15s ease,transform .15s ease}
@@ -4515,6 +4520,7 @@ function _nhlTrkSetStake(input){
   renderNhlOverflowDay();
   renderNhlSpecialDay();
   renderNhlHistoricalSpecialDay();
+  renderNhlHistoricalAnalysis();
 }
 function _nhlTrkProfit(row,stake){
   if(!row||row.result!=='WIN'&&row.result!=='LOSS') return null;
@@ -4561,7 +4567,7 @@ function renderNhlSpecialDay(){
   sumEl.innerHTML='<div style="background:#1c1408;border:1px solid #713f12;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
     +'<span style="color:#fde047;font-size:.78rem;font-weight:900">'+rangeLabel+'</span>'
     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
-    +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
+     +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'+stakeInput
     +'<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" style="width:82px;background:#0b1120;border:1px solid #854d0e;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>'
     +'<span style="font-family:monospace;font-weight:800;color:'+plColor+'">Net '+(netPL>=0?'+$':'-$')+Math.abs(netPL).toFixed(2)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:700;color:'+plColor+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
@@ -4595,6 +4601,7 @@ function renderNhlHistoricalSpecialDay(){
   var staked=withOdds.length*stake,roi=staked?netPL/staked*100:null;
   var rate=decided.length?wins/decided.length*100:null,plColor=netPL>=0?'#4ade80':'#f87171';
   var rangeLabel=selDate?selDate:'All Time';
+   var stakeInput='<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" title="Shared across all NHL record boxes" style="width:82px;background:#0b1120;border:1px solid #1d4ed8;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>';
   sumEl.innerHTML='<div style="background:#0c1830;border:1px solid #1d4ed8;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
     +'<span style="color:#93c5fd;font-size:.78rem;font-weight:900">HISTORICAL · '+rangeLabel+'</span>'
     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
@@ -4808,7 +4815,7 @@ function _nhlTrkListHtml(allRows,showRank){
         if(ctx.length)note+='<br><span style="color:#93c5fd">'+ctx.join(' · ')+'</span>';
        return '<tr>'
          +(showRank?'<td style="color:#fbbf24;font-family:monospace;font-weight:900">#'+(r.rank!=null?r.rank:'—')+'</td>':'')
-         +'<td style="color:#f8fafc;font-weight:850;font-size:.96rem">'+r.name+'</td>'
+          +'<td style="color:#f8fafc;font-weight:850;font-size:.82rem">'+r.name+'</td>'
          +'<td style="color:#94a3b8;font-weight:800">'+r.team+'</td>'
           +'<td style="color:#e2e8f0;font-weight:800">'+(r.side||'')+(r.line!=null?' '+r.line:(r.model_line!=null?' model '+r.model_line:' —'))+'</td>'
          +'<td style="font-family:monospace;color:#cbd5e1;font-weight:700">'+odds+'</td>'
@@ -4818,13 +4825,13 @@ function _nhlTrkListHtml(allRows,showRank){
           +'<td class="nhl-trk-note">'+note+'</td>'
          +'</tr>';
      }).join('');
-     return '<section class="nhl-trk-group" style="--trk-accent:'+accent+'">'
-       +'<div class="nhl-trk-group-head"><div class="nhl-trk-group-title">'
+      return '<details class="nhl-trk-group" style="--trk-accent:'+accent+'">'
+        +'<summary class="nhl-trk-group-head"><div class="nhl-trk-group-title">'
        +'<span class="nhl-trk-group-kicker">Category</span><span class="nhl-trk-group-name">'+cat+'</span><span class="nhl-trk-group-side">'+side+'</span></div>'
-       +'<div class="nhl-trk-group-summary"><span>'+meta+'</span><span class="nhl-trk-group-rate">'+(rate!=null?rate.toFixed(1)+'%':'—')+'</span><span class="nhl-trk-group-pl" style="color:'+(pl>=0?'#4ade80':'#f87171')+'">'+money(pl)+'</span></div></div>'
+        +'<div class="nhl-trk-group-summary"><span>'+meta+'</span><span class="nhl-trk-group-rate">'+(rate!=null?rate.toFixed(1)+'%':'—')+'</span><span class="nhl-trk-group-pl" style="color:'+(pl>=0?'#4ade80':'#f87171')+'">'+money(pl)+'</span><span class="nhl-trk-group-toggle" aria-hidden="true">+</span></div></summary>'
        +'<div class="nhl-trk-table-scroll"><table class="nhl-trk-tbl"><thead><tr>'
        +(showRank?'<th>Rank</th>':'')+'<th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Note</th>'
-       +'</tr></thead><tbody>'+rows+'</tbody></table></div></section>';
+        +'</tr></thead><tbody>'+rows+'</tbody></table></div></details>';
    }
    return order.map(groupBlock).join('');
 }
@@ -5089,11 +5096,12 @@ function renderNhlHistoricalAnalysis(){
     sum.innerHTML='<div style="padding:14px;border:1px solid #1d4ed8;border-radius:10px;color:#93c5fd">No saved '+label+' replay results yet. Building this feature does not run the replay.</div>';
     body.innerHTML='';return;
   }
-  var color=net>=0?'#4ade80':'#f87171';
+   var color=net>=0?'#4ade80':'#f87171';
+   var stakeInput='<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" title="Shared across all NHL record boxes" style="width:82px;background:#0b1120;border:1px solid #1d4ed8;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>';
   sum.innerHTML='<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(59,130,246,.4);border-radius:10px;background:#0c1830;color:#bfdbfe;font-size:.76rem;font-weight:700">REPLAY ARCHIVE · '+label+' · excluded from every official NHL record</div>'
     +'<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
     +'<span style="color:#93c5fd;font-weight:900">'+days.length+' saved date'+(days.length===1?'':'s')+'</span>'
-    +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'+(rate!=null?' <span style="color:#94a3b8;font-size:.82rem">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
+     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'+(rate!=null?' <span style="color:#94a3b8;font-size:.82rem">('+rate.toFixed(1)+'%)</span>':'')+'</span>'+stakeInput
     +'<span style="font-family:monospace;font-weight:800;color:'+color+'">Net '+(net>=0?'+$':'-$')+Math.abs(net).toFixed(2)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:800;color:'+color+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
     +'<span style="color:#64748b;font-size:.76rem">'+priced.length+' priced · '+(decided.length-priced.length)+' model/unpriced · '+overflow.length+' overflow</span></div>';
