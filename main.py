@@ -2168,43 +2168,68 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
     for result_key, category, stat_key, side, is_overflow in _NHL_TRK_LISTS:
         rank_start = _NHL_TRK_TOP + 1 if is_overflow else 1
         for rank, pick in enumerate(result.get(result_key) or [], rank_start):
-            line = pick.get("realLine")
-            if line is None:
-                line = pick.get("line")
-            if line is None:
-                line = pick.get("dispLine")
-            odds = pick.get("realOdds") if side == "OVER" else pick.get("realUnderOdds")
+            has_archived_line = (
+                pick.get("lineSource") == "Historical Odds API"
+                and pick.get("realLine") is not None
+            )
+            book_line = pick.get("realLine") if has_archived_line else None
+            model_line = pick.get("line")
+            if model_line is None:
+                model_line = pick.get("dispLine")
+            line = book_line if book_line is not None else model_line
+            odds = (
+                pick.get("realOdds") if side == "OVER"
+                else pick.get("realUnderOdds")
+            ) if has_archived_line else None
             actual = pick.get("simActual")
             void_reason = ""
             outcome = None
-            try:
-                if actual is None or line is None:
+            if not has_archived_line:
+                # A simulated/model threshold is useful for research, but it
+                # is not an actual sportsbook line and must never become a
+                # historical W/L, ROI, or official-style record result.
+                outcome = "UNPRICED"
+                void_reason = (
+                    "No verified archived sportsbook line was available; "
+                    "model estimate shown for reference only."
+                )
+            else:
+                try:
+                    if actual is None or book_line is None:
+                        outcome = "VOID"
+                        void_reason = pick.get("simVoidReason") or (
+                            "No matching historical NHL appearance was available."
+                        )
+                    else:
+                        actual, book_line = float(actual), float(book_line)
+                        if actual == book_line:
+                            outcome = "PUSH"
+                        elif (side == "OVER" and actual > book_line) or (
+                                side == "UNDER" and actual < book_line):
+                            outcome = "WIN"
+                        else:
+                            outcome = "LOSS"
+                except (TypeError, ValueError):
+                    outcome = "VOID"
+                    void_reason = "The historical stat or line could not be read."
+            if outcome == "VOID" and not void_reason:
+                if actual is None or book_line is None:
                     outcome = "VOID"
                     void_reason = pick.get("simVoidReason") or (
                         "No matching historical NHL appearance was available."
                     )
-                else:
-                    actual, line = float(actual), float(line)
-                    if actual == line:
-                        outcome = "PUSH"
-                    elif (side == "OVER" and actual > line) or (
-                            side == "UNDER" and actual < line):
-                        outcome = "WIN"
-                    else:
-                        outcome = "LOSS"
-            except (TypeError, ValueError):
-                outcome = "VOID"
-                void_reason = "The historical stat or line could not be read."
             base_row = {
                 "name": pick.get("name", ""), "team": pick.get("team", ""),
                 "opponent": pick.get("opponent", ""),
                 "home_road": pick.get("homeRoad", ""),
                 "category": category, "stat_key": stat_key, "side": side,
-                "line": line, "odds": odds, "rank": rank,
+                "line": book_line, "model_line": model_line,
+                "odds": odds, "rank": rank,
                 "is_overflow": bool(is_overflow), "line_source": pick.get("lineSource", ""),
                 "schedule_context": pick.get("scheduleContext") or {},
                 "player_workload": pick.get("playerWorkload") or {},
                 "schedule_factor": pick.get("scheduleFactor", 1.0),
+                "actual": actual,
                 "result": outcome, "actual": actual, "void_reason": void_reason,
                 "profit": round(_nhl_american_profit(odds, _NHL_TRK_STAKE, outcome), 2)
                 if outcome in ("WIN", "LOSS", "PUSH") and odds not in (None, "", "0")
@@ -4785,7 +4810,7 @@ function _nhlTrkListHtml(allRows,showRank){
          +(showRank?'<td style="color:#fbbf24;font-family:monospace;font-weight:900">#'+(r.rank!=null?r.rank:'—')+'</td>':'')
          +'<td style="color:#f8fafc;font-weight:850;font-size:.96rem">'+r.name+'</td>'
          +'<td style="color:#94a3b8;font-weight:800">'+r.team+'</td>'
-         +'<td style="color:#e2e8f0;font-weight:800">'+(r.side||'')+(r.line!=null?' '+r.line:'')+'</td>'
+          +'<td style="color:#e2e8f0;font-weight:800">'+(r.side||'')+(r.line!=null?' '+r.line:(r.model_line!=null?' model '+r.model_line:' —'))+'</td>'
          +'<td style="font-family:monospace;color:#cbd5e1;font-weight:700">'+odds+'</td>'
          +'<td style="color:#cbd5e1;font-weight:700">'+((r.actual!=null)?r.actual:'—')+'</td>'
          +'<td><span class="nhl-trk-result '+resultClass+'">'+result+'</span></td>'
@@ -5528,7 +5553,7 @@ _NHL_HIST_SPECIAL_DETAIL_CAT = "__historical_special_detail__"
 _NHL_HIST_DETAIL_CAT = "__historical_analysis_detail__"
 _NHL_HIST_GP_CAT = "__historical_analysis_gp__"
 _NHL_HIST_ODDS_CAT = "__historical_odds_cache__"
-_NHL_HIST_BATCH_START = "2025-10-01"
+_NHL_HIST_BATCH_START = "2025-10-07"
 _NHL_HIST_BATCH_END = "2025-10-31"
 
 
