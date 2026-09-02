@@ -1379,8 +1379,11 @@ def _match_odds_name(odds_name: str, roster: List[Dict]) -> Optional[Dict]:
             pp = norm(p["name"]).split()
             if len(pp) >= 2 and pp[0][0] == fi and pp[-1] == last:
                 return p
-    # 3. Last name only (for single-name odds entries)
-    if parts:
+    # 3. Last name only, but only when the sportsbook genuinely supplied a
+    # single-token player name.  Falling back to the surname for entries such
+    # as "R. Johnston" can incorrectly attach Ross Johnston's line to Wyatt
+    # Johnston when callers match against one roster player at a time.
+    if len(parts) == 1:
         last = parts[-1]
         matches = [p for p in roster if norm(p["name"]).split()[-1] == last]
         if len(matches) == 1: return matches[0]
@@ -2168,19 +2171,21 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
     for result_key, category, stat_key, side, is_overflow in _NHL_TRK_LISTS:
         rank_start = _NHL_TRK_TOP + 1 if is_overflow else 1
         for rank, pick in enumerate(result.get(result_key) or [], rank_start):
+            side_odds = (
+                pick.get("realOdds") if side == "OVER"
+                else pick.get("realUnderOdds")
+            )
             has_archived_line = (
                 pick.get("lineSource") == "Historical Odds API"
                 and pick.get("realLine") is not None
+                and side_odds not in (None, "", "0")
             )
             book_line = pick.get("realLine") if has_archived_line else None
             model_line = pick.get("line")
             if model_line is None:
                 model_line = pick.get("dispLine")
             line = book_line if book_line is not None else model_line
-            odds = (
-                pick.get("realOdds") if side == "OVER"
-                else pick.get("realUnderOdds")
-            ) if has_archived_line else None
+            odds = side_odds if has_archived_line else None
             actual = pick.get("simActual")
             void_reason = ""
             outcome = None
@@ -4346,7 +4351,7 @@ function downloadNhlMyBetsCSV(){
 // ── NHL Track Record ──────────────────────────────────────────────────────────
 var _nhlTrkData=null,_nhlTrkReplay=null,_nhlTrkTabMode='cat',_nhlOvfTabMode='cat';
 var _nhlSpTrkData=null,_nhlSpTrkTabMode='cat';
-var _nhlHistSpData=null,_nhlHistSpTabMode='cat';
+var _nhlHistSpData=null,_nhlHistSpTabMode='cat',_nhlHistSpPeriod='month';
 function _nhlTrkDayName(){
   var dp=document.getElementById('nhlTrkDate'),dn=document.getElementById('nhlTrkDayName');
   if(!dp||!dn) return;
@@ -4465,6 +4470,18 @@ async function loadNhlHistoricalSpecialRecord(manualGrade){
     var r=await fetch('/api/historical-special-track-record'+qs);
     if(!r.ok)throw new Error(await r.text());
     _nhlHistSpData=await r.json();
+    var month=document.getElementById('nhlHistSpMonth');
+    if(month){
+      var prior=month.value;
+      var months=Array.from(new Set((_nhlHistSpData.dates||[]).map(function(d){
+        return String(d.date||'').slice(0,7);
+      }).filter(Boolean))).sort().reverse();
+      month.innerHTML=months.map(function(m){
+        var d=new Date(m+'-01T12:00:00');
+        return '<option value="'+m+'">'+d.toLocaleDateString(undefined,{month:'long',year:'numeric'})+'</option>';
+      }).join('');
+      if(prior&&months.indexOf(prior)>=0)month.value=prior;
+    }
     var section=document.getElementById('nhl-historical-special-section');
     if(section)section.style.display=manualGrade||(_nhlHistSpData.dates||[]).length?'block':'none';
     renderNhlHistoricalSpecialDay();
@@ -4504,9 +4521,19 @@ function _nhlHistSpSetTab(tab){
   if(bl)bl.style.background=tab==='list'?'#1d4ed8':'#1e293b';
   renderNhlHistoricalSpecialDay();
 }
+function _nhlHistSpSetPeriod(period){
+  _nhlHistSpPeriod=period;
+  var month=document.getElementById('nhlHistSpMonth');
+  if(month)month.style.display=period==='month'?'inline-block':'none';
+  renderNhlHistoricalSpecialDay();
+}
 function _nhlHistSpSetAllTime(){
-  var dp=document.getElementById('nhlHistSpDate');if(dp)dp.value='';
-  _nhlHistSpDayName();renderNhlHistoricalSpecialDay();
+  _nhlHistSpPeriod='season';
+  var view=document.getElementById('nhlHistSpView');
+  if(view)view.value='season';
+  var month=document.getElementById('nhlHistSpMonth');
+  if(month)month.style.display='none';
+  renderNhlHistoricalSpecialDay();
 }
 function _nhlTrkStake(){
   var n=parseFloat(localStorage.getItem('nhl_track_stake')||'20');
@@ -4579,18 +4606,21 @@ function renderNhlSpecialDay(){
 }
 function renderNhlHistoricalSpecialDay(){
   if(!_nhlHistSpData)return;
-  var dp=document.getElementById('nhlHistSpDate'),selDate=dp?dp.value:'';
   var dates=_nhlHistSpData.dates||[];
-  var day=selDate?dates.find(function(d){return String(d.date||'').slice(0,10)===selDate;}):null;
+  var monthEl=document.getElementById('nhlHistSpMonth');
+  var selectedMonth=monthEl&&monthEl.value?monthEl.value:'';
+  var selectedDates=_nhlHistSpPeriod==='month'
+    ?dates.filter(function(d){return String(d.date||'').slice(0,7)===selectedMonth;})
+    :dates.filter(function(d){var ds=String(d.date||'');return ds>='2025-10-01'&&ds<='2026-06-30';});
   var sumEl=document.getElementById('nhlHistSpSummary'),bodyEl=document.getElementById('nhlHistSpBody');
   if(!sumEl||!bodyEl)return;
-  if(selDate&&!day){
-    sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#93c5fd;margin:0 0 8px">No Historical Special Results saved for '+selDate+'.</p><p style="color:#64748b;font-size:.76rem;margin:0">Run that completed date from Get Picks to create its replay-only Special record.</p></div>';
+  if(!selectedDates.length){
+    var emptyLabel=_nhlHistSpPeriod==='month'?(selectedMonth||'selected month'):'2025–26 season';
+    sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#93c5fd;margin:0 0 8px">No Historical Special Results saved for '+emptyLabel+'.</p></div>';
     bodyEl.innerHTML='';return;
   }
   var rows=[];
-  if(day)rows=(day.detail||[]).slice();
-  else dates.forEach(function(d){(d.detail||[]).forEach(function(r){rows.push(r);});});
+  selectedDates.forEach(function(d){(d.detail||[]).forEach(function(r){rows.push(r);});});
   var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
   var withOdds=decided.filter(function(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';});
   var wins=decided.filter(function(r){return r.result==='WIN';}).length,losses=decided.length-wins;
@@ -4600,12 +4630,14 @@ function renderNhlHistoricalSpecialDay(){
   var netPL=withOdds.reduce(function(a,r){return a+(_nhlTrkProfit(r,stake)||0);},0);
   var staked=withOdds.length*stake,roi=staked?netPL/staked*100:null;
   var rate=decided.length?wins/decided.length*100:null,plColor=netPL>=0?'#4ade80':'#f87171';
-  var rangeLabel=selDate?selDate:'All Time';
+  var rangeLabel=_nhlHistSpPeriod==='month'
+    ?selectedMonth
+    :'2025–26 Season';
    var stakeInput='<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" title="Shared across all NHL record boxes" style="width:82px;background:#0b1120;border:1px solid #1d4ed8;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>';
   sumEl.innerHTML='<div style="background:#0c1830;border:1px solid #1d4ed8;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
-    +'<span style="color:#93c5fd;font-size:.78rem;font-weight:900">HISTORICAL · '+rangeLabel+'</span>'
+    +'<span style="color:#93c5fd;font-size:.78rem;font-weight:900">HISTORICAL · '+rangeLabel+' · '+selectedDates.length+' saved dates</span>'
     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
-    +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
+    +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'+stakeInput
     +'<span style="font-family:monospace;font-weight:800;color:'+plColor+'">Net '+(netPL>=0?'+$':'-$')+Math.abs(netPL).toFixed(2)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:700;color:'+plColor+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
     +(pushes?'<span style="color:#facc15;font-size:.8rem;font-weight:800">'+pushes+' push</span>':'')
@@ -5091,7 +5123,10 @@ function renderNhlHistoricalAnalysis(){
   var stake=_nhlTrkStake(),net=priced.reduce(function(a,r){return a+(_nhlTrkProfit(r,stake)||0);},0);
   var roi=priced.length?net/(priced.length*stake)*100:null;
   var rate=decided.length?wins/decided.length*100:null;
-  var label=_nhlHistPeriod==='month'?'October 2025':'2025–26 Season · October sample only';
+  var selectedMonth=(document.getElementById('nhlHistMonth')||{}).value||'';
+  var label=_nhlHistPeriod==='month'
+    ?(selectedMonth?new Date(selectedMonth+'-01T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'}):'Selected month')
+    :'2025–26 Season';
   if(!days.length){
     sum.innerHTML='<div style="padding:14px;border:1px solid #1d4ed8;border-radius:10px;color:#93c5fd">No saved '+label+' replay results yet. Building this feature does not run the replay.</div>';
     body.innerHTML='';return;
@@ -5114,6 +5149,16 @@ async function loadNhlHistoricalAnalysis(){
     var r=await fetch('/api/nhl/historical-analysis?token='+_nhlHistAuth());
     if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
     _nhlHistData=await r.json();
+    var month=document.getElementById('nhlHistMonth');
+    if(month){
+      var prior=month.value;
+      var months=_nhlHistData.available_months||[];
+      month.innerHTML=months.map(function(m){
+        var d=new Date(m+'-01T12:00:00');
+        return '<option value="'+m+'">'+d.toLocaleDateString(undefined,{month:'long',year:'numeric'})+'</option>';
+      }).join('');
+      if(prior&&months.indexOf(prior)>=0)month.value=prior;
+    }
     renderNhlHistoricalAnalysis();
   }catch(e){if(body)body.innerHTML='<p style="color:#f87171;padding:18px">'+(e.message||'Could not load Historical Analysis')+'</p>';}
 }
@@ -5263,11 +5308,15 @@ async function pollNhlOctoberReplay(){
     </div>
     <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px"><b style="color:#93c5fd">REPLAY ARCHIVE</b> · Permanent results for Special — Best Plays created by historical replays. Isolated from the official pregame Special, main, Overflow, Locks, parlay, and simulation totals.</p>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
-      <label style="color:#94a3b8;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Replay Date</label>
-      <input type="date" id="nhlHistSpDate" style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:.85rem;outline:none">
-      <span id="nhlHistSpDayName" style="color:#93c5fd;font-weight:700;font-size:.9rem"></span>
-      <button onclick="loadNhlHistoricalSpecialRecord(true)" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">&#8635; Grade &amp; Get Results</button>
-      <button onclick="_nhlHistSpSetAllTime()" style="background:#172554;color:#bfdbfe;border:1px solid #1d4ed8;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">All Time</button>
+      <label style="color:#94a3b8;font-size:.72rem;font-weight:800">SEASON</label>
+      <select style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0"><option value="2025-26">2025–26</option></select>
+      <label style="color:#94a3b8;font-size:.72rem;font-weight:800">VIEW</label>
+      <select id="nhlHistSpView" onchange="_nhlHistSpSetPeriod(this.value)" style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0">
+        <option value="month">Month</option>
+        <option value="season">Season</option>
+      </select>
+      <select id="nhlHistSpMonth" onchange="renderNhlHistoricalSpecialDay()" style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0"></select>
+      <button onclick="loadNhlHistoricalSpecialRecord(false)" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">&#8635; Load Saved Archive</button>
       <button id="nhlHistSpBtnCat" onclick="_nhlHistSpSetTab('cat')" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">By Category</button>
       <button id="nhlHistSpBtnList" onclick="_nhlHistSpSetTab('list')" style="background:#1e293b;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">Full List</button>
     </div>
