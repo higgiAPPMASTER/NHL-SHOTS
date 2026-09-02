@@ -1154,9 +1154,9 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                         for outcome in market.get("outcomes", []):
                             side = outcome.get("name")
                             if market_key == "player_goal_scorer_anytime":
-                                if side != "Yes":
+                                if side not in ("Yes", "No"):
                                     continue
-                                side = "Over"
+                                side = "Over" if side == "Yes" else "Under"
                                 player = (
                                     outcome.get("description")
                                     or outcome.get("name", "")
@@ -1234,7 +1234,7 @@ async def get_shot_lines(target_date: str, games: List[Dict] = None) -> Dict[str
     games = games or []
     # A separate cache namespace prevents older date+tomorrow mixed slates from
     # being reused after lineup eligibility became date/game specific.
-    _oc = _odds_cache_get("nhl_lineup_v3", target_date)
+    _oc = _odds_cache_get("nhl_lineup_v4", target_date)
     if _oc is not None:
         cached_lines = _oc.get("lines", {})
         # A past simulation could previously cache an empty live-endpoint
@@ -1272,7 +1272,7 @@ async def get_shot_lines(target_date: str, games: List[Dict] = None) -> Dict[str
                     archived_cache = {
                         "lines": lines, "pts": pts_lines, "ast": ast_lines,
                         "sv": sv_lines, "goals": goal_lines}
-                    _odds_cache_set("nhl_lineup_v3", target_date, archived_cache)
+                    _odds_cache_set("nhl_lineup_v4", target_date, archived_cache)
                     _nhl_save_historical_odds_cache(target_date, archived_cache)
                     return lines, pts_lines, ast_lines, sv_lines, goal_lines
                 print(f"[HistoricalLines] no archived shot lines available; "
@@ -1343,7 +1343,7 @@ async def get_shot_lines(target_date: str, games: List[Dict] = None) -> Dict[str
                                     if mkt.get("key") != "player_goal_scorer_anytime":
                                         continue
                                     for oc in mkt.get("outcomes", []):
-                                        if oc.get("name") != "Yes":
+                                        if oc.get("name") not in ("Yes", "No"):
                                             continue
                                         player = oc.get("description", "").strip()
                                         if not player:
@@ -1351,8 +1351,10 @@ async def get_shot_lines(target_date: str, games: List[Dict] = None) -> Dict[str
                                         rec = goal_lines.setdefault(player, {
                                             "line": 0.5, "odds": "",
                                             "under_odds": "", "source": "OddsAPI"})
-                                        if not rec["odds"]:
+                                        if oc.get("name") == "Yes" and not rec["odds"]:
                                             rec["odds"] = str(oc.get("price", ""))
+                                        elif oc.get("name") == "No" and not rec["under_odds"]:
+                                            rec["under_odds"] = str(oc.get("price", ""))
                     except Exception as _ge:
                         print(f"[Lines] goal-scorer fetch skipped: {_ge}")
 
@@ -1364,7 +1366,7 @@ async def get_shot_lines(target_date: str, games: List[Dict] = None) -> Dict[str
         print(f"[Lines] {len(lines)} shot | {len(pts_lines)} point | "
               f"{len(ast_lines)} assist | {len(sv_lines)} saves | {len(goal_lines)} goals lines from The Odds API")
         if lines or pts_lines or ast_lines or sv_lines or goal_lines:
-                    _odds_cache_set("nhl_lineup_v3", target_date, {
+                    _odds_cache_set("nhl_lineup_v4", target_date, {
                 "lines": lines, "pts": pts_lines,
                 "ast": ast_lines, "sv": sv_lines, "goals": goal_lines})
         return lines, pts_lines, ast_lines, sv_lines, goal_lines
@@ -5705,7 +5707,7 @@ _NHL_HIST_SPECIAL_LEDGER_CAT = "__historical_special_ledger__"
 _NHL_HIST_SPECIAL_DETAIL_CAT = "__historical_special_detail__"
 _NHL_HIST_DETAIL_CAT = "__historical_analysis_detail__"
 _NHL_HIST_GP_CAT = "__historical_analysis_gp__"
-_NHL_HIST_ODDS_CAT = "__historical_odds_cache__"
+_NHL_HIST_ODDS_CAT = "__historical_odds_cache_v2__"
 _NHL_HIST_BATCH_START = "2025-10-07"
 _NHL_HIST_BATCH_END = "2025-10-31"
 
