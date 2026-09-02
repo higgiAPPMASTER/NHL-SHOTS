@@ -5109,6 +5109,53 @@ function _nhlHistSelectedDays(){
     return d>='2025-10-01'&&d<='2026-06-30';
   });
 }
+function _nhlHistRankHtml(allRows,stake){
+  var catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves'];
+  var cats={},keys=[];
+  allRows.forEach(function(r){
+    if(r.is_overflow||r.category==='NHL Overflow'||r.category==='80-100% Locks')return;
+    var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase(),key=cat+'|'+side;
+    if(!cats[key]){cats[key]=[];keys.push(key);}
+    cats[key].push(r);
+  });
+  keys.sort(function(a,b){
+    var aa=a.split('|'),bb=b.split('|');
+    var ai=catOrder.indexOf(aa[0]),bi=catOrder.indexOf(bb[0]);
+    ai=ai<0?catOrder.length:ai;bi=bi<0?catOrder.length:bi;
+    return ai-bi||(aa[1]==='UNDER'?1:0)-(bb[1]==='UNDER'?1:0);
+  });
+  function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
+  function money(v){return (v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(2);}
+  function cell(list,rank){
+    var priced=list.filter(function(r){
+      return Number(r.rank)===rank&&hasOdds(r)&&(r.result==='WIN'||r.result==='LOSS');
+    });
+    if(!priced.length)return '<td style="color:#475569;text-align:center">—</td>';
+    var w=priced.filter(function(r){return r.result==='WIN';}).length,l=priced.length-w;
+    var pl=priced.reduce(function(sum,r){return sum+(_nhlTrkProfit(r,stake)||0);},0);
+    var roi=pl/(priced.length*stake)*100,rate=w/priced.length*100;
+    var rateColor=rate>=70?'#4ade80':(rate>=55?'#facc15':'#f87171');
+    var plColor=pl>=0?'#4ade80':'#f87171';
+    return '<td style="min-width:116px;text-align:center;vertical-align:middle">'
+      +'<div style="color:'+rateColor+';font-family:monospace;font-weight:900;font-size:.8rem">'+rate.toFixed(1)+'%</div>'
+      +'<div style="color:#cbd5e1;font-family:monospace;font-size:.66rem;margin-top:2px">'+w+'-'+l+' · n='+priced.length+'</div>'
+      +'<div style="color:'+plColor+';font-family:monospace;font-size:.66rem;margin-top:2px">'+money(pl)+' · '+(roi>=0?'+':'')+roi.toFixed(1)+'% ROI</div>'
+      +'</td>';
+  }
+  if(!keys.length)return '';
+  var html='<details open style="margin:0 0 14px;border:1px solid rgba(59,130,246,.35);border-radius:11px;background:#080f1f">'
+    +'<summary style="cursor:pointer;list-style:none;padding:11px 13px;color:#bfdbfe;font-size:.78rem;font-weight:900;user-select:none">▸ RANK PERFORMANCE VS ARCHIVED BOOK <span style="color:#64748b;font-weight:600">· model/unpriced rows excluded · ROI uses $'+stake.toFixed(2)+'/play</span></summary>'
+    +'<div style="overflow-x:auto;padding:0 10px 10px"><table class="nhl-trk-tbl" style="min-width:1050px"><thead><tr><th style="text-align:left">Category / Side</th>';
+  for(var rank=1;rank<=10;rank++)html+='<th style="text-align:center">#'+rank+'</th>';
+  html+='</tr></thead><tbody>';
+  keys.forEach(function(key){
+    var bits=key.split('|'),cat=bits[0],side=bits[1];
+    html+='<tr><td style="white-space:nowrap;color:#e2e8f0;font-weight:800">'+_nhlEsc(cat)+' <span style="color:'+(side==='OVER'?'#4ade80':'#fbbf24')+'">('+(side==='OVER'?'Over':'Under')+')</span></td>';
+    for(var rank=1;rank<=10;rank++)html+=cell(cats[key],rank);
+    html+='</tr>';
+  });
+  return html+'</tbody></table></div></details>';
+}
 function renderNhlHistoricalAnalysis(){
   var sum=document.getElementById('nhlHistSummary'),body=document.getElementById('nhlHistBody');
   if(!sum||!body||!_nhlHistData)return;
@@ -5140,7 +5187,7 @@ function renderNhlHistoricalAnalysis(){
     +'<span style="font-family:monospace;font-weight:800;color:'+color+'">Net '+(net>=0?'+$':'-$')+Math.abs(net).toFixed(2)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:800;color:'+color+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
     +'<span style="color:#64748b;font-size:.76rem">'+priced.length+' priced · '+(decided.length-priced.length)+' model/unpriced · '+overflow.length+' overflow</span></div>';
-  body.innerHTML=_nhlHistTab==='cat'?_nhlTrkCatHtml(rows,stake):_nhlTrkListHtml(rows,true);
+   body.innerHTML=_nhlHistRankHtml(rows,stake)+(_nhlHistTab==='cat'?_nhlTrkCatHtml(rows,stake):_nhlTrkListHtml(rows,true));
 }
 async function loadNhlHistoricalAnalysis(){
   var body=document.getElementById('nhlHistBody');
