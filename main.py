@@ -4815,25 +4815,47 @@ function renderNhlOverflowDay(){
     var l=list.filter(function(r){return r.result==='LOSS';}).length;
     var push=list.filter(function(r){return r.result==='PUSH';}).length;
     var voids=list.filter(function(r){return r.result==='VOID';}).length;
-    var pending=list.length-w-l-push-voids;
+     var unpriced=list.filter(function(r){return r.result==='UNPRICED';});
+     var modelRows=unpriced.filter(function(r){
+       if(r.actual==null||r.model_line==null)return false;
+       var actual=Number(r.actual),line=Number(r.model_line);
+       return isFinite(actual)&&isFinite(line);
+     });
+     var modelW=modelRows.filter(function(r){
+       return r.side==='UNDER'?Number(r.actual)<Number(r.model_line):Number(r.actual)>Number(r.model_line);
+     }).length;
+     var modelP=modelRows.filter(function(r){return Number(r.actual)===Number(r.model_line);}).length;
+     var modelL=modelRows.length-modelW-modelP;
+     var pending=list.length-w-l-push-voids-unpriced.length;
     var priced=list.filter(hasOdds),pl=priced.reduce(function(x,r){return x+(_nhlTrkProfit(r,stake)||0);},0);
     var staked=priced.length*stake,roi=staked?pl/staked*100:null;
-    return {w:w,l:l,push:push,voids:voids,pending:pending,pl:pl,roi:roi,rate:(w+l)?w/(w+l)*100:null};
+     return {
+       w:w,l:l,push:push,voids:voids,pending:pending,unpriced:unpriced.length,
+       modelW:modelW,modelL:modelL,modelP:modelP,
+       modelRate:(modelW+modelL)?modelW/(modelW+modelL)*100:null,
+       pl:pl,roi:roi,rate:(w+l)?w/(w+l)*100:null
+     };
   }
   function catLabel(cat,side){return cat+' ('+(side==='OVER'?'Over':'Under')+')';}
   function row(cat,side,list){
     if(!list.length)return '';
-    var s=stats(list), rate=s.rate!=null?s.rate:0;
-    var rateColor=s.rate==null?'#64748b':(s.rate>=70?'#4ade80':(s.rate>=55?'#facc15':'#f87171'));
+     var s=stats(list);
     var plColor=s.pl>=0?'#4ade80':'#f87171';
-    var record=s.w+' / '+(s.w+s.l);
+     var record='<span style="color:#64748b;font-size:.68rem">Book</span> '+s.w+' / '+(s.w+s.l);
+     if(s.modelW+s.modelL) record+=' <span style="color:#93c5fd;font-size:.68rem">· Model '+s.modelW+'/'+(s.modelW+s.modelL)+' ('+s.modelRate.toFixed(1)+'%)</span>';
     if(s.push) record+=' <span style="color:#facc15;font-size:.68rem">· '+s.push+' push</span>';
     if(s.voids) record+=' <span style="color:#94a3b8;font-size:.68rem">· '+s.voids+' void</span>';
+     var ungradedModel=s.unpriced-s.modelW-s.modelL-s.modelP;
+     if(ungradedModel) record+=' <span style="color:#93c5fd;font-size:.68rem">· '+ungradedModel+' ungraded model-only</span>';
     if(s.pending) record+=' <span style="color:#facc15;font-size:.68rem">· '+s.pending+' pending</span>';
+     var shownRate=s.rate!=null?s.rate:s.modelRate;
+     var shownRateText=s.rate!=null?s.rate.toFixed(1)+'%':(s.modelRate!=null?'Model '+s.modelRate.toFixed(1)+'%':'—');
+     var shownRateColor=s.rate==null?'#93c5fd':(s.rate>=70?'#4ade80':(s.rate>=55?'#facc15':'#f87171'));
+     var shownRateWidth=shownRate==null?0:shownRate;
     return '<tr>'
       +'<td style="color:#e2e8f0;font-weight:700">'+catLabel(cat,side)+'</td>'
       +'<td style="font-family:monospace;color:#cbd5e1;font-weight:800">'+record+'</td>'
-      +'<td><span class="nhl-trk-bar-wrap"><span class="nhl-trk-bar" style="display:block;width:'+rate+'%;background:'+rateColor+'"></span></span> <span style="color:'+rateColor+';font-family:monospace;font-weight:800">'+(s.rate!=null?s.rate.toFixed(1)+'%':'—')+'</span></td>'
+       +'<td><span class="nhl-trk-bar-wrap"><span class="nhl-trk-bar" style="display:block;width:'+shownRateWidth+'%;background:'+shownRateColor+'"></span></span> <span style="color:'+shownRateColor+';font-family:monospace;font-weight:800">'+shownRateText+'</span></td>'
       +'<td style="font-family:monospace;color:'+plColor+';font-weight:800">'+money(s.pl)+'</td>'
       +'<td style="font-family:monospace;color:'+plColor+';font-weight:800">'+(s.roi!=null?(s.roi>=0?'+':'')+s.roi.toFixed(1)+'%':'—')+'</td>'
       +'</tr>';
@@ -5190,6 +5212,7 @@ function renderNhlHistoricalAnalysis(){
   });
   var decided=rows.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
   var priced=decided.filter(function(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';});
+   var unpriced=rows.filter(function(r){return r.result==='UNPRICED';}).length;
   var wins=decided.filter(function(r){return r.result==='WIN';}).length,losses=decided.length-wins;
   var stake=_nhlTrkStake(),net=priced.reduce(function(a,r){return a+(_nhlTrkProfit(r,stake)||0);},0);
   var roi=priced.length?net/(priced.length*stake)*100:null;
@@ -5207,10 +5230,10 @@ function renderNhlHistoricalAnalysis(){
   sum.innerHTML='<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(59,130,246,.4);border-radius:10px;background:#0c1830;color:#bfdbfe;font-size:.76rem;font-weight:700">REPLAY ARCHIVE · '+label+' · excluded from every official NHL record</div>'
     +'<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
     +'<span style="color:#93c5fd;font-weight:900">'+days.length+' saved date'+(days.length===1?'':'s')+'</span>'
-     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'+(rate!=null?' <span style="color:#94a3b8;font-size:.82rem">('+rate.toFixed(1)+'%)</span>':'')+'</span>'+stakeInput
+      +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#64748b;font-size:.68rem">BOOK</span> <span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'+(rate!=null?' <span style="color:#94a3b8;font-size:.82rem">('+rate.toFixed(1)+'%)</span>':'')+'</span>'+stakeInput
     +'<span style="font-family:monospace;font-weight:800;color:'+color+'">Net '+(net>=0?'+$':'-$')+Math.abs(net).toFixed(2)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:800;color:'+color+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
-    +'<span style="color:#64748b;font-size:.76rem">'+priced.length+' priced · '+(decided.length-priced.length)+' model/unpriced · '+overflow.length+' overflow</span></div>';
+     +'<span style="color:#64748b;font-size:.76rem">'+priced.length+' priced · '+unpriced+' model/unpriced · '+overflow.length+' overflow</span></div>';
    body.innerHTML=_nhlHistTab==='cat'
      ?_nhlTrkCatHtml(rows,stake)
      :_nhlTrkListHtml(rows,true,true);
