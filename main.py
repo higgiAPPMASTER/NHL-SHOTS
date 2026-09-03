@@ -1630,9 +1630,19 @@ async def _nhl_pp_role_logs(
 
 async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[Dict]:
     """Goalie game logs — saves = shotsAgainst - goalsAgainst (parallel gtype fetch)."""
+    async def cached_fetch(game_type: int):
+        cached = _nhl_log_cache_get(pid, season, game_type)
+        if cached is not None:
+            return cached
+        data = await _fetch(
+            f"{NHL_API}/player/{pid}/game-log/{season}/{game_type}", c)
+        if isinstance(data, dict):
+            _nhl_log_cache_set(pid, season, game_type, data)
+        return data
+
     datas = await asyncio.gather(
-        _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/2", c),
-        _fetch(f"{NHL_API}/player/{pid}/game-log/{season}/3", c),
+        cached_fetch(2),
+        cached_fetch(3),
         return_exceptions=True,
     )
     logs = []
@@ -2098,16 +2108,93 @@ async def get_saves_picks(
 #  Main algorithm
 # ─────────────────────────────────────────────────────────────────────────────
 
+_NHL_LOG_CACHE_VERSION = 1
+_NHL_CURRENT_LOG_TTL = 10 * 60
+_NHL_COMPLETED_LOG_TTL = 7 * 24 * 3600
+
+
+def _nhl_log_cache_path(pid: int, season: str, game_type: int) -> pathlib.Path:
+    return _CACHE_DIR / f"nhl_log_{int(pid)}_{season}_{int(game_type)}.json"
+
+
+def _nhl_log_cache_get(pid: int, season: str, game_type: int):
+    """Read one raw NHL game-log response without caching failed requests."""
+    path = _nhl_log_cache_path(pid, season, game_type)
+    ttl = (
+        _NHL_CURRENT_LOG_TTL
+        if season == get_season_for_date(date.today())
+        else _NHL_COMPLETED_LOG_TTL
+    )
+    try:
+        if not path.exists() or time.time() - path.stat().st_mtime >= ttl:
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            payload.get("_nhlLogCacheVersion") != _NHL_LOG_CACHE_VERSION
+            or payload.get("season") != season
+            or int(payload.get("game_type", -1)) != int(game_type)
+            or not isinstance(payload.get("data"), dict)
+        ):
+            return None
+        return payload["data"]
+    except Exception:
+        return None
+
+
+def _nhl_log_cache_set(pid: int, season: str, game_type: int, data: dict):
+    if not isinstance(data, dict):
+        return
+    try:
+        _nhl_log_cache_path(pid, season, game_type).write_text(
+            json.dumps({
+                "_nhlLogCacheVersion": _NHL_LOG_CACHE_VERSION,
+                "season": season,
+                "game_type": int(game_type),
+                "data": data,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+async def _nhl_cached_log_payloads(
+        pid: int, sem: asyncio.Semaphore) -> Dict[Tuple[str, int], Dict]:
+    """Load configured player log endpoints, reusing raw responses safely."""
+    payloads: Dict[Tuple[str, int], Dict] = {}
+    missing: List[Tuple[str, int]] = []
+    for season in SEASONS:
+        for game_type in (2, 3):
+            key = (season, game_type)
+            cached = _nhl_log_cache_get(pid, season, game_type)
+            if cached is None:
+                missing.append(key)
+            else:
+                payloads[key] = cached
+
+    if missing:
+        async with sem:
+            async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=30) as c:
+                results = await asyncio.gather(*[
+                    _fetch(
+                        f"{NHL_API}/player/{pid}/game-log/{season}/{game_type}",
+                        c,
+                    )
+                    for season, game_type in missing
+                ], return_exceptions=True)
+        for key, data in zip(missing, results):
+            if isinstance(data, dict):
+                payloads[key] = data
+                _nhl_log_cache_set(pid, key[0], key[1], data)
+    return payloads
+
+
 async def _nhl_player_logs(pid: int, sem: asyncio.Semaphore) -> List[Dict]:
-    """Fetch NHL game logs for a player across multiple seasons."""
+    """Load NHL game logs for a player across multiple seasons."""
     all_logs = []
-    async with sem:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as c:
-            results = await asyncio.gather(
-                *[_fetch(f"{NHL_API}/player/{pid}/game-log/{s}/{gt}", c) for s in SEASONS for gt in (2, 3)],
-                return_exceptions=True
-            )
-    for data in results:
+    payloads = await _nhl_cached_log_payloads(pid, sem)
+    for data in payloads.values():
         if not isinstance(data, dict): continue
         for g in data.get("gameLog", []):
             all_logs.append({
