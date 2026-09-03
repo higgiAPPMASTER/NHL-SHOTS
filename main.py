@@ -2768,6 +2768,7 @@ async def run_picks(
     persist_historical_special: bool = True,
     historical_odds_cache_only: bool = False,
     skip_game_predictor: bool = False,
+    persist_live_snapshot: bool = True,
     system: str = "A",
 ) -> Dict:
     global _progress
@@ -2777,8 +2778,6 @@ async def run_picks(
         raise ValueError("run_picks system must be A, C, or D")
     c_mode = system == "C"
     d_mode = system == "D"
-    if (c_mode or d_mode) and not simulate:
-        raise ValueError("Systems C and D are isolated to historical simulation")
 
     target_date = target_date or date.today().isoformat()
     season = get_season_for_date(date.fromisoformat(target_date))
@@ -3312,9 +3311,12 @@ async def run_picks(
         return _result
     # Persist the pre-game player and GP snapshots before building the hub
     # shell, so a read-only hub snapshot can also show the current slate as
-    # pending rather than waiting for the first grading pass.
-    _nhl_save_gp_snapshot(target_date, _result)
-    _nhl_save_picks_snapshot(target_date, _result)
+    # pending rather than waiting for the first grading pass.  The all-system
+    # runner disables this for its C/D passes and writes those passes into
+    # their own durable namespaces after the shared A/B pass completes.
+    if persist_live_snapshot:
+        _nhl_save_gp_snapshot(target_date, _result)
+        _nhl_save_picks_snapshot(target_date, _result)
     try:
         from replit_push import push_picks_to_replit
         # Bake the picks into the page HTML so the Replit hub can serve an
@@ -3348,6 +3350,85 @@ async def run_picks(
         print(f"[replit_push] nhl push failed: {_e}")
     _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
     return _result
+
+
+async def run_all_nhl_systems(target_date: str = None) -> dict:
+    """Run and durably capture A, B, C, and D from one daily trigger.
+
+    A and B intentionally share one pass: B is the legacy view already
+    attached to A.  C and D use the same date and cached sportsbook response,
+    but remain separate result namespaces so their records cannot overwrite
+    A/B.  This is the single entry point used by the daily cron and the admin
+    button.
+    """
+    target_date = target_date or date.today().isoformat()
+    a = await run_picks(
+        target_date,
+        include_legacy_system=True,
+        persist_historical_special=False,
+        system="A",
+    )
+    if a.get("no_games") or a.get("error"):
+        return {
+            "date": target_date,
+            "no_games": bool(a.get("no_games")),
+            "systems": {"A": a},
+            "message": a.get("message") or a.get("error") or "A failed",
+        }
+
+    # B is the attached legacy calculation from the exact same A inputs.
+    b = dict(a)
+    b.update(a.get("legacySystem") or {})
+    b["system"] = "B"
+    b["comparisonSystem"] = "B Old/attached ZIP"
+    _nhl_save_picks_snapshot(target_date, b, snapshot_category="__picks_B__")
+
+    systems = {"A": a, "B": b}
+    for system in ("C", "D"):
+        try:
+            systems[system] = await run_picks(
+                target_date,
+                persist_historical_special=False,
+                persist_live_snapshot=False,
+                skip_game_predictor=True,
+                system=system,
+            )
+        except Exception as exc:
+            logger.exception("NHL system %s batch run failed", system)
+            systems[system] = {
+                "error": f"System {system} failed: {exc}",
+                "system": system,
+                "picks": [],
+                "games": a.get("games") or [],
+            }
+
+    for system in ("C", "D"):
+        result = systems[system]
+        if "error" not in result and not result.get("no_games"):
+            _nhl_save_picks_snapshot(
+                target_date, result, snapshot_category=f"__picks_{system}__")
+
+    summary = {}
+    for system, result in systems.items():
+        summary[system] = {
+            "ok": "error" not in result and not result.get("no_games"),
+            "picks": sum(len(result.get(key) or []) for key in (
+                "picks", "rest", "shotUnders", "shotUndersRest",
+                "ptsPicks", "ptsRest", "ptsUnders", "ptsUndersRest",
+                "ppPicks", "ppRest", "ppUnders", "ppUndersRest",
+                "astPicks", "astRest", "astUnders", "astUndersRest",
+                "goalPicks", "goalRest", "goalUnders", "goalUndersRest",
+                "savesPicks", "savesRest", "savesUnders", "savesUndersRest",
+            )),
+            "error": result.get("error"),
+        }
+    return {
+        "date": target_date,
+        "games": len(a.get("games") or []),
+        "systems": summary,
+        "results": systems,
+        "message": "NHL systems A, B, C, and D completed",
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HTML
@@ -3684,6 +3765,15 @@ body.is-admin #parlayCard{display:block}
       <input type="date" id="datePicker"/>
     </div>
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
+    <button class="btn-run" id="nhlRunAllBtn" onclick="runAllNhlSystems()" style="display:none;margin-left:8px;background:#4338ca">Run A+B+C+D &amp; Log</button>
+    <div id="nhlRunAllStatus" style="display:none;color:#93c5fd;font-size:.74rem;font-weight:700;margin-top:10px"></div>
+    <div id="nhlPositionFilters" style="display:flex;justify-content:center;align-items:center;gap:7px;flex-wrap:wrap;margin:14px auto 0">
+      <span style="color:#94a3b8;font-size:.7rem;font-weight:900;letter-spacing:.06em">SHOW</span>
+      <button type="button" id="nhlPosAll" onclick="_nhlSetPositionFilter('ALL')" style="background:#1d4ed8;color:#fff;border:1px solid #60a5fa;border-radius:8px;padding:7px 12px;font-size:.74rem;font-weight:900;cursor:pointer">ALL</button>
+      <button type="button" id="nhlPosF" onclick="_nhlSetPositionFilter('F')" style="background:#1e293b;color:#cbd5e1;border:1px solid #475569;border-radius:8px;padding:7px 12px;font-size:.74rem;font-weight:900;cursor:pointer">FORWARDS</button>
+      <button type="button" id="nhlPosD" onclick="_nhlSetPositionFilter('D')" style="background:#1e293b;color:#cbd5e1;border:1px solid #475569;border-radius:8px;padding:7px 12px;font-size:.74rem;font-weight:900;cursor:pointer">DEFENSEMEN</button>
+      <span style="color:#64748b;font-size:.67rem">display only · does not run the model</span>
+    </div>
     <div id="nhlReplayChoices" style="display:none;margin:14px auto 0">
       <div style="color:#fbbf24;font-size:.72rem;font-weight:900;margin-bottom:8px">HISTORICAL REPLAY · CHOOSE A SYSTEM</div>
       <div style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
@@ -3991,6 +4081,37 @@ async function getPicks(){
     }
   }catch(e){ if(st) st.textContent=''; alert(e.message||'Could not load picks. Please try again.'); }
   finally{if(pollTimer)clearInterval(pollTimer);btn.disabled=false;btn.textContent=orig;}
+}
+
+async function runAllNhlSystems(){
+  if(!window.IS_ADMIN){alert('Admin only');return;}
+  var _nhlTok=localStorage.getItem('__mpa_token')||'';
+  var btn=document.getElementById('nhlRunAllBtn');
+  var st=document.getElementById('nhlRunAllStatus');
+  var dp=document.getElementById('datePicker');
+  var dt=(dp&&dp.value)||new Date().toISOString().slice(0,10);
+  if(btn){btn.disabled=true;btn.textContent='Running all four systems…';}
+  if(st){st.style.display='block';st.textContent='One trigger is running A+B together, then C and D. Sportsbook lines are reused from the same odds cache.';}
+  try{
+    var r=await fetch('/api/nhl/run-all-systems?date_str='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok),{method:'POST'});
+    var data=await r.json();
+    if(!r.ok)throw new Error(data.detail||data.error||('HTTP '+r.status));
+    if(data.no_games){
+      if(st)st.textContent=data.message||('No NHL games scheduled for '+dt+'.');
+      return;
+    }
+    var parts=[];
+    ['A','B','C','D'].forEach(function(system){
+      var row=(data.systems||{})[system]||{};
+      parts.push(system+': '+(row.ok?(row.picks+' logged'):(row.error||'failed')));
+    });
+    if(st)st.textContent='Complete for '+dt+' · '+parts.join(' · ');
+    await getPicks();
+  }catch(e){
+    if(st){st.style.color='#f87171';st.textContent=e.message||'The four-system run failed.';}
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='Run A+B+C+D & Log';}
+  }
 }
 
 window.NHL_HIST_SYSTEM='A';
@@ -4566,6 +4687,32 @@ function renderResults(d){
   document.getElementById('out').innerHTML = '<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
   _nhlPaint('');
 }
+var _nhlPositionFilter='ALL';
+function _nhlPositionGroup(p){
+  var group=String(p&&p.positionGroup||'F').toUpperCase();
+  if(group==='D'||group.indexOf('DEF')===0)return 'D';
+  if(group==='G'||group.indexOf('GOAL')===0)return 'G';
+  return 'F';
+}
+function _nhlPositionMatches(p){
+  return _nhlPositionFilter==='ALL'||_nhlPositionGroup(p)===_nhlPositionFilter;
+}
+function _nhlPaintPositionButtons(){
+  var cfg=[['nhlPosAll','ALL'],['nhlPosF','F'],['nhlPosD','D']];
+  cfg.forEach(function(item){
+    var b=document.getElementById(item[0]);if(!b)return;
+    var active=_nhlPositionFilter===item[1];
+    b.style.background=active?'#1d4ed8':'#1e293b';
+    b.style.borderColor=active?'#60a5fa':'#475569';
+    b.style.color=active?'#fff':'#cbd5e1';
+  });
+}
+function _nhlSetPositionFilter(filter){
+  _nhlPositionFilter=(filter==='F'||filter==='D')?filter:'ALL';
+  _nhlPaintPositionButtons();
+  var input=document.getElementById('nhlSearch');
+  _nhlPaint(input?input.value:'');
+}
 function _nhlSafe(value){
   return String(value==null?'':value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
@@ -4581,6 +4728,7 @@ function _nhlPlayerDirectory(){
   keys.forEach(function(k){
     (raw[k]||[]).forEach(function(p){
       if(!p||!p.name)return;
+      if(!_nhlPositionMatches(p))return;
       var id=p.pid!=null?String(p.pid):String(p.name).toLowerCase()+'|'+String(p.team||'');
       var key=id+'|'+String(p.team||'')+'|'+String(p.opponent||'');
       if(seen[key])return;
@@ -4622,7 +4770,10 @@ function _nhlPaint(q){
     }).join('');
   }
   q=(q||'').toLowerCase().trim();
-  function _f(a){return q?(a||[]).filter(function(p){return (p.name||'').toLowerCase().indexOf(q)>=0;}):(a||[]);}
+  function _f(a){
+    var rows=(a||[]).filter(_nhlPositionMatches);
+    return q?rows.filter(function(p){return (p.name||'').toLowerCase().indexOf(q)>=0;}):rows;
+  }
   function _ppRoleEligible(p){
     var games=Number(p&&p.ppUsageGames||0),total=Number(p&&p.ppUsageTotal||0);
     var avg=Number(p&&p.ppToiAvgSec||0);
@@ -5675,6 +5826,8 @@ document.addEventListener('DOMContentLoaded',function(){
   if(hsp){hsp.value='';
     hsp.addEventListener('change',function(){_nhlHistSpDayName();renderNhlHistoricalSpecialDay();});}
   _nhlTrkDayName();_nhlOvfDayName();_nhlSpDayName();_nhlHistSpDayName();
+  var runAllBtn=document.getElementById('nhlRunAllBtn');
+  if(runAllBtn&&window.IS_ADMIN)runAllBtn.style.display='inline-block';
   loadNhlTrackRecord();
   loadNhlHistoricalAnalysis();
   var top=document.getElementById('nhl-btn-top'),bot=document.getElementById('nhl-btn-bot');
@@ -6468,6 +6621,24 @@ _NHL_TRK_APP   = "nhl"
 _NHL_TRK_STAKE = 20.0
 _NHL_TRK_TOP   = 10
 _NHL_SNAP_CAT  = "__picks__"
+_NHL_SYSTEM_SNAP_CATS = {
+    "A": _NHL_SNAP_CAT,
+    "B": "__picks_B__",
+    "C": "__picks_C__",
+    "D": "__picks_D__",
+}
+_NHL_SYSTEM_LEDGER_CATS = {
+    "A": "__ledger__",
+    "B": "__ledger_B__",
+    "C": "__ledger_C__",
+    "D": "__ledger_D__",
+}
+_NHL_SYSTEM_DETAIL_CATS = {
+    "A": "__detail__",
+    "B": "__detail_B__",
+    "C": "__detail_C__",
+    "D": "__detail_D__",
+}
 _NHL_GP_CAT    = "__gp__"
 _NHL_SPECIAL_SNAP_CAT = "__special_picks__"
 _NHL_SPECIAL_LEDGER_CAT = "__special_ledger__"
@@ -6567,7 +6738,8 @@ def _nhl_special_flat_rows(result: dict) -> list:
             })
     return special_flat
 
-def _nhl_save_picks_snapshot(date_str: str, result: dict):
+def _nhl_save_picks_snapshot(
+        date_str: str, result: dict, snapshot_category: str = _NHL_SNAP_CAT):
     """Freeze all pick lists to Supabase so they survive redeploys and can be graded."""
     flat = []
     for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
@@ -6589,7 +6761,8 @@ def _nhl_save_picks_snapshot(date_str: str, result: dict):
     if flat:
         ok = _nhl_sb_upsert(
             "mpa_track_ledger",
-            [{"app": _NHL_TRK_APP, "date": date_str, "category": _NHL_SNAP_CAT,
+            [{"app": _NHL_TRK_APP, "date": date_str,
+              "category": snapshot_category,
               "side": "ALL", "wins": 0, "losses": 0, "locked": False, "detail": flat}],
             "app,date,category,side")
         print(f"[nhl_track] snapshot {'saved' if ok else 'FAILED'}: "
@@ -6891,9 +7064,11 @@ def _nhl_update_gp_ledger(include_date: str = ""):
         except Exception as e:
             print(f"[nhl_track] GP grade failed {d}: {e}")
 
-def _nhl_load_picks_snapshot(date_str: str) -> list:
+def _nhl_load_picks_snapshot(
+        date_str: str, snapshot_category: str = _NHL_SNAP_CAT) -> list:
     rows = _nhl_sb_get("mpa_track_ledger", {
-        "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{_NHL_SNAP_CAT}",
+        "app": f"eq.{_NHL_TRK_APP}",
+        "category": f"eq.{snapshot_category}",
         "side": "eq.ALL", "date": f"eq.{date_str}", "select": "detail", "limit": "1"})
     if rows:
         d = rows[0].get("detail") or []
@@ -6920,9 +7095,10 @@ def _nhl_load_historical_special_snapshot(date_str: str) -> list:
         return d if isinstance(d, list) else []
     return []
 
-def _nhl_list_snap_dates() -> list:
+def _nhl_list_snap_dates(snapshot_category: str = _NHL_SNAP_CAT) -> list:
     rows = _nhl_sb_get("mpa_track_ledger", {
-        "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{_NHL_SNAP_CAT}",
+        "app": f"eq.{_NHL_TRK_APP}",
+        "category": f"eq.{snapshot_category}",
         "side": "eq.ALL", "select": "date", "limit": "365"})
     return sorted({r["date"] for r in rows if r.get("date")})
 
@@ -7204,14 +7380,6 @@ def _nhl_update_track_ledger(include_date: str = ""):
     from datetime import date as _d
     today = _d.today().isoformat()
     with _NHL_TRK_LOCK:
-        locked_rows = _nhl_sb_get("mpa_track_ledger", {
-            "app": f"eq.{_NHL_TRK_APP}", "category": "eq.__ledger__",
-            "locked": "eq.true", "select": "date,detail", "limit": "500"}) or []
-        locked = {
-            r["date"] for r in locked_rows
-            if r.get("date") and isinstance(r.get("detail"), dict)
-            and "__model_book_v2__" in r.get("detail", {})
-        }
         special_locked_rows = _nhl_sb_get_all("mpa_track_ledger", {
             "app": f"eq.{_NHL_TRK_APP}",
             "category": f"eq.{_NHL_SPECIAL_LEDGER_CAT}",
@@ -7220,34 +7388,51 @@ def _nhl_update_track_ledger(include_date: str = ""):
             r["date"] for r in special_locked_rows if r.get("date")
         }
         upserts = []
-        for d in _nhl_list_snap_dates():
-            if d >= today or d in locked:
-                continue
-            snap = _nhl_load_picks_snapshot(d)
-            if not snap:
-                continue
-            try:
-                graded = _nhl_grade_date(d, snap)
-            except Exception as e:
-                print(f"[nhl_track] grade failed {d}: {e}")
-                continue
-            if not graded.get("any_game"):
-                continue
-            try:
-                from datetime import date as _dd
-                old_enough = (_dd.today() - _dd.fromisoformat(d)).days >= 2
-            except Exception:
-                old_enough = False
-            if not graded.get("all_final") and not old_enough:
-                continue
-            agg = _nhl_aggregate_graded(graded)
-            det = _nhl_detail_graded(graded)
-            upserts += [
-                {"app":_NHL_TRK_APP,"date":d,"category":"__ledger__","side":"ALL",
-                 "wins":0,"losses":0,"locked":True,"detail":agg},
-                {"app":_NHL_TRK_APP,"date":d,"category":"__detail__","side":"ALL",
-                 "wins":0,"losses":0,"locked":True,"detail":det},
-            ]
+        for system in ("A", "B", "C", "D"):
+            snapshot_category = _NHL_SYSTEM_SNAP_CATS[system]
+            ledger_category = _NHL_SYSTEM_LEDGER_CATS[system]
+            detail_category = _NHL_SYSTEM_DETAIL_CATS[system]
+            locked_rows = _nhl_sb_get("mpa_track_ledger", {
+                "app": f"eq.{_NHL_TRK_APP}",
+                "category": f"eq.{ledger_category}",
+                "locked": "eq.true", "select": "date,detail",
+                "limit": "500"}) or []
+            locked = {
+                row["date"] for row in locked_rows
+                if row.get("date") and isinstance(row.get("detail"), dict)
+                and "__model_book_v2__" in row.get("detail", {})
+            }
+            for d in _nhl_list_snap_dates(snapshot_category):
+                if d >= today or d in locked:
+                    continue
+                snap = _nhl_load_picks_snapshot(d, snapshot_category)
+                if not snap:
+                    continue
+                try:
+                    graded = _nhl_grade_date(d, snap)
+                except Exception as e:
+                    print(f"[nhl_track:{system}] grade failed {d}: {e}")
+                    continue
+                if not graded.get("any_game"):
+                    continue
+                try:
+                    from datetime import date as _dd
+                    old_enough = (
+                        _dd.today() - _dd.fromisoformat(d)).days >= 2
+                except Exception:
+                    old_enough = False
+                if not graded.get("all_final") and not old_enough:
+                    continue
+                agg = _nhl_aggregate_graded(graded)
+                det = _nhl_detail_graded(graded)
+                upserts += [
+                    {"app": _NHL_TRK_APP, "date": d,
+                     "category": ledger_category, "side": "ALL",
+                     "wins": 0, "losses": 0, "locked": True, "detail": agg},
+                    {"app": _NHL_TRK_APP, "date": d,
+                     "category": detail_category, "side": "ALL",
+                     "wins": 0, "losses": 0, "locked": True, "detail": det},
+                ]
         # Special Plays have their own snapshot, grade, summary, and lock
         # namespace. They never enter the regular or Overflow aggregates.
         for d in _nhl_list_special_snap_dates():
@@ -7507,8 +7692,19 @@ async def nhl_gp_record(grade: bool = False, date_str: str = ""):
     return JSONResponse(_nhl_gp_record_payload())
 
 @app.get("/api/track-record")
-async def nhl_track_record(grade: bool = False, date_str: str = ""):
+async def nhl_track_record(
+        request: Request, grade: bool = False, date_str: str = "",
+        system: str = "A", token: str = ""):
     """NHL player-pick and read-only Game Predictor records by date."""
+    record_system = str(system or "A").strip().upper()
+    if record_system not in ("A", "B", "C", "D"):
+        raise HTTPException(
+            status_code=400, detail="System must be A, B, C, or D")
+    if record_system != "A":
+        tok = token or request.headers.get(
+            "Authorization", "").replace("Bearer ", "").strip()
+        if not _verify_hub_token(tok) or not _is_admin_token(tok):
+            raise HTTPException(status_code=403, detail="Admin only")
     if grade:
         # The Track Record button is a deliberate manual grade step.  Run it
         # off the event loop so users receive the newly graded GP data in this
@@ -7517,7 +7713,7 @@ async def nhl_track_record(grade: bool = False, date_str: str = ""):
         await loop.run_in_executor(None, _nhl_update_track_ledger, date_str)
     else:
         _bt_th.Thread(target=_nhl_trk_bg, daemon=True).start()
-    return JSONResponse(_nhl_track_record_payload())
+    return JSONResponse(_nhl_track_record_payload(record_system))
 
 @app.get("/api/special-track-record")
 async def nhl_special_track_record(grade: bool = False, date_str: str = ""):
@@ -7768,20 +7964,27 @@ def _nhl_historical_analysis_payload(system: str = "A") -> dict:
     }
 
 
-def _nhl_track_record_payload() -> dict:
+def _nhl_track_record_payload(system: str = "A") -> dict:
     """Build the read-only payload used by both the API and hub snapshots."""
+    record_system = str(system or "A").strip().upper()
+    if record_system not in _NHL_SYSTEM_SNAP_CATS:
+        record_system = "A"
+    snapshot_category = _NHL_SYSTEM_SNAP_CATS[record_system]
+    detail_category = _NHL_SYSTEM_DETAIL_CATS[record_system]
     det_rows = _nhl_sb_get("mpa_track_ledger", {
-        "app": f"eq.{_NHL_TRK_APP}", "category": "eq.__detail__",
+        "app": f"eq.{_NHL_TRK_APP}",
+        "category": f"eq.{detail_category}",
         "locked": "eq.true", "select": "date,detail", "limit": "365"})
     detail_by_date = {r["date"]: (r.get("detail") or []) for r in (det_rows or [])}
     snap_rows = _nhl_sb_get("mpa_track_ledger", {
-        "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{_NHL_SNAP_CAT}",
+        "app": f"eq.{_NHL_TRK_APP}",
+        "category": f"eq.{snapshot_category}",
         "side": "eq.ALL", "select": "date,detail", "limit": "365"})
     snapshot_by_date = {r["date"]: (r.get("detail") or []) for r in (snap_rows or [])}
-    gp_by_date = {
-        r["date"]: (r.get("detail") or [])
-        for r in _nhl_load_gp_snapshots() if r.get("date")
-    }
+    gp_by_date = ({
+        row["date"]: (row.get("detail") or [])
+        for row in _nhl_load_gp_snapshots() if row.get("date")
+    } if record_system == "A" else {})
     dates = sorted(set(detail_by_date) | set(snapshot_by_date) | set(gp_by_date), reverse=True)
 
     def _same_line(a, b):
@@ -7903,9 +8106,13 @@ def _nhl_track_record_payload() -> dict:
                        "overflow_wins":overflow_wins,
                        "overflow_losses":overflow_losses,
                        "gp":gp})
-    special_payload = _nhl_special_track_record_payload()
+    special_payload = (
+        _nhl_special_track_record_payload()
+        if record_system == "A" else {"dates": []}
+    )
     return {"dates": result, "stake": _NHL_TRK_STAKE,
-            "special_dates": special_payload.get("dates", [])}
+            "special_dates": special_payload.get("dates", []),
+            "system": record_system}
 
 
 _DASHBOARD_FALLBACK_HTML = """<!doctype html>
@@ -8983,6 +9190,46 @@ async def nhl_historical_analysis(
 
 _CRON_BUSY_NHL = False
 
+
+async def _nhl_run_all_and_cache(date_str: str) -> dict:
+    batch = await run_all_nhl_systems(date_str)
+    a_result = (batch.get("results") or {}).get("A") or {}
+    if a_result and "error" not in a_result and not a_result.get("no_games"):
+        _cache_set("nhl", date_str, a_result)
+    # Grade prior player/GP slates after today's capture.  The current date
+    # remains pending until its games finish.
+    await asyncio.get_running_loop().run_in_executor(
+        None, _nhl_update_track_ledger)
+    return batch
+
+
+@app.post("/api/nhl/run-all-systems")
+async def api_run_all_nhl_systems(
+        request: Request, date_str: str = "", token: str = ""):
+    """Admin one-click trigger for the daily A/B/C/D capture."""
+    global _CRON_BUSY_NHL
+    tok = token or request.headers.get(
+        "Authorization", "").replace("Bearer ", "").strip()
+    if not _verify_hub_token(tok) or not _is_admin_token(tok):
+        raise HTTPException(status_code=403, detail="Admin only")
+    ds = date_str or date.today().isoformat()
+    try:
+        date.fromisoformat(ds)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="A valid date is required")
+    if _CRON_BUSY_NHL:
+        raise HTTPException(
+            status_code=409, detail="The NHL daily batch is already running")
+    _CRON_BUSY_NHL = True
+    try:
+        batch = await _nhl_run_all_and_cache(ds)
+    finally:
+        _CRON_BUSY_NHL = False
+    response = {
+        key: value for key, value in batch.items() if key != "results"
+    }
+    return JSONResponse(response, headers={"Cache-Control": "no-store"})
+
 @app.api_route("/api/cron-run", methods=["GET", "POST"])
 async def cron_run_nhl(request: Request, date_str: str = ""):
     # Cron-friendly trigger: authed by the static INTERNAL_API_TOKEN secret sent
@@ -9000,15 +9247,17 @@ async def cron_run_nhl(request: Request, date_str: str = ""):
         return {"ran": False, "cached": bool(_cache_get("nhl", ds)), "date": ds, "reason": "already running"}
     _CRON_BUSY_NHL = True
     try:
-        result = await run_picks(ds)
-        if isinstance(result, dict) and "error" not in result:
-            _cache_set("nhl", ds, result)
-        # Daily cron runs also settle the prior dates' player and GP records.
-        # Keep the blocking NHL/Supabase calls out of FastAPI's event loop.
-        await asyncio.get_running_loop().run_in_executor(None, _nhl_update_track_ledger)
+        batch = await _nhl_run_all_and_cache(ds)
     finally:
         _CRON_BUSY_NHL = False
-    return {"ran": True, "cached": bool(_cache_get("nhl", ds)), "date": ds}
+    return {
+        "ran": True,
+        "cached": bool(_cache_get("nhl", ds)),
+        "date": ds,
+        "games": batch.get("games", 0),
+        "systems": batch.get("systems", {}),
+        "message": batch.get("message", ""),
+    }
 
 
 @app.get("/api/cached")
