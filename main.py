@@ -4037,16 +4037,20 @@ async function getPicks(){
   }
   try{
     var _nhlTok=localStorage.getItem('__mpa_token')||'';
+    var _nhlAdmin=new URLSearchParams(location.search).get('admin')||'';
     var replaySystem=window.NHL_HIST_SYSTEM||'A';
     var adminReplay=isHistorical&&window.IS_ADMIN;
     var url=isHistorical&&adminReplay
-      ?'/api/historical-track-replay?date_str='+encodeURIComponent(dt)+'&system='+encodeURIComponent(replaySystem)+'&token='+encodeURIComponent(_nhlTok)
+      ?'/api/historical-track-replay?date_str='+encodeURIComponent(dt)+'&system='+encodeURIComponent(replaySystem)+'&token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin)
       :(isHistorical
         ?'/api/picks?target_date='+encodeURIComponent(dt)+'&simulate=true&token='+encodeURIComponent(_nhlTok)
         :'/api/cached?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok));
     var res=await fetch(url);
     if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
-    if(!res.ok){ throw new Error('Could not load picks.'); }
+    if(!res.ok){
+      var errData=await res.json().catch(function(){return {};});
+      throw new Error(errData.detail||errData.error||('Could not load picks (HTTP '+res.status+').'));
+    }
     var data=await res.json();
     if(data.no_games){
       if(out)out.innerHTML='<div style="text-align:center;padding:40px 20px;color:#9ca3af"><h2 style="color:#f59e0b;margin-bottom:8px">No NHL Games</h2><p>'+(data.message||('No NHL games scheduled for '+dt+'.'))+'</p></div>';
@@ -4086,6 +4090,7 @@ async function getPicks(){
 async function runAllNhlSystems(){
   if(!window.IS_ADMIN){alert('Admin only');return;}
   var _nhlTok=localStorage.getItem('__mpa_token')||'';
+  var _nhlAdmin=new URLSearchParams(location.search).get('admin')||'';
   var btn=document.getElementById('nhlRunAllBtn');
   var st=document.getElementById('nhlRunAllStatus');
   var dp=document.getElementById('datePicker');
@@ -4093,7 +4098,7 @@ async function runAllNhlSystems(){
   if(btn){btn.disabled=true;btn.textContent='Running all four systems…';}
   if(st){st.style.display='block';st.textContent='One trigger is running A+B together, then C and D. Sportsbook lines are reused from the same odds cache.';}
   try{
-    var r=await fetch('/api/nhl/run-all-systems?date_str='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok),{method:'POST'});
+    var r=await fetch('/api/nhl/run-all-systems?date_str='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin),{method:'POST'});
     var data=await r.json();
     if(!r.ok)throw new Error(data.detail||data.error||('HTTP '+r.status));
     if(data.no_games){
@@ -5327,6 +5332,7 @@ function _nhlTrackRecordQuery(manualGrade,system,dateValue){
   if(system&&system!=='A'){
     params.push('system='+encodeURIComponent(system));
     params.push('token='+encodeURIComponent(localStorage.getItem('__mpa_token')||''));
+    params.push('admin='+encodeURIComponent(new URLSearchParams(location.search).get('admin')||''));
   }
   return params.length?'?'+params.join('&'):'';
 }
@@ -7751,7 +7757,7 @@ async def nhl_gp_record(grade: bool = False, date_str: str = ""):
 @app.get("/api/track-record")
 async def nhl_track_record(
         request: Request, grade: bool = False, date_str: str = "",
-        system: str = "A", token: str = ""):
+        system: str = "A", token: str = "", admin: str = ""):
     """NHL player-pick and read-only Game Predictor records by date."""
     record_system = str(system or "A").strip().upper()
     if record_system not in ("A", "B", "C", "D"):
@@ -7760,7 +7766,7 @@ async def nhl_track_record(
     if record_system != "A":
         tok = token or request.headers.get(
             "Authorization", "").replace("Bearer ", "").strip()
-        if not _verify_hub_token(tok) or not _is_admin_token(tok):
+        if not _nhl_bet_admin_ok(tok, admin):
             raise HTTPException(status_code=403, detail="Admin only")
     if grade:
         # The Track Record button is a deliberate manual grade step.  Run it
@@ -8242,10 +8248,11 @@ async def api_picks(request: Request, target_date: str = None, token: str = "",
 
 @app.get("/api/historical-track-replay")
 async def nhl_historical_track_replay(request: Request, date_str: str,
-                                      token: str = "", system: str = "A"):
+                                      token: str = "", system: str = "A",
+                                      admin: str = ""):
     """Return a view-only historical replay; never save it to the ledger."""
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    if not _verify_hub_token(tok) or not _is_admin_token(tok):
+    if not _nhl_bet_admin_ok(tok, admin):
         raise HTTPException(status_code=403, detail="Admin only")
     try:
         replay_date = date.fromisoformat(date_str)
@@ -9262,12 +9269,13 @@ async def _nhl_run_all_and_cache(date_str: str) -> dict:
 
 @app.post("/api/nhl/run-all-systems")
 async def api_run_all_nhl_systems(
-        request: Request, date_str: str = "", token: str = ""):
+        request: Request, date_str: str = "", token: str = "",
+        admin: str = ""):
     """Admin one-click trigger for the daily A/B/C/D capture."""
     global _CRON_BUSY_NHL
     tok = token or request.headers.get(
         "Authorization", "").replace("Bearer ", "").strip()
-    if not _verify_hub_token(tok) or not _is_admin_token(tok):
+    if not _nhl_bet_admin_ok(tok, admin):
         raise HTTPException(status_code=403, detail="Admin only")
     ds = date_str or date.today().isoformat()
     try:
