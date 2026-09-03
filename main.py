@@ -3785,6 +3785,16 @@ body.is-admin #parlayCard{display:block}
       </div>
       <div id="nhlReplayHint" style="color:#64748b;font-size:.68rem;margin-top:7px">Choose a completed date, then click A New, B Old, C Selective, or D Top Players.</div>
        <div id="nhlReplayAllStatus" style="display:none;color:#c4b5fd;font-size:.72rem;font-weight:800;margin-top:9px"></div>
+       <div id="nhlReplayAllProgress" style="display:none;max-width:520px;margin:12px auto 0;padding:13px 16px;background:rgba(124,58,237,.09);border:1px solid rgba(196,181,253,.35);border-radius:11px">
+         <div style="display:flex;align-items:center;justify-content:center;gap:10px">
+           <span class="spin" style="display:inline-block;width:22px;height:22px;border-width:3px;flex:0 0 auto"></span>
+           <span id="nhlReplayAllStage" style="color:#ddd6fe;font-size:.74rem;font-weight:900">Starting historical A+B+C+D replay…</span>
+         </div>
+         <div style="height:9px;margin-top:11px;background:#1e1b4b;border-radius:999px;overflow:hidden">
+           <div id="nhlReplayAllBar" style="height:100%;width:3%;background:linear-gradient(90deg,#7c3aed,#c4b5fd);border-radius:999px;transition:width .45s ease"></div>
+         </div>
+         <div id="nhlReplayAllPct" style="margin-top:5px;color:#a78bfa;font-size:.67rem;font-weight:900">STARTING · 3%</div>
+       </div>
        <div id="nhlReplayAllResults" style="display:none;margin-top:12px"></div>
     </div>
   </div>
@@ -4069,7 +4079,9 @@ async function getPicks(){
     if(data.error) throw new Error(data.error);
     renderResults(data);
     if(isHistorical&&data.historicalTrackRecord){
+      _nhlTrkSystem=replaySystem;
       _nhlTrkReplay=data.historicalTrackRecord;
+      _nhlPaintTrackSystemButtons();
       var trkDate=document.getElementById('nhlTrkDate');
       var ovfDate=document.getElementById('nhlOvfDate');
       if(trkDate)trkDate.value=dt;
@@ -4158,10 +4170,26 @@ async function runNhlHistoricalAll(){
   var today=new Date().toISOString().slice(0,10);
   if(!dt||dt>=today){alert('Choose a completed historical date first.');return;}
   var btn=document.getElementById('nhlReplayAll'),st=document.getElementById('nhlReplayAllStatus');
+  var prog=document.getElementById('nhlReplayAllProgress'),stage=document.getElementById('nhlReplayAllStage');
+  var bar=document.getElementById('nhlReplayAllBar'),pct=document.getElementById('nhlReplayAllPct');
   var tok=localStorage.getItem('__mpa_token')||'';
   var adm=new URLSearchParams(location.search).get('admin')||'';
-  if(btn){btn.disabled=true;btn.textContent='RUNNING ALL FOUR…';}
+  var pollTimer=null;
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="spin" style="display:inline-block;width:15px;height:15px;border-width:2px;vertical-align:-3px;margin-right:7px"></span>RUNNING ALL FOUR…';}
   if(st){st.style.display='block';st.style.color='#c4b5fd';st.textContent='Running A+B from one historical pass, then C and D from the same archived odds cache…';}
+  if(prog)prog.style.display='block';
+  if(stage)stage.textContent='Starting historical A+B+C+D replay…';
+  if(bar)bar.style.width='3%';
+  if(pct)pct.textContent='STARTING · 3%';
+  pollTimer=setInterval(async function(){
+    try{
+      var pr=await fetch('/api/progress'),pd=await pr.json();
+      var n=Math.max(3,Math.min(99,Number(pd.pct)||3));
+      if(bar)bar.style.width=n+'%';
+      if(stage)stage.textContent=pd.stage||'Historical replay is running…';
+      if(pct)pct.textContent='WORKING · '+n+'% OF CURRENT SYSTEM';
+    }catch(e){}
+  },1500);
   try{
     var url='/api/historical-track-replay-all?date_str='+encodeURIComponent(dt)+'&token='+encodeURIComponent(tok)+'&admin='+encodeURIComponent(adm);
     var r=await fetch(url,{method:'POST'});
@@ -4169,13 +4197,20 @@ async function runNhlHistoricalAll(){
     if(!r.ok)throw new Error(data.detail||data.error||('Historical replay failed (HTTP '+r.status+').'));
     window.__NHL_HIST_ALL__=data;
     _nhlRenderHistoricalAllResults(data);
-    if(st)st.textContent='All four systems loaded for '+dt+'. Click any system card or A/B/C/D button to view its complete board.';
+    if(bar)bar.style.width='100%';
+    if(stage)stage.textContent='All four historical systems loaded.';
+    if(pct)pct.textContent='COMPLETE · 100%';
+    if(st)st.textContent='All four systems loaded for '+dt+'. Track Record and Overflow now show this replay date; click A/B/C/D to switch systems.';
     window.NHL_HIST_SYSTEM='A';
     _nhlPaintReplayChoice();
     await getPicks();
   }catch(e){
     if(st){st.style.color='#f87171';st.textContent=e.message||'Could not run all four historical systems.';}
+    if(stage)stage.textContent='Historical replay stopped.';
+    if(pct)pct.textContent='FAILED';
+    if(bar){bar.style.width='100%';bar.style.background='#dc2626';}
   }finally{
+    if(pollTimer)clearInterval(pollTimer);
     if(btn){btn.disabled=false;btn.textContent='RUN ALL A+B+C+D';}
   }
 }
@@ -4191,7 +4226,9 @@ function _nhlPaintReplayChoice(){
 }
 function _nhlSelectReplay(system){
   window.NHL_HIST_SYSTEM=system==='B'?'B':(system==='C'?'C':(system==='D'?'D':'A'));
+  _nhlTrkSystem=window.NHL_HIST_SYSTEM;
   _nhlPaintReplayChoice();
+  _nhlPaintTrackSystemButtons();
   var dt=(document.getElementById('datePicker')||{}).value||'';
   var today=new Date().toISOString().slice(0,10);
   if(dt&&dt<today)getPicks();
@@ -5381,6 +5418,19 @@ function _nhlSetTrackSystem(system){
   system=(system||'A').toUpperCase();
   if(['A','B','C','D'].indexOf(system)<0)system='A';
   if(system!=='A'&&!window.IS_ADMIN){alert('Admin only');return;}
+  var replayDate=(document.getElementById('nhlTrkDate')||{}).value||'';
+  var allReplay=window.__NHL_HIST_ALL__;
+  if(replayDate&&allReplay&&allReplay.date===replayDate&&allReplay.systems&&allReplay.systems[system]){
+    var replayResult=allReplay.systems[system];
+    window.NHL_HIST_SYSTEM=system;
+    _nhlTrkSystem=system;
+    _nhlTrkReplay=replayResult.historicalTrackRecord||null;
+    _nhlPaintReplayChoice();
+    _nhlPaintTrackSystemButtons();
+    renderNhlTrackDay();
+    renderNhlOverflowDay();
+    return;
+  }
   var cached=_nhlTrkDataBySystem[system];
   if(cached){_nhlUseTrackSystemData(cached,system);return;}
   loadNhlTrackRecord(false,system);
