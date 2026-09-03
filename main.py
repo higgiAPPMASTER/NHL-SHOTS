@@ -1439,6 +1439,21 @@ def _match_odds_name(odds_name: str, roster: List[Dict]) -> Optional[Dict]:
     return None
 
 
+def _has_historical_lineup_listing(
+        player_name: str, line_maps: List[Dict]) -> bool:
+    """True when an archived pre-game book explicitly listed this player."""
+    probe = [{"name": player_name}]
+    for line_map in line_maps or []:
+        for odds_name, info in (line_map or {}).items():
+            if (
+                isinstance(info, dict)
+                and info.get("source") == "Historical Odds API"
+                and _match_odds_name(odds_name, probe)
+            ):
+                return True
+    return False
+
+
 async def get_shot_qualified_players(
     games: List[Dict],
     sa_map: Dict[str, float],
@@ -1707,7 +1722,12 @@ async def get_pts_picks(
     for player, team, opp, hr in all_players:
         full_logs = logs_map.get(player["id"], [])
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
-        if target_date and not _played_recently(full_logs, target_date):
+        archived_lineup = _has_historical_lineup_listing(
+            player["name"], [pts_lines_map, ast_lines_map, goal_lines_map])
+        if (
+            target_date and not _played_recently(full_logs, target_date)
+            and not archived_lineup
+        ):
             continue
         logs = _nhl_pre_game_logs(full_logs, target_date)
 
@@ -1963,7 +1983,12 @@ async def get_saves_picks(
     for goalie, team, opp, hr in all_goalies:
         full_logs = logs_map.get(goalie["id"], [])
         # Only goalies actively playing (drops third-string/AHL/injured goalies)
-        if target_date and not _played_recently(full_logs, target_date):
+        archived_lineup = _has_historical_lineup_listing(
+            goalie["name"], lineup_maps)
+        if (
+            target_date and not _played_recently(full_logs, target_date)
+            and not archived_lineup
+        ):
             continue
         logs = _nhl_pre_game_logs(full_logs, target_date)
         c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
@@ -2472,7 +2497,11 @@ async def run_picks(
     async def analyze(p: Dict) -> Optional[Dict]:
         full_logs = logs_map.get(p["pid"], [])
         # Only players actually in today's rotation (drops scratches/AHL/injured depth)
-        if not _played_recently(full_logs, target_date):
+        archived_lineup = _has_historical_lineup_listing(
+            p["name"],
+            [lines_map, pts_lines_map, ast_lines_map, goal_lines_map],
+        )
+        if not _played_recently(full_logs, target_date) and not archived_lineup:
             return None
         logs = _nhl_pre_game_logs(full_logs, target_date)
         book_line = p.get("realLine")
@@ -3308,7 +3337,7 @@ document.addEventListener('DOMContentLoaded',checkStatus);
   if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
   if(!localStorage.getItem(KEY)){window.location.href='https://moneypicksarena.com';}
 })();
-function _applyAdmin(){function show(){document.body&&document.body.classList.add('is-admin');var h=document.getElementById('nhlReplayChoices');if(h)h.style.display='block';_nhlPaintReplayChoice();}if(window.IS_ADMIN){show();}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;show();}}).catch(function(){});}}}
+function _applyAdmin(){function show(){document.body&&document.body.classList.add('is-admin');var h=document.getElementById('nhlReplayChoices');if(h)h.style.display='block';_nhlPaintReplayChoice();if(_nhlHistDataA&&!_nhlHistDataB)loadNhlHistoricalAnalysis();}if(window.IS_ADMIN){show();}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;show();}}).catch(function(){});}}}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_applyAdmin);}else{_applyAdmin();}
 
 // ===== Admin Auto Parlay Builder (NHL) =====
@@ -5337,8 +5366,22 @@ function openNhlGPRecord(){
   if(_nhlGpRecordData)_nhlGpRender();else _nhlGpLoad(false);
 }
 // ── Saved NHL Historical Analysis (never official) ───────────────────────────
-var _nhlHistData=null,_nhlHistPeriod='month',_nhlHistTab='cat';
+var _nhlHistData=null,_nhlHistDataA=null,_nhlHistDataB=null;
+var _nhlHistSystem='A',_nhlHistPeriod='month',_nhlHistTab='cat';
 function _nhlHistAuth(){return encodeURIComponent(localStorage.getItem('__mpa_token')||'');}
+function _nhlHistSetSystem(system){
+  _nhlHistSystem=system==='B'?'B':(system==='COMPARE'?'COMPARE':'A');
+  if(_nhlHistSystem==='A'||_nhlHistSystem==='B'){
+    window.NHL_HIST_SYSTEM=_nhlHistSystem;
+    _nhlPaintReplayChoice();
+  }
+  var a=document.getElementById('nhlHistSystemA'),b=document.getElementById('nhlHistSystemB'),c=document.getElementById('nhlHistSystemCompare');
+  if(a){a.style.background=_nhlHistSystem==='A'?'#1d4ed8':'#1e293b';a.style.borderColor=_nhlHistSystem==='A'?'#60a5fa':'#475569';}
+  if(b){b.style.background=_nhlHistSystem==='B'?'#92400e':'#1e293b';b.style.borderColor=_nhlHistSystem==='B'?'#fbbf24':'#475569';}
+  if(c){c.style.background=_nhlHistSystem==='COMPARE'?'#065f46':'#1e293b';c.style.borderColor=_nhlHistSystem==='COMPARE'?'#34d399':'#475569';}
+  _nhlHistData=_nhlHistSystem==='B'?_nhlHistDataB:_nhlHistDataA;
+  renderNhlHistoricalAnalysis();
+}
 function _nhlHistSetPeriod(period){
   _nhlHistPeriod=period;
   var month=document.getElementById('nhlHistMonth');
@@ -5352,8 +5395,8 @@ function _nhlHistSetTab(tab){
   if(list)list.style.background=tab==='list'?'#1d4ed8':'#1e293b';
   renderNhlHistoricalAnalysis();
 }
-function _nhlHistSelectedDays(){
-  var days=(_nhlHistData&&_nhlHistData.dates)||[];
+function _nhlHistSelectedDays(data){
+  var days=(data&&data.dates)||[];
   if(_nhlHistPeriod==='month'){
     var month=(document.getElementById('nhlHistMonth')||{}).value||'2025-10';
     return days.filter(function(day){return String(day.date||'').slice(0,7)===month;});
@@ -5388,10 +5431,8 @@ function _nhlRankStatsHtml(list,stake){
     +'<div style="color:#93c5fd;font-size:.68rem;font-weight:900;margin-bottom:7px">RANK PERFORMANCE VS ARCHIVED BOOK <span style="color:#64748b;font-weight:600">· model/unpriced excluded · $'+stake.toFixed(2)+'/play</span></div>'
     +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px">'+cells.join('')+'</div></div>';
 }
-function renderNhlHistoricalAnalysis(){
-  var sum=document.getElementById('nhlHistSummary'),body=document.getElementById('nhlHistBody');
-  if(!sum||!body||!_nhlHistData)return;
-  var days=_nhlHistSelectedDays(),rows=[],overflow=[];
+function _nhlHistView(data,systemLabel,accent){
+  var days=_nhlHistSelectedDays(data),rows=[],overflow=[];
   days.forEach(function(day){
     (day.detail||[]).forEach(function(row){var copy=Object.assign({},row);copy.replay_date=day.date;rows.push(copy);});
     (day.overflow_detail||[]).forEach(function(row){var copy=Object.assign({},row);copy.replay_date=day.date;overflow.push(copy);});
@@ -5407,34 +5448,67 @@ function renderNhlHistoricalAnalysis(){
   var label=_nhlHistPeriod==='month'
     ?(selectedMonth?new Date(selectedMonth+'-01T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'}):'Selected month')
     :'2025–26 Season';
-  if(!days.length){
-    sum.innerHTML='<div style="padding:14px;border:1px solid #1d4ed8;border-radius:10px;color:#93c5fd">No saved '+label+' replay results yet. Building this feature does not run the replay.</div>';
-    body.innerHTML='';return;
-  }
+  if(!days.length)return {
+    summary:'<div style="padding:14px;border:1px solid '+accent+';border-radius:10px;color:#cbd5e1;flex:1;min-width:270px"><b style="color:'+accent+'">'+systemLabel+'</b><br>No saved '+label+' replay results yet.</div>',
+    body:'<div style="padding:16px;color:#64748b">No saved '+systemLabel+' rows for '+label+'.</div>'
+  };
    var color=net>=0?'#4ade80':'#f87171';
    var stakeInput='<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" title="Shared across all NHL record boxes" style="width:82px;background:#0b1120;border:1px solid #1d4ed8;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>';
-  sum.innerHTML='<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(59,130,246,.4);border-radius:10px;background:#0c1830;color:#bfdbfe;font-size:.76rem;font-weight:700">REPLAY ARCHIVE · '+label+' · excluded from every official NHL record</div>'
-    +'<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+  return {
+    summary:'<div style="background:#0f172a;border:1px solid '+accent+';border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;flex:1;min-width:270px">'
+    +'<span style="color:'+accent+';font-weight:900">'+systemLabel+'</span>'
     +'<span style="color:#93c5fd;font-weight:900">'+days.length+' saved date'+(days.length===1?'':'s')+'</span>'
       +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#64748b;font-size:.68rem">BOOK</span> <span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'+(rate!=null?' <span style="color:#94a3b8;font-size:.82rem">('+rate.toFixed(1)+'%)</span>':'')+'</span>'+stakeInput
     +'<span style="font-family:monospace;font-weight:800;color:'+color+'">Net '+(net>=0?'+$':'-$')+Math.abs(net).toFixed(2)+'</span>'
     +(roi!=null?'<span style="font-family:monospace;font-weight:800;color:'+color+'">ROI '+(roi>=0?'+':'')+roi.toFixed(1)+'%</span>':'')
-     +'<span style="color:#64748b;font-size:.76rem">'+priced.length+' priced · '+unpriced+' model/unpriced · '+overflow.length+' overflow</span></div>';
-   body.innerHTML=_nhlHistTab==='cat'
+     +'<span style="color:#64748b;font-size:.76rem">'+priced.length+' priced · '+unpriced+' model/unpriced · '+overflow.length+' overflow</span></div>',
+    body:_nhlHistTab==='cat'
      ?_nhlTrkCatHtml(rows,stake)
-     :_nhlTrkListHtml(rows,true,true);
+      :_nhlTrkListHtml(rows,true,true)
+  };
+}
+function renderNhlHistoricalAnalysis(){
+  var sum=document.getElementById('nhlHistSummary'),body=document.getElementById('nhlHistBody');
+  if(!sum||!body||(!_nhlHistDataA&&!_nhlHistDataB))return;
+  var selectedMonth=(document.getElementById('nhlHistMonth')||{}).value||'';
+  var label=_nhlHistPeriod==='month'
+    ?(selectedMonth?new Date(selectedMonth+'-01T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'}):'Selected month')
+    :'2025–26 Season';
+  var banner='<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(59,130,246,.4);border-radius:10px;background:#0c1830;color:#bfdbfe;font-size:.76rem;font-weight:700">REPLAY ARCHIVE · '+label+' · excluded from every official NHL record</div>';
+  var a=_nhlHistView(_nhlHistDataA,'A · NEW','#60a5fa');
+  var b=_nhlHistView(_nhlHistDataB,'B · OLD','#fbbf24');
+  if(_nhlHistSystem==='COMPARE'){
+    sum.innerHTML=banner+'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">'+a.summary+b.summary+'</div>';
+    body.innerHTML='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px">'
+      +'<div><div style="color:#60a5fa;font-weight:900;margin:0 0 8px">A · NEW</div>'+a.body+'</div>'
+      +'<div><div style="color:#fbbf24;font-weight:900;margin:0 0 8px">B · OLD</div>'+b.body+'</div></div>';
+  }else{
+    var view=_nhlHistSystem==='B'?b:a;
+    sum.innerHTML=banner+'<div style="display:flex;margin-bottom:14px">'+view.summary+'</div>';
+    body.innerHTML=view.body;
+  }
 }
 async function loadNhlHistoricalAnalysis(){
   var body=document.getElementById('nhlHistBody');
   if(body)body.innerHTML='<p style="color:#94a3b8;padding:18px">Loading saved Historical Analysis…</p>';
   try{
-    var r=await fetch('/api/nhl/historical-analysis?token='+_nhlHistAuth());
-    if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
-    _nhlHistData=await r.json();
+    var rs=await Promise.all([
+      fetch('/api/nhl/historical-analysis?system=A&token='+_nhlHistAuth()),
+      window.IS_ADMIN?fetch('/api/nhl/historical-analysis?system=B&token='+_nhlHistAuth()):Promise.resolve(null)
+    ]);
+    if(!rs[0].ok)throw new Error(await rs[0].text()||('HTTP '+rs[0].status));
+    _nhlHistDataA=await rs[0].json();
+    if(rs[1]){
+      if(!rs[1].ok)throw new Error(await rs[1].text()||('HTTP '+rs[1].status));
+      _nhlHistDataB=await rs[1].json();
+    }
+    _nhlHistData=_nhlHistSystem==='B'?_nhlHistDataB:_nhlHistDataA;
     var month=document.getElementById('nhlHistMonth');
     if(month){
       var prior=month.value;
-      var months=_nhlHistData.available_months||[];
+      var months=Array.from(new Set(
+        ((_nhlHistDataA.available_months||[]).concat(_nhlHistDataB.available_months||[]))
+      )).sort().reverse();
       month.innerHTML=months.map(function(m){
         var d=new Date(m+'-01T12:00:00');
         return '<option value="'+m+'">'+d.toLocaleDateString(undefined,{month:'long',year:'numeric'})+'</option>';
@@ -5552,9 +5626,15 @@ function _nhlCompareCell(stats){
       <select id="nhlHistMonth" onchange="renderNhlHistoricalAnalysis()" style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0">
         <option value="2025-10">October 2025</option>
       </select>
-      <button onclick="loadNhlHistoricalAnalysis()" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer;font-size:.78rem">&#8635; Load Saved Archive</button>
+      <button onclick="loadNhlHistoricalAnalysis()" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer;font-size:.78rem">&#8635; Refresh Data</button>
       <button id="nhlHistBtnCat" onclick="_nhlHistSetTab('cat')" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer;font-size:.78rem">By Category</button>
       <button id="nhlHistBtnList" onclick="_nhlHistSetTab('list')" style="background:#1e293b;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer;font-size:.78rem">Full List</button>
+    </div>
+    <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin:0 0 14px">
+      <span class="admin-only" style="color:#94a3b8;font-size:.7rem;font-weight:900">SHOW</span>
+      <button class="admin-only" id="nhlHistSystemA" onclick="_nhlHistSetSystem('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">A · NEW</button>
+      <button class="admin-only" id="nhlHistSystemB" onclick="_nhlHistSetSystem('B')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">B · OLD</button>
+      <button class="admin-only" id="nhlHistSystemCompare" onclick="_nhlHistSetSystem('COMPARE')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">COMPARE A vs B</button>
     </div>
     <div id="nhlHistSummary"></div>
     <div id="nhlHistBody"><p style="color:#94a3b8;padding:18px">Loading saved Historical Analysis…</p></div>
@@ -5907,6 +5987,7 @@ _NHL_HIST_SPECIAL_SNAP_CAT = "__historical_special_picks__"
 _NHL_HIST_SPECIAL_LEDGER_CAT = "__historical_special_ledger__"
 _NHL_HIST_SPECIAL_DETAIL_CAT = "__historical_special_detail__"
 _NHL_HIST_DETAIL_CAT = "__historical_analysis_detail__"
+_NHL_HIST_B_DETAIL_CAT = "__historical_analysis_b_detail__"
 _NHL_HIST_GP_CAT = "__historical_analysis_gp__"
 _NHL_HIST_ODDS_CAT = "__historical_odds_cache_v2__"
 _NHL_HIST_BATCH_START = "2025-10-07"
@@ -7060,19 +7141,25 @@ def _nhl_historical_special_track_record_payload() -> dict:
     return payload
 
 
-def _nhl_save_historical_analysis(date_str: str, replay: dict) -> bool:
+def _nhl_save_historical_analysis(
+        date_str: str, replay: dict, system: str = "A") -> bool:
     """Save a completed replay outside every official record namespace."""
+    replay_system = str(system or "A").strip().upper()
+    detail_category = (
+        _NHL_HIST_B_DETAIL_CAT if replay_system == "B"
+        else _NHL_HIST_DETAIL_CAT
+    )
     detail = list(replay.get("detail") or []) + list(
         replay.get("overflow_detail") or [])
     gp = replay.get("gp") or {}
     rows = [{
         "app": _NHL_TRK_APP, "date": date_str,
-        "category": _NHL_HIST_DETAIL_CAT, "side": "ALL",
+        "category": detail_category, "side": "ALL",
         "wins": int((replay.get("summary") or {}).get("wins") or 0),
         "losses": int((replay.get("summary") or {}).get("losses") or 0),
         "locked": True, "detail": detail,
     }]
-    if gp:
+    if gp and replay_system == "A":
         rows.append({
             "app": _NHL_TRK_APP, "date": date_str,
             "category": _NHL_HIST_GP_CAT, "side": "ALL",
@@ -7084,11 +7171,16 @@ def _nhl_save_historical_analysis(date_str: str, replay: dict) -> bool:
         "mpa_track_ledger", rows, "app,date,category,side")
 
 
-def _nhl_historical_analysis_payload() -> dict:
+def _nhl_historical_analysis_payload(system: str = "A") -> dict:
     """Return saved replay dates in the regular Track Record day shape."""
+    replay_system = str(system or "A").strip().upper()
+    detail_category = (
+        _NHL_HIST_B_DETAIL_CAT if replay_system == "B"
+        else _NHL_HIST_DETAIL_CAT
+    )
     detail_rows = _nhl_sb_get_all("mpa_track_ledger", {
         "app": f"eq.{_NHL_TRK_APP}",
-        "category": f"eq.{_NHL_HIST_DETAIL_CAT}",
+        "category": f"eq.{detail_category}",
         "locked": "eq.true", "select": "date,detail",
         "order": "date.desc",
     }) or []
@@ -7160,6 +7252,7 @@ def _nhl_historical_analysis_payload() -> dict:
     dates.sort(key=lambda row: row["date"], reverse=True)
     return {
         "dates": dates, "stake": _NHL_TRK_STAKE, "historical": True,
+        "system": replay_system,
         "season": "2025-26", "available_months": sorted({
             row["date"][:7] for row in dates
         }, reverse=True),
@@ -7962,12 +8055,18 @@ async def nhl_historical_batch_start(request: Request, token: str = ""):
 
 
 @app.get("/api/nhl/historical-analysis")
-async def nhl_historical_analysis(request: Request, token: str = ""):
+async def nhl_historical_analysis(
+        request: Request, token: str = "", system: str = "A"):
     tok = token or request.headers.get(
         "Authorization", "").replace("Bearer ", "").strip()
     if not _verify_hub_token(tok):
         raise HTTPException(status_code=401, detail="Subscription required")
-    return JSONResponse(_nhl_historical_analysis_payload())
+    replay_system = str(system or "A").strip().upper()
+    if replay_system not in ("A", "B"):
+        raise HTTPException(status_code=400, detail="Historical system must be A or B")
+    if replay_system == "B" and not _is_admin_token(tok):
+        raise HTTPException(status_code=403, detail="Admin only")
+    return JSONResponse(_nhl_historical_analysis_payload(replay_system))
 
 
 _CRON_BUSY_NHL = False
