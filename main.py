@@ -1154,9 +1154,13 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                         for outcome in market.get("outcomes", []):
                             side = outcome.get("name")
                             if market_key == "player_goal_scorer_anytime":
-                                if side not in ("Yes", "No"):
+                                if side != "Yes":
                                     continue
-                                side = "Over" if side == "Yes" else "Under"
+                                # Anytime-goal-scorer is a one-sided Yes market.
+                                # Some feeds expose synthetic/exchange-style No
+                                # prices (for example -7,000 or worse); those are
+                                # not a genuine bookable Goals Under prop.
+                                side = "Over"
                                 player = (
                                     outcome.get("description")
                                     or outcome.get("name", "")
@@ -1220,6 +1224,14 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
         return {}, {}, {}, {}, {}
 
 
+def _bookable_goal_scorer_lines(lines: Dict[str, Dict]) -> Dict[str, Dict]:
+    """Keep anytime-goal Yes prices; never treat feed No prices as Goal Unders."""
+    return {
+        name: {**(info or {}), "under_odds": ""}
+        for name, info in (lines or {}).items()
+    }
+
+
 async def get_shot_lines(
     target_date: str,
     games: List[Dict] = None,
@@ -1243,7 +1255,7 @@ async def get_shot_lines(
         return (
             durable.get("lines", {}), durable.get("pts", {}),
             durable.get("ast", {}), durable.get("sv", {}),
-            durable.get("goals", {}),
+            _bookable_goal_scorer_lines(durable.get("goals", {})),
         )
 
     api_key = os.environ.get("ODDS_API_KEY", "")
@@ -1260,8 +1272,11 @@ async def get_shot_lines(
         # response. Do not let that stale miss prevent the new historical
         # player-prop lookup from running.
         if not (date.fromisoformat(target_date) < date.today() and not cached_lines):
-            return (cached_lines, _oc.get("pts", {}),
-                    _oc.get("ast", {}), _oc.get("sv", {}), _oc.get("goals", {}))
+            return (
+                cached_lines, _oc.get("pts", {}),
+                _oc.get("ast", {}), _oc.get("sv", {}),
+                _bookable_goal_scorer_lines(_oc.get("goals", {})),
+            )
         print(f"[HistoricalLines] refreshing empty cached line set for {target_date}")
     if date.fromisoformat(target_date) < date.today():
         durable = _nhl_load_historical_odds_cache(target_date)
@@ -1270,7 +1285,7 @@ async def get_shot_lines(
             return (
                 durable.get("lines", {}), durable.get("pts", {}),
                 durable.get("ast", {}), durable.get("sv", {}),
-                durable.get("goals", {}),
+                _bookable_goal_scorer_lines(durable.get("goals", {})),
             )
 
     tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
@@ -1362,7 +1377,7 @@ async def get_shot_lines(
                                     if mkt.get("key") != "player_goal_scorer_anytime":
                                         continue
                                     for oc in mkt.get("outcomes", []):
-                                        if oc.get("name") not in ("Yes", "No"):
+                                        if oc.get("name") != "Yes":
                                             continue
                                         player = oc.get("description", "").strip()
                                         if not player:
@@ -1370,10 +1385,8 @@ async def get_shot_lines(
                                         rec = goal_lines.setdefault(player, {
                                             "line": 0.5, "odds": "",
                                             "under_odds": "", "source": "OddsAPI"})
-                                        if oc.get("name") == "Yes" and not rec["odds"]:
+                                        if not rec["odds"]:
                                             rec["odds"] = str(oc.get("price", ""))
-                                        elif oc.get("name") == "No" and not rec["under_odds"]:
-                                            rec["under_odds"] = str(oc.get("price", ""))
                     except Exception as _ge:
                         print(f"[Lines] goal-scorer fetch skipped: {_ge}")
 
