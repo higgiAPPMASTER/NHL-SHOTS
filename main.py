@@ -81,7 +81,7 @@ TOP_N       = 10     # final picks count
 SEM_NHL     = 14     # concurrent NHL API calls
 
 # C is an isolated, more selective research system.  These values are used
-# only when run_picks(system="C"); the A path and its attached B comparison
+# only when run_picks(system="C" or "D"); the A path and its attached B comparison
 # continue to use the original constants above.
 C_MIN_SAMPLE              = 5
 C_UNDER_MIN_VO            = 5
@@ -235,6 +235,7 @@ def _boxscore_lineup(boxscore: Dict, game: Dict) -> Dict:
                 skaters.append({
                     "id": int(pid),
                     "name": (player.get("name") or {}).get("default", ""),
+                    "positionGroup": "F" if group == "forwards" else "D",
                 })
         for player in stats.get("goalies", []) or []:
             pid = player.get("playerId")
@@ -243,6 +244,7 @@ def _boxscore_lineup(boxscore: Dict, game: Dict) -> Dict:
             goalies.append({
                 "id": int(pid),
                 "name": (player.get("name") or {}).get("default", ""),
+                "positionGroup": "G",
             })
         if team:
             lineup["skaters"][team] = skaters
@@ -777,6 +779,7 @@ async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
             players.append({
                 "id":   p["id"],
                 "name": f"{p['firstName']['default']} {p['lastName']['default']}",
+                "positionGroup": "F" if pos == "forwards" else "D",
             })
     return players
 
@@ -793,6 +796,7 @@ async def get_goalies(team: str, sem: asyncio.Semaphore) -> List[Dict]:
         goalies.append({
             "id":   p["id"],
             "name": f"{p['firstName']['default']} {p['lastName']['default']}",
+            "positionGroup": "G",
         })
     return goalies
 
@@ -829,6 +833,29 @@ def _nhl_c_confidence_rate(hits: int, total: int, z: float = 1.28) -> float:
         (p * (1 - p) / total + z2 / (4 * total * total)) ** 0.5
     )
     return round(max(0.0, (centre - margin) / denom) * 100, 1)
+
+
+def _nhl_d_top_only(players: list, goalie: bool = False) -> list:
+    """Return D's top-position pool without changing the source ordering."""
+    if goalie:
+        return list(players or [])[:10]
+    forwards = [
+        p for p in (players or [])
+        if str(p.get("positionGroup") or "F").upper() == "F"
+    ][:6]
+    defense = [
+        p for p in (players or [])
+        if str(p.get("positionGroup") or "").upper() == "D"
+    ][:4]
+    selected = {
+        p.get("pid") if p.get("pid") is not None else p.get("name")
+        for p in forwards + defense
+    }
+    return [
+        p for p in (players or [])
+        if (p.get("pid") if p.get("pid") is not None else p.get("name"))
+        in selected
+    ]
 
 
 def _proj_count(l10_avg, l10_n, opp_avg, opp_n, opp_sa, league_sa,
@@ -1995,6 +2022,7 @@ async def get_pts_picks(
                 full_logs, target_date, hr, opp, stat_key)
             return {
                 "name": player["name"], "pid": player["id"], "team": team,
+                "positionGroup": player.get("positionGroup", "F"),
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
                 "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
                 "lineSource": line_source,
@@ -2279,6 +2307,7 @@ async def get_saves_picks(
 
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
+            "positionGroup": "G",
             "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
             "realLine": book_line, "realOdds": real_odds, "realUnderOdds": under_odds,
             "lineSource": line_source,
@@ -2723,11 +2752,12 @@ async def run_picks(
     global _progress
     sem_nhl = asyncio.Semaphore(SEM_NHL)
     system = str(system or "A").strip().upper()
-    if system not in ("A", "C"):
-        raise ValueError("run_picks system must be A or C")
+    if system not in ("A", "C", "D"):
+        raise ValueError("run_picks system must be A, C, or D")
     c_mode = system == "C"
-    if c_mode and not simulate:
-        raise ValueError("System C is isolated to historical simulation")
+    d_mode = system == "D"
+    if (c_mode or d_mode) and not simulate:
+        raise ValueError("Systems C and D are isolated to historical simulation")
 
     target_date = target_date or date.today().isoformat()
     season = get_season_for_date(date.fromisoformat(target_date))
@@ -3157,6 +3187,23 @@ async def run_picks(
             profile_seen.add(profile_key)
             player_profiles.append(profile)
 
+    if d_mode:
+        # D isolates the top-player hypothesis: it uses A's qualification and
+        # ordering, then keeps six forwards and four defensemen per skater
+        # category. Goalie Saves uses the top ten goalies.
+        picks = _nhl_d_top_only(picks)
+        shot_unders = _nhl_d_top_only(shot_unders)
+        pts_all = _nhl_d_top_only(pts_all)
+        pts_unders = _nhl_d_top_only(pts_unders)
+        pp_all = _nhl_d_top_only(pp_all)
+        pp_unders = _nhl_d_top_only(pp_unders)
+        ast_all = _nhl_d_top_only(ast_all)
+        ast_unders = _nhl_d_top_only(ast_unders)
+        goal_all = _nhl_d_top_only(goal_all)
+        goal_unders_all = _nhl_d_top_only(goal_unders_all)
+        saves_all = _nhl_d_top_only(saves_all, goalie=True)
+        saves_unders = _nhl_d_top_only(saves_unders, goalie=True)
+
     _result = {
         "_nhlCacheVersion": 4,
         "picks":         picks[:TOP_N],
@@ -3199,7 +3246,8 @@ async def run_picks(
         "game_predictions": game_preds,
         "simulation": bool(simulate),
         "comparisonSystem": (
-            "C Enhanced/selective" if c_mode else "A New/current"),
+            "C Enhanced/selective" if c_mode
+            else ("D Top 6F/4D" if d_mode else "A New/current")),
         "system": system,
         "archivedShotLineCount": sum(
             1 for player in results_raw if player
@@ -3623,8 +3671,9 @@ body.is-admin #parlayCard{display:block}
         <button id="nhlReplayA" onclick="_nhlSelectReplay('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">A · NEW</button>
         <button id="nhlReplayB" onclick="_nhlSelectReplay('B')" style="background:#1e293b;color:#cbd5e1;border:2px solid #475569;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">B · OLD</button>
         <button id="nhlReplayC" onclick="_nhlSelectReplay('C')" style="background:#1e293b;color:#cbd5e1;border:2px solid #475569;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">C · SELECTIVE</button>
+        <button id="nhlReplayD" onclick="_nhlSelectReplay('D')" style="background:#1e293b;color:#cbd5e1;border:2px solid #475569;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">D · TOP PLAYERS</button>
       </div>
-      <div id="nhlReplayHint" style="color:#64748b;font-size:.68rem;margin-top:7px">Choose a completed date, then click A New, B Old, or C Selective.</div>
+      <div id="nhlReplayHint" style="color:#64748b;font-size:.68rem;margin-top:7px">Choose a completed date, then click A New, B Old, C Selective, or D Top Players.</div>
     </div>
   </div>
 
@@ -3927,15 +3976,17 @@ async function getPicks(){
 
 window.NHL_HIST_SYSTEM='A';
 function _nhlPaintReplayChoice(){
-  var a=document.getElementById('nhlReplayA'),b=document.getElementById('nhlReplayB'),c=document.getElementById('nhlReplayC');
+  var a=document.getElementById('nhlReplayA'),b=document.getElementById('nhlReplayB'),c=document.getElementById('nhlReplayC'),d=document.getElementById('nhlReplayD');
   var isB=window.NHL_HIST_SYSTEM==='B';
   var isC=window.NHL_HIST_SYSTEM==='C';
-  if(a){a.style.background=(isB||isC)?'#1e293b':'#1d4ed8';a.style.borderColor=(isB||isC)?'#475569':'#60a5fa';a.style.color=(isB||isC)?'#cbd5e1':'#fff';}
+  var isD=window.NHL_HIST_SYSTEM==='D';
+  if(a){a.style.background=(isB||isC||isD)?'#1e293b':'#1d4ed8';a.style.borderColor=(isB||isC||isD)?'#475569':'#60a5fa';a.style.color=(isB||isC||isD)?'#cbd5e1':'#fff';}
   if(b){b.style.background=isB?'#92400e':'#1e293b';b.style.borderColor=isB?'#fbbf24':'#475569';b.style.color=isB?'#fef3c7':'#cbd5e1';}
   if(c){c.style.background=isC?'#065f46':'#1e293b';c.style.borderColor=isC?'#34d399':'#475569';c.style.color=isC?'#d1fae5':'#cbd5e1';}
+  if(d){d.style.background=isD?'#1e3a8a':'#1e293b';d.style.borderColor=isD?'#60a5fa':'#475569';d.style.color=isD?'#dbeafe':'#cbd5e1';}
 }
 function _nhlSelectReplay(system){
-  window.NHL_HIST_SYSTEM=system==='B'?'B':(system==='C'?'C':'A');
+  window.NHL_HIST_SYSTEM=system==='B'?'B':(system==='C'?'C':(system==='D'?'D':'A'));
   _nhlPaintReplayChoice();
   var dt=(document.getElementById('datePicker')||{}).value||'';
   var today=new Date().toISOString().slice(0,10);
@@ -5757,21 +5808,22 @@ function openNhlGPRecord(){
   if(_nhlGpRecordData)_nhlGpRender();else _nhlGpLoad(false);
 }
 // ── Saved NHL Historical Analysis (never official) ───────────────────────────
-var _nhlHistData=null,_nhlHistDataA=null,_nhlHistDataB=null,_nhlHistDataC=null;
+var _nhlHistData=null,_nhlHistDataA=null,_nhlHistDataB=null,_nhlHistDataC=null,_nhlHistDataD=null;
 var _nhlHistSystem='A',_nhlHistPeriod='month',_nhlHistTab='cat';
 function _nhlHistAuth(){return encodeURIComponent(localStorage.getItem('__mpa_token')||'');}
 function _nhlHistSetSystem(system){
-  _nhlHistSystem=system==='B'?'B':(system==='C'?'C':(system==='COMPARE'?'COMPARE':'A'));
-  if(_nhlHistSystem==='A'||_nhlHistSystem==='B'||_nhlHistSystem==='C'){
+  _nhlHistSystem=system==='B'?'B':(system==='C'?'C':(system==='D'?'D':(system==='COMPARE'?'COMPARE':'A')));
+  if(_nhlHistSystem==='A'||_nhlHistSystem==='B'||_nhlHistSystem==='C'||_nhlHistSystem==='D'){
     window.NHL_HIST_SYSTEM=_nhlHistSystem;
     _nhlPaintReplayChoice();
   }
-  var a=document.getElementById('nhlHistSystemA'),b=document.getElementById('nhlHistSystemB'),c=document.getElementById('nhlHistSystemC'),d=document.getElementById('nhlHistSystemCompare');
+  var a=document.getElementById('nhlHistSystemA'),b=document.getElementById('nhlHistSystemB'),c=document.getElementById('nhlHistSystemC'),d=document.getElementById('nhlHistSystemD'),e=document.getElementById('nhlHistSystemCompare');
   if(a){a.style.background=_nhlHistSystem==='A'?'#1d4ed8':'#1e293b';a.style.borderColor=_nhlHistSystem==='A'?'#60a5fa':'#475569';}
   if(b){b.style.background=_nhlHistSystem==='B'?'#92400e':'#1e293b';b.style.borderColor=_nhlHistSystem==='B'?'#fbbf24':'#475569';}
   if(c){c.style.background=_nhlHistSystem==='C'?'#6d28d9':'#1e293b';c.style.borderColor=_nhlHistSystem==='C'?'#c4b5fd':'#475569';}
-  if(d){d.style.background=_nhlHistSystem==='COMPARE'?'#065f46':'#1e293b';d.style.borderColor=_nhlHistSystem==='COMPARE'?'#34d399':'#475569';}
-  _nhlHistData=_nhlHistSystem==='B'?_nhlHistDataB:(_nhlHistSystem==='C'?_nhlHistDataC:_nhlHistDataA);
+  if(d){d.style.background=_nhlHistSystem==='D'?'#1e3a8a':'#1e293b';d.style.borderColor=_nhlHistSystem==='D'?'#60a5fa':'#475569';}
+  if(e){e.style.background=_nhlHistSystem==='COMPARE'?'#065f46':'#1e293b';e.style.borderColor=_nhlHistSystem==='COMPARE'?'#34d399':'#475569';}
+  _nhlHistData=_nhlHistSystem==='B'?_nhlHistDataB:(_nhlHistSystem==='C'?_nhlHistDataC:(_nhlHistSystem==='D'?_nhlHistDataD:_nhlHistDataA));
   renderNhlHistoricalAnalysis();
 }
 function _nhlHistSetPeriod(period){
@@ -5861,7 +5913,7 @@ function _nhlHistView(data,systemLabel,accent){
 }
 function renderNhlHistoricalAnalysis(){
   var sum=document.getElementById('nhlHistSummary'),body=document.getElementById('nhlHistBody');
-  if(!sum||!body||(!_nhlHistDataA&&!_nhlHistDataB&&!_nhlHistDataC))return;
+  if(!sum||!body||(!_nhlHistDataA&&!_nhlHistDataB&&!_nhlHistDataC&&!_nhlHistDataD))return;
   var selectedMonth=(document.getElementById('nhlHistMonth')||{}).value||'';
   var label=_nhlHistPeriod==='month'
     ?(selectedMonth?new Date(selectedMonth+'-01T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'}):'Selected month')
@@ -5870,14 +5922,16 @@ function renderNhlHistoricalAnalysis(){
   var a=_nhlHistView(_nhlHistDataA,'A · NEW','#60a5fa');
   var b=_nhlHistView(_nhlHistDataB,'B · OLD','#fbbf24');
   var c=_nhlHistView(_nhlHistDataC,'C · SELECTIVE','#c4b5fd');
+  var d=_nhlHistView(_nhlHistDataD,'D · TOP PLAYERS','#60a5fa');
   if(_nhlHistSystem==='COMPARE'){
-    sum.innerHTML=banner+'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">'+a.summary+b.summary+c.summary+'</div>';
+    sum.innerHTML=banner+'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">'+a.summary+b.summary+c.summary+d.summary+'</div>';
     body.innerHTML='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px">'
       +'<div><div style="color:#60a5fa;font-weight:900;margin:0 0 8px">A · NEW</div>'+a.body+'</div>'
       +'<div><div style="color:#fbbf24;font-weight:900;margin:0 0 8px">B · OLD</div>'+b.body+'</div>'
-      +'<div><div style="color:#c4b5fd;font-weight:900;margin:0 0 8px">C · SELECTIVE</div>'+c.body+'</div></div>';
+      +'<div><div style="color:#c4b5fd;font-weight:900;margin:0 0 8px">C · SELECTIVE</div>'+c.body+'</div>'
+      +'<div><div style="color:#60a5fa;font-weight:900;margin:0 0 8px">D · TOP PLAYERS</div>'+d.body+'</div></div>';
   }else{
-    var view=_nhlHistSystem==='B'?b:(_nhlHistSystem==='C'?c:a);
+    var view=_nhlHistSystem==='B'?b:(_nhlHistSystem==='C'?c:(_nhlHistSystem==='D'?d:a));
     sum.innerHTML=banner+'<div style="display:flex;margin-bottom:14px">'+view.summary+'</div>';
     body.innerHTML=view.body;
   }
@@ -5889,7 +5943,8 @@ async function loadNhlHistoricalAnalysis(){
     var rs=await Promise.all([
       fetch('/api/nhl/historical-analysis?system=A&token='+_nhlHistAuth(),{cache:'no-store'}),
       window.IS_ADMIN?fetch('/api/nhl/historical-analysis?system=B&token='+_nhlHistAuth(),{cache:'no-store'}):Promise.resolve(null),
-      window.IS_ADMIN?fetch('/api/nhl/historical-analysis?system=C&token='+_nhlHistAuth(),{cache:'no-store'}):Promise.resolve(null)
+      window.IS_ADMIN?fetch('/api/nhl/historical-analysis?system=C&token='+_nhlHistAuth(),{cache:'no-store'}):Promise.resolve(null),
+      window.IS_ADMIN?fetch('/api/nhl/historical-analysis?system=D&token='+_nhlHistAuth(),{cache:'no-store'}):Promise.resolve(null)
     ]);
     if(!rs[0].ok)throw new Error(await rs[0].text()||('HTTP '+rs[0].status));
     _nhlHistDataA=await rs[0].json();
@@ -5901,14 +5956,19 @@ async function loadNhlHistoricalAnalysis(){
       if(!rs[2].ok)throw new Error(await rs[2].text()||('HTTP '+rs[2].status));
       _nhlHistDataC=await rs[2].json();
     }
-    _nhlHistData=_nhlHistSystem==='B'?_nhlHistDataB:(_nhlHistSystem==='C'?_nhlHistDataC:_nhlHistDataA);
+    if(rs[3]){
+      if(!rs[3].ok)throw new Error(await rs[3].text()||('HTTP '+rs[3].status));
+      _nhlHistDataD=await rs[3].json();
+    }
+    _nhlHistData=_nhlHistSystem==='B'?_nhlHistDataB:(_nhlHistSystem==='C'?_nhlHistDataC:(_nhlHistSystem==='D'?_nhlHistDataD:_nhlHistDataA));
     var month=document.getElementById('nhlHistMonth');
     if(month){
       var prior=month.value;
       var months=Array.from(new Set(
         ((_nhlHistDataA.available_months||[])
           .concat((_nhlHistDataB&&_nhlHistDataB.available_months)||[])
-          .concat((_nhlHistDataC&&_nhlHistDataC.available_months)||[]))
+          .concat((_nhlHistDataC&&_nhlHistDataC.available_months)||[])
+          .concat((_nhlHistDataD&&_nhlHistDataD.available_months)||[]))
       )).sort().reverse();
       month.innerHTML=months.map(function(m){
         var d=new Date(m+'-01T12:00:00');
@@ -6036,7 +6096,8 @@ function _nhlCompareCell(stats){
       <button class="admin-only" id="nhlHistSystemA" onclick="_nhlHistSetSystem('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">A · NEW</button>
       <button class="admin-only" id="nhlHistSystemB" onclick="_nhlHistSetSystem('B')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">B · OLD</button>
       <button class="admin-only" id="nhlHistSystemC" onclick="_nhlHistSetSystem('C')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">C · SELECTIVE</button>
-      <button class="admin-only" id="nhlHistSystemCompare" onclick="_nhlHistSetSystem('COMPARE')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">COMPARE A vs B vs C</button>
+      <button class="admin-only" id="nhlHistSystemD" onclick="_nhlHistSetSystem('D')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">D · TOP PLAYERS</button>
+      <button class="admin-only" id="nhlHistSystemCompare" onclick="_nhlHistSetSystem('COMPARE')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:9px 15px;font-weight:900;cursor:pointer">COMPARE A vs B vs C vs D</button>
     </div>
     <div id="nhlHistSummary"></div>
     <div id="nhlHistBody"><p style="color:#94a3b8;padding:18px">Loading saved Historical Analysis…</p></div>
@@ -6391,6 +6452,7 @@ _NHL_HIST_SPECIAL_DETAIL_CAT = "__historical_special_detail__"
 _NHL_HIST_DETAIL_CAT = "__historical_analysis_detail__"
 _NHL_HIST_B_DETAIL_CAT = "__historical_analysis_b_detail__"
 _NHL_HIST_C_DETAIL_CAT = "__historical_analysis_c_detail__"
+_NHL_HIST_D_DETAIL_CAT = "__historical_analysis_d_detail__"
 _NHL_HIST_GP_CAT = "__historical_analysis_gp__"
 _NHL_HIST_ODDS_CAT = "__historical_odds_cache_v2__"
 _NHL_HIST_BATCH_START = "2025-10-07"
@@ -7551,6 +7613,7 @@ def _nhl_save_historical_analysis(
     detail_category = {
         "B": _NHL_HIST_B_DETAIL_CAT,
         "C": _NHL_HIST_C_DETAIL_CAT,
+        "D": _NHL_HIST_D_DETAIL_CAT,
     }.get(replay_system, _NHL_HIST_DETAIL_CAT)
     detail = list(replay.get("detail") or []) + list(
         replay.get("overflow_detail") or [])
@@ -7580,6 +7643,7 @@ def _nhl_historical_analysis_payload(system: str = "A") -> dict:
     detail_category = {
         "B": _NHL_HIST_B_DETAIL_CAT,
         "C": _NHL_HIST_C_DETAIL_CAT,
+        "D": _NHL_HIST_D_DETAIL_CAT,
     }.get(replay_system, _NHL_HIST_DETAIL_CAT)
     detail_params = {
         "app": f"eq.{_NHL_TRK_APP}",
@@ -7896,9 +7960,9 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
     if replay_date >= date.today():
         raise HTTPException(status_code=400, detail="Choose a completed NHL date")
     replay_system = str(system or "A").strip().upper()
-    if replay_system not in ("A", "B", "C"):
+    if replay_system not in ("A", "B", "C", "D"):
         raise HTTPException(
-            status_code=400, detail="Historical system must be A, B, or C")
+            status_code=400, detail="Historical system must be A, B, C, or D")
     result = await run_picks(
         date_str,
         simulate=True,
@@ -7906,7 +7970,7 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
         persist_historical_special=False,
         historical_odds_cache_only=True,
         skip_game_predictor=True,
-        system="C" if replay_system == "C" else "A",
+        system=replay_system if replay_system in ("C", "D") else "A",
     )
     if result.get("error") or result.get("no_games"):
         raise HTTPException(status_code=400, detail=result.get("error") or result.get("message") or
@@ -7917,9 +7981,12 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
         result["comparisonSystem"] = "B Old/attached ZIP"
         result["historicalSpecialRecord"] = None
         return JSONResponse(result)
-    if replay_system == "C":
+    if replay_system in ("C", "D"):
         result["historicalTrackRecord"] = _nhl_historical_replay_payload(result)
-        result["comparisonSystem"] = "C Enhanced/selective"
+        result["comparisonSystem"] = (
+            "C Enhanced/selective" if replay_system == "C"
+            else "D Top 6 forwards/4 defensemen"
+        )
         result["historicalSpecialRecord"] = None
         return JSONResponse(result)
     result["historicalTrackRecord"] = _nhl_historical_replay_payload(result)
@@ -8666,6 +8733,198 @@ async def nhl_c_historical_batch_start(
     return JSONResponse(dict(_NHL_C_BATCH))
 
 
+_NHL_D_BATCH_START = "2025-10-07"
+_NHL_D_BATCH_END = "2025-12-31"
+_NHL_D_BATCH_LOCK = _bt_th.Lock()
+_NHL_D_BATCH = {
+    "status": "idle", "start": _NHL_D_BATCH_START,
+    "end": _NHL_D_BATCH_END, "completed": 0, "total": 0,
+    "current_date": "", "failed_dates": [], "message": "Not started",
+    "odds_api_called": False, "official_mutation": False,
+}
+
+
+async def _nhl_d_historical_batch_calendar() -> dict:
+    """Preflight D across Oct-Dec using schedules plus saved archive odds only."""
+    start = date.fromisoformat(_NHL_D_BATCH_START)
+    end = date.fromisoformat(_NHL_D_BATCH_END)
+    dates = []
+    cursor = start
+    while cursor <= end:
+        dates.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
+        payloads = await asyncio.gather(*[
+            _fetch(f"{NHL_API}/schedule/{day}", c) for day in dates
+        ], return_exceptions=True)
+    active = []
+    schedule_errors = []
+    for ds, payload in zip(dates, payloads):
+        if not isinstance(payload, dict):
+            schedule_errors.append(ds)
+            continue
+        game_count = 0
+        for day in payload.get("gameWeek", []):
+            if day.get("date") == ds:
+                game_count = len(day.get("games", []) or [])
+                break
+        if game_count:
+            active.append({"date": ds, "games": game_count})
+    saved = {
+        row.get("date") for row in
+        _nhl_historical_analysis_payload("D").get("dates", [])
+        if row.get("date")
+    }
+    missing_odds = [
+        row["date"] for row in active
+        if not isinstance(_nhl_load_historical_odds_cache(row["date"]), dict)
+    ]
+    remaining = [row for row in active if row["date"] not in saved]
+    return {
+        "start": _NHL_D_BATCH_START, "end": _NHL_D_BATCH_END,
+        "season": "2025-26", "system": "D",
+        "active_dates": active, "date_count": len(active),
+        "game_count": sum(row["games"] for row in active),
+        "saved_dates": len(active) - len(remaining),
+        "remaining_dates": remaining,
+        "remaining_game_count": sum(row["games"] for row in remaining),
+        "missing_odds_cache_dates": missing_odds,
+        "schedule_error_dates": schedule_errors,
+        "ready": bool(active) and not missing_odds and not schedule_errors,
+        "odds_api_called": False, "official_mutation": False,
+    }
+
+
+async def _nhl_run_d_historical_batch():
+    global _NHL_D_BATCH
+    try:
+        calendar = await _nhl_d_historical_batch_calendar()
+        remaining = calendar.get("remaining_dates") or []
+        if not calendar.get("ready"):
+            raise RuntimeError(
+                "D replay stopped: preflight found "
+                f"{len(calendar.get('missing_odds_cache_dates') or [])} "
+                "active date(s) without archived odds and "
+                f"{len(calendar.get('schedule_error_dates') or [])} "
+                "schedule error(s)."
+            )
+        with _NHL_D_BATCH_LOCK:
+            _NHL_D_BATCH.update({
+                "status": "running", "completed": 0,
+                "total": len(remaining), "current_date": "",
+                "failed_dates": [],
+                "message": "D October-December replay running",
+                "preflight": calendar, "odds_api_called": False,
+                "official_mutation": False,
+            })
+        for index, row in enumerate(remaining, 1):
+            ds = row["date"]
+            with _NHL_D_BATCH_LOCK:
+                _NHL_D_BATCH["current_date"] = ds
+                _NHL_D_BATCH["message"] = (
+                    f"Replaying D {ds} ({index}/{len(remaining)})")
+            try:
+                result = await run_picks(
+                    ds, simulate=True, persist_historical_special=False,
+                    historical_odds_cache_only=True,
+                    skip_game_predictor=True, system="D")
+                replay = result.get("historicalTrackRecord") or {}
+                if result.get("error") or result.get("no_games") or not replay:
+                    raise RuntimeError(
+                        result.get("error") or result.get("message")
+                        or "D replay payload was empty")
+                if not _nhl_save_historical_analysis(
+                        ds, replay, system="D"):
+                    raise RuntimeError("D historical archive write failed")
+            except Exception as exc:
+                logger.exception("NHL D historical batch failed for %s", ds)
+                with _NHL_D_BATCH_LOCK:
+                    _NHL_D_BATCH["failed_dates"].append({
+                        "date": ds, "error": str(exc)[:240]})
+            with _NHL_D_BATCH_LOCK:
+                _NHL_D_BATCH["completed"] = index
+        with _NHL_D_BATCH_LOCK:
+            failures = len(_NHL_D_BATCH["failed_dates"])
+            _NHL_D_BATCH.update({
+                "status": "completed_with_errors" if failures else "completed",
+                "current_date": "",
+                "message": (
+                    f"D October-December replay finished with "
+                    f"{failures} failed date(s)"
+                    if failures else
+                    "D October-December replay finished"
+                ),
+            })
+    except Exception as exc:
+        logger.exception("NHL D historical batch stopped")
+        with _NHL_D_BATCH_LOCK:
+            _NHL_D_BATCH.update({
+                "status": "failed", "current_date": "",
+                "message": str(exc)[:240], "odds_api_called": False,
+                "official_mutation": False,
+            })
+
+
+def _nhl_d_historical_batch_thread():
+    asyncio.run(_nhl_run_d_historical_batch())
+
+
+@app.get("/api/nhl/d-historical-batch/preflight")
+async def nhl_d_historical_batch_preflight(
+        request: Request, token: str = ""):
+    if not _nhl_historical_batch_auth(request, token):
+        raise HTTPException(status_code=403, detail="Admin only")
+    return JSONResponse(await _nhl_d_historical_batch_calendar())
+
+
+@app.get("/api/nhl/d-historical-batch/status")
+async def nhl_d_historical_batch_status(
+        request: Request, token: str = ""):
+    if not _nhl_historical_batch_auth(request, token):
+        raise HTTPException(status_code=403, detail="Admin only")
+    with _NHL_D_BATCH_LOCK:
+        return JSONResponse(dict(_NHL_D_BATCH))
+
+
+@app.post("/api/nhl/d-historical-batch/start")
+async def nhl_d_historical_batch_start(
+        request: Request, token: str = ""):
+    global _NHL_D_BATCH
+    if not _nhl_historical_batch_auth(request, token):
+        raise HTTPException(status_code=403, detail="Admin only")
+    body = await request.json()
+    if body.get("confirm") != "RUN D OCT NOV DEC 2025":
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit D October-December confirmation is required")
+    calendar = await _nhl_d_historical_batch_calendar()
+    if not calendar.get("ready"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "D replay failed closed. "
+                f"Missing archived odds: "
+                f"{len(calendar.get('missing_odds_cache_dates') or [])}; "
+                f"schedule errors: "
+                f"{len(calendar.get('schedule_error_dates') or [])}."
+            ))
+    with _NHL_D_BATCH_LOCK:
+        if _NHL_D_BATCH.get("status") in ("starting", "running"):
+            raise HTTPException(status_code=409, detail="D batch already running")
+        _NHL_D_BATCH = {
+            "status": "starting", "start": _NHL_D_BATCH_START,
+            "end": _NHL_D_BATCH_END, "completed": 0,
+            "total": len(calendar.get("remaining_dates") or []),
+            "current_date": "", "failed_dates": [],
+            "message": "Preparing D October-December replay",
+            "odds_api_called": False, "official_mutation": False,
+        }
+    _bt_th.Thread(
+        target=_nhl_d_historical_batch_thread,
+        name="nhl-d-historical-october-december", daemon=True).start()
+    return JSONResponse(dict(_NHL_D_BATCH))
+
+
 @app.get("/api/nhl/historical-analysis")
 async def nhl_historical_analysis(
         request: Request, token: str = "", system: str = "A"):
@@ -8674,10 +8933,10 @@ async def nhl_historical_analysis(
     if not _verify_hub_token(tok):
         raise HTTPException(status_code=401, detail="Subscription required")
     replay_system = str(system or "A").strip().upper()
-    if replay_system not in ("A", "B", "C"):
+    if replay_system not in ("A", "B", "C", "D"):
         raise HTTPException(
-            status_code=400, detail="Historical system must be A, B, or C")
-    if replay_system in ("B", "C") and not _is_admin_token(tok):
+            status_code=400, detail="Historical system must be A, B, C, or D")
+    if replay_system in ("B", "C", "D") and not _is_admin_token(tok):
         raise HTTPException(status_code=403, detail="Admin only")
     payload = _nhl_historical_analysis_payload(replay_system)
     if not payload.get("dates"):
