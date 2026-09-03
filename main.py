@@ -5506,8 +5506,8 @@ async function loadNhlHistoricalAnalysis(){
   if(body)body.innerHTML='<p style="color:#94a3b8;padding:18px">Loading saved Historical Analysis…</p>';
   try{
     var rs=await Promise.all([
-      fetch('/api/nhl/historical-analysis?system=A&token='+_nhlHistAuth()),
-      window.IS_ADMIN?fetch('/api/nhl/historical-analysis?system=B&token='+_nhlHistAuth()):Promise.resolve(null)
+      fetch('/api/nhl/historical-analysis?system=A&token='+_nhlHistAuth(),{cache:'no-store'}),
+      window.IS_ADMIN?fetch('/api/nhl/historical-analysis?system=B&token='+_nhlHistAuth(),{cache:'no-store'}):Promise.resolve(null)
     ]);
     if(!rs[0].ok)throw new Error(await rs[0].text()||('HTTP '+rs[0].status));
     _nhlHistDataA=await rs[0].json();
@@ -7191,12 +7191,20 @@ def _nhl_historical_analysis_payload(system: str = "A") -> dict:
         _NHL_HIST_B_DETAIL_CAT if replay_system == "B"
         else _NHL_HIST_DETAIL_CAT
     )
-    detail_rows = _nhl_sb_get_all("mpa_track_ledger", {
+    detail_params = {
         "app": f"eq.{_NHL_TRK_APP}",
         "category": f"eq.{detail_category}",
         "locked": "eq.true", "select": "date,detail",
         "order": "date.desc",
-    }) or []
+    }
+    detail_rows = []
+    for attempt in range(3):
+        detail_rows = _nhl_sb_get_all(
+            "mpa_track_ledger", detail_params) or []
+        if detail_rows:
+            break
+        if attempt < 2:
+            time.sleep(0.4 * (attempt + 1))
     gp_rows = _nhl_sb_get_all("mpa_track_ledger", {
         "app": f"eq.{_NHL_TRK_APP}",
         "category": f"eq.{_NHL_HIST_GP_CAT}",
@@ -8079,7 +8087,17 @@ async def nhl_historical_analysis(
         raise HTTPException(status_code=400, detail="Historical system must be A or B")
     if replay_system == "B" and not _is_admin_token(tok):
         raise HTTPException(status_code=403, detail="Admin only")
-    return JSONResponse(_nhl_historical_analysis_payload(replay_system))
+    payload = _nhl_historical_analysis_payload(replay_system)
+    if not payload.get("dates"):
+        return JSONResponse(
+            {"error": (
+                f"Saved {replay_system} historical archive could not be read. "
+                "The archive was not deleted; refresh and try again."
+            )},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 _CRON_BUSY_NHL = False
