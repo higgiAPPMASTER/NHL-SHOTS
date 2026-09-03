@@ -3781,8 +3781,11 @@ body.is-admin #parlayCard{display:block}
         <button id="nhlReplayB" onclick="_nhlSelectReplay('B')" style="background:#1e293b;color:#cbd5e1;border:2px solid #475569;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">B · OLD</button>
         <button id="nhlReplayC" onclick="_nhlSelectReplay('C')" style="background:#1e293b;color:#cbd5e1;border:2px solid #475569;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">C · SELECTIVE</button>
         <button id="nhlReplayD" onclick="_nhlSelectReplay('D')" style="background:#1e293b;color:#cbd5e1;border:2px solid #475569;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">D · TOP PLAYERS</button>
+         <button id="nhlReplayAll" onclick="runNhlHistoricalAll()" style="background:#7c3aed;color:#fff;border:2px solid #c4b5fd;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">RUN ALL A+B+C+D</button>
       </div>
       <div id="nhlReplayHint" style="color:#64748b;font-size:.68rem;margin-top:7px">Choose a completed date, then click A New, B Old, C Selective, or D Top Players.</div>
+       <div id="nhlReplayAllStatus" style="display:none;color:#c4b5fd;font-size:.72rem;font-weight:800;margin-top:9px"></div>
+       <div id="nhlReplayAllResults" style="display:none;margin-top:12px"></div>
     </div>
   </div>
 
@@ -4045,13 +4048,19 @@ async function getPicks(){
       :(isHistorical
         ?'/api/picks?target_date='+encodeURIComponent(dt)+'&simulate=true&token='+encodeURIComponent(_nhlTok)
         :'/api/cached?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok));
-    var res=await fetch(url);
-    if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
-    if(!res.ok){
-      var errData=await res.json().catch(function(){return {};});
-      throw new Error(errData.detail||errData.error||('Could not load picks (HTTP '+res.status+').'));
+    var data=null;
+    var allCache=window.__NHL_HIST_ALL__;
+    if(adminReplay&&allCache&&allCache.date===dt&&allCache.systems&&allCache.systems[replaySystem]){
+      data=allCache.systems[replaySystem];
+    }else{
+      var res=await fetch(url);
+      if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
+      if(!res.ok){
+        var errData=await res.json().catch(function(){return {};});
+        throw new Error(errData.detail||errData.error||('Could not load picks (HTTP '+res.status+').'));
+      }
+      data=await res.json();
     }
-    var data=await res.json();
     if(data.no_games){
       if(out)out.innerHTML='<div style="text-align:center;padding:40px 20px;color:#9ca3af"><h2 style="color:#f59e0b;margin-bottom:8px">No NHL Games</h2><p>'+(data.message||('No NHL games scheduled for '+dt+'.'))+'</p></div>';
       if(st)st.textContent='';
@@ -4120,6 +4129,56 @@ async function runAllNhlSystems(){
 }
 
 window.NHL_HIST_SYSTEM='A';
+function _nhlHistAllCard(system,result){
+  var labels={A:'A · NEW',B:'B · OLD',C:'C · SELECTIVE',D:'D · TOP PLAYERS'};
+  var colors={A:'#60a5fa',B:'#fbbf24',C:'#c4b5fd',D:'#34d399'};
+  var tr=(result&&result.historicalTrackRecord)||{},s=tr.summary||{};
+  var decided=Number(s.wins||0)+Number(s.losses||0);
+  var rate=s.percentage!=null?Number(s.percentage).toFixed(1)+'%':'—';
+  var ov=tr.overflow_summary||{};
+  var ovDecided=Number(ov.wins||0)+Number(ov.losses||0);
+  var pickCount=(tr.detail||[]).length,overflowCount=(tr.overflow_detail||[]).length;
+  return '<button onclick="_nhlSelectReplay(\\''+system+'\\')" style="text-align:left;background:#0f172a;border:1px solid '+colors[system]+';border-radius:11px;padding:12px 14px;color:#fff;cursor:pointer;min-width:190px;flex:1">'
+    +'<div style="color:'+colors[system]+';font-weight:900;font-size:.82rem">'+labels[system]+'</div>'
+    +'<div style="margin-top:7px;font-size:1rem;font-weight:900"><span style="color:#4ade80">'+Number(s.wins||0)+'</span>/<span style="color:#f87171">'+decided+'</span> <span style="color:#94a3b8;font-size:.76rem">('+rate+')</span></div>'
+    +'<div style="margin-top:5px;color:#94a3b8;font-size:.68rem">'+pickCount+' main rows · '+overflowCount+' overflow rows</div>'
+    +(ovDecided?'<div style="margin-top:3px;color:#fbbf24;font-size:.68rem">Overflow '+Number(ov.wins||0)+'/'+ovDecided+'</div>':'')
+    +'<div style="margin-top:7px;color:#e2e8f0;font-size:.66rem;font-weight:800">CLICK TO VIEW BOARD</div></button>';
+}
+function _nhlRenderHistoricalAllResults(data){
+  var box=document.getElementById('nhlReplayAllResults');
+  if(!box)return;
+  box.style.display='block';
+  box.innerHTML='<div style="padding:10px 12px;margin-bottom:9px;background:rgba(124,58,237,.1);border:1px solid rgba(196,181,253,.35);border-radius:9px;color:#ddd6fe;font-size:.7rem;font-weight:800">Historical replay '+data.date+' · all four systems loaded · view-only and excluded from the official live-season record</div>'
+    +'<div style="display:flex;gap:9px;flex-wrap:wrap">'+['A','B','C','D'].map(function(system){return _nhlHistAllCard(system,(data.systems||{})[system]);}).join('')+'</div>';
+}
+async function runNhlHistoricalAll(){
+  if(!window.IS_ADMIN){alert('Admin only');return;}
+  var dp=document.getElementById('datePicker'),dt=(dp&&dp.value)||'';
+  var today=new Date().toISOString().slice(0,10);
+  if(!dt||dt>=today){alert('Choose a completed historical date first.');return;}
+  var btn=document.getElementById('nhlReplayAll'),st=document.getElementById('nhlReplayAllStatus');
+  var tok=localStorage.getItem('__mpa_token')||'';
+  var adm=new URLSearchParams(location.search).get('admin')||'';
+  if(btn){btn.disabled=true;btn.textContent='RUNNING ALL FOUR…';}
+  if(st){st.style.display='block';st.style.color='#c4b5fd';st.textContent='Running A+B from one historical pass, then C and D from the same archived odds cache…';}
+  try{
+    var url='/api/historical-track-replay-all?date_str='+encodeURIComponent(dt)+'&token='+encodeURIComponent(tok)+'&admin='+encodeURIComponent(adm);
+    var r=await fetch(url,{method:'POST'});
+    var data=await r.json().catch(function(){return {};});
+    if(!r.ok)throw new Error(data.detail||data.error||('Historical replay failed (HTTP '+r.status+').'));
+    window.__NHL_HIST_ALL__=data;
+    _nhlRenderHistoricalAllResults(data);
+    if(st)st.textContent='All four systems loaded for '+dt+'. Click any system card or A/B/C/D button to view its complete board.';
+    window.NHL_HIST_SYSTEM='A';
+    _nhlPaintReplayChoice();
+    await getPicks();
+  }catch(e){
+    if(st){st.style.color='#f87171';st.textContent=e.message||'Could not run all four historical systems.';}
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='RUN ALL A+B+C+D';}
+  }
+}
 function _nhlPaintReplayChoice(){
   var a=document.getElementById('nhlReplayA'),b=document.getElementById('nhlReplayB'),c=document.getElementById('nhlReplayC'),d=document.getElementById('nhlReplayD');
   var isB=window.NHL_HIST_SYSTEM==='B';
@@ -8277,11 +8336,17 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
         raise HTTPException(status_code=400, detail=result.get("error") or result.get("message") or
                             "The historical replay could not be generated")
     if replay_system == "B":
-        result["historicalTrackRecord"] = _nhl_comparison_replay(
+        legacy_result = dict(result)
+        legacy_result.update({
+            key: list(value or [])
+            for key, value in (result.get("legacySystem") or {}).items()
+        })
+        legacy_result["system"] = "B"
+        legacy_result["historicalTrackRecord"] = _nhl_comparison_replay(
             result, legacy=True)
-        result["comparisonSystem"] = "B Old/attached ZIP"
-        result["historicalSpecialRecord"] = None
-        return JSONResponse(result)
+        legacy_result["comparisonSystem"] = "B Old/attached ZIP"
+        legacy_result["historicalSpecialRecord"] = None
+        return JSONResponse(legacy_result)
     if replay_system in ("C", "D"):
         result["historicalTrackRecord"] = _nhl_historical_replay_payload(result)
         result["comparisonSystem"] = (
@@ -8294,6 +8359,90 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
     result["comparisonSystem"] = "A New/current"
     result["historicalSpecialRecord"] = None
     return JSONResponse(result)
+
+
+@app.post("/api/historical-track-replay-all")
+async def nhl_historical_track_replay_all(
+        request: Request, date_str: str, token: str = "", admin: str = ""):
+    """Run A/B/C/D for one past date without writing to official records."""
+    tok = token or request.headers.get(
+        "Authorization", "").replace("Bearer ", "").strip()
+    if not _nhl_bet_admin_ok(tok, admin):
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        replay_date = date.fromisoformat(date_str)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400, detail="A valid historical date is required")
+    if replay_date >= date.today():
+        raise HTTPException(
+            status_code=400, detail="Choose a completed NHL date")
+
+    a = await run_picks(
+        date_str,
+        simulate=True,
+        include_legacy_system=True,
+        persist_historical_special=False,
+        historical_odds_cache_only=True,
+        skip_game_predictor=True,
+        system="A",
+    )
+    if a.get("error") or a.get("no_games"):
+        raise HTTPException(
+            status_code=400,
+            detail=a.get("error") or a.get("message")
+            or "The historical A/B replay could not be generated",
+        )
+    a["historicalTrackRecord"] = _nhl_historical_replay_payload(a)
+    a["comparisonSystem"] = "A New/current"
+    a["historicalSpecialRecord"] = None
+
+    b = dict(a)
+    b.update({
+        key: list(value or [])
+        for key, value in (a.get("legacySystem") or {}).items()
+    })
+    b["system"] = "B"
+    b["comparisonSystem"] = "B Old/attached ZIP"
+    b["historicalTrackRecord"] = _nhl_comparison_replay(a, legacy=True)
+    b["historicalSpecialRecord"] = None
+
+    systems = {"A": a, "B": b}
+    for system in ("C", "D"):
+        result = await run_picks(
+            date_str,
+            simulate=True,
+            persist_historical_special=False,
+            historical_odds_cache_only=True,
+            skip_game_predictor=True,
+            system=system,
+        )
+        if result.get("error") or result.get("no_games"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or result.get("message")
+                or f"Historical System {system} could not be generated",
+            )
+        result["historicalTrackRecord"] = (
+            _nhl_historical_replay_payload(result)
+        )
+        result["comparisonSystem"] = (
+            "C Enhanced/selective"
+            if system == "C" else "D Top 6 forwards/4 defensemen"
+        )
+        result["historicalSpecialRecord"] = None
+        systems[system] = result
+
+    return JSONResponse({
+        "date": date_str,
+        "historical": True,
+        "official": False,
+        "systems": systems,
+        "message": (
+            "A, B, C, and D historical replays loaded from the archived "
+            "odds cache; official live-season records were not changed."
+        ),
+    }, headers={"Cache-Control": "no-store"})
 
 
 _NHL_GOAL_COMPARE_START = "2025-11-01"
