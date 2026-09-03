@@ -3787,7 +3787,7 @@ body.is-admin #parlayCard{display:block}
        <div id="nhlReplayAllStatus" style="display:none;color:#c4b5fd;font-size:.72rem;font-weight:800;margin-top:9px"></div>
        <div id="nhlReplayAllProgress" style="display:none;max-width:520px;margin:12px auto 0;padding:13px 16px;background:rgba(124,58,237,.09);border:1px solid rgba(196,181,253,.35);border-radius:11px">
          <div style="display:flex;align-items:center;justify-content:center;gap:10px">
-           <span class="spin" style="display:inline-block;width:22px;height:22px;border-width:3px;flex:0 0 auto"></span>
+           <span id="nhlReplayAllSpinner" class="spin" style="display:inline-block;width:22px;height:22px;border-width:3px;flex:0 0 auto"></span>
            <span id="nhlReplayAllStage" style="color:#ddd6fe;font-size:.74rem;font-weight:900">Starting historical A+B+C+D replay…</span>
          </div>
          <div style="height:9px;margin-top:11px;background:#1e1b4b;border-radius:999px;overflow:hidden">
@@ -4172,6 +4172,7 @@ async function runNhlHistoricalAll(){
   var btn=document.getElementById('nhlReplayAll'),st=document.getElementById('nhlReplayAllStatus');
   var prog=document.getElementById('nhlReplayAllProgress'),stage=document.getElementById('nhlReplayAllStage');
   var bar=document.getElementById('nhlReplayAllBar'),pct=document.getElementById('nhlReplayAllPct');
+  var spinner=document.getElementById('nhlReplayAllSpinner');
   var tok=localStorage.getItem('__mpa_token')||'';
   var adm=new URLSearchParams(location.search).get('admin')||'';
   var pollTimer=null;
@@ -4198,6 +4199,7 @@ async function runNhlHistoricalAll(){
     window.__NHL_HIST_ALL__=data;
     _nhlRenderHistoricalAllResults(data);
     if(bar)bar.style.width='100%';
+    if(spinner)spinner.style.display='none';
     if(stage)stage.textContent='All four historical systems loaded.';
     if(pct)pct.textContent='COMPLETE · 100%';
     if(st)st.textContent='All four systems loaded for '+dt+'. Track Record and Overflow now show this replay date; click A/B/C/D to switch systems.';
@@ -4207,6 +4209,7 @@ async function runNhlHistoricalAll(){
   }catch(e){
     if(st){st.style.color='#f87171';st.textContent=e.message||'Could not run all four historical systems.';}
     if(stage)stage.textContent='Historical replay stopped.';
+    if(spinner)spinner.style.display='none';
     if(pct)pct.textContent='FAILED';
     if(bar){bar.style.width='100%';bar.style.background='#dc2626';}
   }finally{
