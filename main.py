@@ -5224,6 +5224,7 @@ function downloadNhlMyBetsCSV(){
 }
 // ── NHL Track Record ──────────────────────────────────────────────────────────
 var _nhlTrkData=null,_nhlTrkReplay=null,_nhlTrkTabMode='cat',_nhlOvfTabMode='cat';
+var _nhlTrkSystem='A',_nhlTrkDataBySystem={};
 var _nhlSpTrkData=null,_nhlSpTrkTabMode='cat';
 var _nhlHistSpData=null,_nhlHistSpTabMode='cat',_nhlHistSpPeriod='month';
 function _nhlTrkDayName(){
@@ -5285,7 +5286,53 @@ function _nhlOpenHistoricalForDate(){
   _nhlHistSpDayName();
   openNhlHistoricalSpecialRecord();
 }
-async function loadNhlTrackRecord(manualGrade){
+function _nhlTrackSystemLabel(system){
+  return system==='B'?'B · OLD':system==='C'?'C · SELECTIVE':system==='D'?'D · TOP PLAYERS':'A · NEW';
+}
+function _nhlTrackSystemButtonStyle(system){
+  var active=_nhlTrkSystem===system;
+  var accent=system==='A'?'#60a5fa':system==='B'?'#fbbf24':system==='C'?'#c4b5fd':'#34d399';
+  return 'background:'+(active?'#1d4ed8':'#1e293b')+';color:#fff;border:2px solid '+(active?accent:'#475569')+';border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer';
+}
+function _nhlPaintTrackSystemButtons(){
+  ['A','B','C','D'].forEach(function(system){
+    var b=document.getElementById('nhlTrkSystem'+system);
+    if(b)b.style.cssText=_nhlTrackSystemButtonStyle(system);
+  });
+}
+function _nhlUseTrackSystemData(data,system){
+  _nhlTrkSystem=system||'A';
+  _nhlTrkData=data;
+  _nhlTrkDataBySystem[_nhlTrkSystem]=data;
+  _nhlTrkReplay=null;
+  _nhlPaintTrackSystemButtons();
+  if(_nhlTrkSystem==='A'){
+    _nhlSpTrkData={dates:_nhlTrkData.special_dates||[],stake:_nhlTrkData.stake||20};
+  }
+  renderNhlTrackDay();
+  renderNhlOverflowDay();
+  if(_nhlTrkSystem==='A')renderNhlSpecialDay();
+}
+function _nhlSetTrackSystem(system){
+  system=(system||'A').toUpperCase();
+  if(['A','B','C','D'].indexOf(system)<0)system='A';
+  if(system!=='A'&&!window.IS_ADMIN){alert('Admin only');return;}
+  var cached=_nhlTrkDataBySystem[system];
+  if(cached){_nhlUseTrackSystemData(cached,system);return;}
+  loadNhlTrackRecord(false,system);
+}
+function _nhlTrackRecordQuery(manualGrade,system,dateValue){
+  var params=[];
+  if(manualGrade)params.push('grade=true','date_str='+encodeURIComponent(dateValue||''));
+  if(system&&system!=='A'){
+    params.push('system='+encodeURIComponent(system));
+    params.push('token='+encodeURIComponent(localStorage.getItem('__mpa_token')||''));
+  }
+  return params.length?'?'+params.join('&'):'';
+}
+async function loadNhlTrackRecord(manualGrade,requestedSystem){
+  var system=(requestedSystem||_nhlTrkSystem||'A').toUpperCase();
+  if(['A','B','C','D'].indexOf(system)<0)system='A';
   var body=document.getElementById('nhlTrkBody');
   var ovfBody=document.getElementById('nhlOvfBody');
   if(body) body.innerHTML='<p style="color:#94a3b8;padding:24px">Loading\u2026</p>';
@@ -5294,23 +5341,15 @@ async function loadNhlTrackRecord(manualGrade){
     // Hub-hosted snapshots include a read-only Track Record payload.  That
     // keeps results visible even when the live Render service is waking up or
     // temporarily unavailable.
-    if(window.__INITIAL_TRACK_RECORD__&&!manualGrade){
-      _nhlTrkData=window.__INITIAL_TRACK_RECORD__;
-      _nhlSpTrkData={dates:_nhlTrkData.special_dates||[],stake:_nhlTrkData.stake||20};
-      renderNhlTrackDay();
-      renderNhlOverflowDay();
-      renderNhlSpecialDay();
+    if(system==='A'&&window.__INITIAL_TRACK_RECORD__&&!manualGrade){
+      _nhlUseTrackSystemData(window.__INITIAL_TRACK_RECORD__,'A');
       return;
     }
     var dp=document.getElementById('nhlTrkDate');
-    var qs=manualGrade?'?grade=true&date_str='+encodeURIComponent(dp&&dp.value?dp.value:''):'';
+    var qs=_nhlTrackRecordQuery(manualGrade,system,dp&&dp.value?dp.value:'');
     var r=await fetch('/api/track-record'+qs);
     if(!r.ok) throw new Error(await r.text());
-    _nhlTrkData=await r.json();
-    _nhlSpTrkData={dates:_nhlTrkData.special_dates||[],stake:_nhlTrkData.stake||20};
-    renderNhlTrackDay();
-    renderNhlOverflowDay();
-    renderNhlSpecialDay();
+    _nhlUseTrackSystemData(await r.json(),system);
   }catch(e){
     if(body) body.innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading track record')+'</p>';
     if(ovfBody) ovfBody.innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading overflow track record')+'</p>';
@@ -5532,7 +5571,7 @@ function renderNhlTrackDay(){
   var sumEl=document.getElementById('nhlTrkSummary'),bodyEl=document.getElementById('nhlTrkBody');
   if(!sumEl||!bodyEl) return;
   if(selDate&&!dayData){
-    sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 10px">No saved official NHL pick snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.78rem;margin:0">Choose that date above and click <b style="color:#67e8f9">Get Picks</b> to show its historical pick board and replay Track Record.</p></div>';
+     sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 10px">No saved '+_nhlTrackSystemLabel(_nhlTrkSystem)+' pick snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.78rem;margin:0">Choose that date above and click <b style="color:#67e8f9">Get Picks</b> to show its historical pick board and replay Track Record.</p></div>';
     bodyEl.innerHTML='';
     return;
   }
@@ -5560,7 +5599,8 @@ function renderNhlTrackDay(){
   var voidNotes=isReplay&&voids&&dayData.summary&&dayData.summary.void_reasons
     ?'<div style="margin:-4px 0 14px;padding:10px 12px;border-radius:10px;background:#111827;color:#cbd5e1;font-size:.76rem"><b style="color:#facc15">'+voids+' void call'+(voids===1?'':'s')+'</b> — '+dayData.summary.void_reasons.map(function(v){return v.count+'× '+v.reason;}).join(' · ')+'</div>'
     :'';
-  sumEl.innerHTML=replayNote+'<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+   sumEl.innerHTML=replayNote+'<div style="background:#0f172a;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+     +'<span style="color:#93c5fd;font-weight:900">'+_nhlTrackSystemLabel(_nhlTrkSystem)+'</span>'
     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
     +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
     +'<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input id="nhl-trk-stake" type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" style="width:82px;background:#0b1120;border:1px solid #334155;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>'
@@ -5586,7 +5626,7 @@ function renderNhlOverflowDay(){
   var sumEl=document.getElementById('nhlOvfSummary'),bodyEl=document.getElementById('nhlOvfBody');
   if(!sumEl||!bodyEl)return;
   if(selDate&&!dayData){
-    sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 10px">No saved official NHL overflow snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.78rem;margin:0">Choose that date above and click <b style="color:#fbbf24">Get Picks</b> to show its historical overflow replay.</p></div>';
+     sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 10px">No saved '+_nhlTrackSystemLabel(_nhlTrkSystem)+' overflow snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.78rem;margin:0">Choose that date above and click <b style="color:#fbbf24">Get Picks</b> to show its historical overflow replay.</p></div>';
     bodyEl.innerHTML='';
     return;
   }
@@ -5612,7 +5652,8 @@ function renderNhlOverflowDay(){
   var rate=decided.length?(wins/decided.length*100):null;
   var plColor=netPL>=0?'#4ade80':'#f87171';
   var replayNote=isReplay?'<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(245,158,11,.35);border-radius:10px;background:rgba(180,83,9,.1);color:#fde68a;font-size:.76rem;font-weight:700">'+(dayData.note||'Historical overflow replay only — excluded from the official Overflow Track Record.')+'</div>':'';
-  sumEl.innerHTML=replayNote+'<div style="background:#1c1408;border:1px solid #5b3d12;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+   sumEl.innerHTML=replayNote+'<div style="background:#1c1408;border:1px solid #5b3d12;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:14px">'
+     +'<span style="color:#fbbf24;font-weight:900">'+_nhlTrackSystemLabel(_nhlTrkSystem)+'</span>'
     +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+wins+'</span>/<span style="color:#f87171">'+(wins+losses)+'</span>'
     +(rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+rate.toFixed(1)+'%)</span>':'')+'</span>'
     +'<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" style="width:82px;background:#0b1120;border:1px solid #78350f;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>'
@@ -6243,6 +6284,14 @@ function _nhlCompareCell(stats){
       <button id="nhlTrkBtnCat" onclick="nhlTrkSetTab('cat')" style="background:#065f46;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">By Category</button>
       <button id="nhlTrkBtnList" onclick="nhlTrkSetTab('list')" style="background:#1e293b;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">Full List</button>
     </div>
+     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-4px 0 14px">
+       <span style="color:#94a3b8;font-size:.7rem;font-weight:900;letter-spacing:.08em">SYSTEM</span>
+       <button id="nhlTrkSystemA" onclick="_nhlSetTrackSystem('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">A · NEW</button>
+       <button class="admin-only" id="nhlTrkSystemB" onclick="_nhlSetTrackSystem('B')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">B · OLD</button>
+       <button class="admin-only" id="nhlTrkSystemC" onclick="_nhlSetTrackSystem('C')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">C · SELECTIVE</button>
+       <button class="admin-only" id="nhlTrkSystemD" onclick="_nhlSetTrackSystem('D')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">D · TOP PLAYERS</button>
+       <span style="color:#64748b;font-size:.68rem">A is public; B/C/D are admin comparison records</span>
+     </div>
     <div id="nhlTrkSummary"></div>
     <div id="nhlTrkBody"></div>
   </div>
@@ -6297,6 +6346,14 @@ function _nhlCompareCell(stats){
       <button id="nhlOvfBtnCat" onclick="nhlOvfSetTab('cat')" style="background:#b45309;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">By Category</button>
       <button id="nhlOvfBtnList" onclick="nhlOvfSetTab('list')" style="background:#1e293b;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">Full List</button>
     </div>
+     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-4px 0 14px">
+       <span style="color:#94a3b8;font-size:.7rem;font-weight:900;letter-spacing:.08em">SYSTEM</span>
+       <button onclick="_nhlSetTrackSystem('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">A · NEW</button>
+       <button class="admin-only" onclick="_nhlSetTrackSystem('B')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">B · OLD</button>
+       <button class="admin-only" onclick="_nhlSetTrackSystem('C')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">C · SELECTIVE</button>
+       <button class="admin-only" onclick="_nhlSetTrackSystem('D')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">D · TOP PLAYERS</button>
+       <span style="color:#64748b;font-size:.68rem">same selected system as the main record</span>
+     </div>
     <div id="nhlOvfSummary"></div>
     <div id="nhlOvfBody"></div>
   </div>
