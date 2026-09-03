@@ -3086,6 +3086,10 @@ body.is-admin #parlayCard{display:block}
 .sig-fresh{background:rgba(52,211,153,.12);color:#34d399;border:1px solid rgba(52,211,153,.25)}
 .sig-hot{background:rgba(251,146,60,.15);color:#fb923c;border:1px solid rgba(251,146,60,.3)}
 .sig-cold{background:rgba(96,165,250,.12);color:#60a5fa;border:1px solid rgba(96,165,250,.25)}
+.goal-under-form{font-size:.59rem;font-weight:900;padding:2px 6px;border-radius:999px;letter-spacing:.025em;white-space:nowrap;vertical-align:middle;margin-left:5px}
+.goal-under-cold{background:rgba(74,222,128,.13);color:#4ade80;border:1px solid rgba(74,222,128,.35)}
+.goal-under-neutral{background:rgba(250,204,21,.12);color:#facc15;border:1px solid rgba(250,204,21,.3)}
+.goal-under-hot{background:rgba(248,113,113,.13);color:#f87171;border:1px solid rgba(248,113,113,.35)}
 .sig-toi{background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.25)}
 .sig-pp{background:rgba(245,158,11,.1);color:#f59e0b;border:1px solid rgba(245,158,11,.25)}
 .sig-sv-good{background:rgba(52,211,153,.12);color:#34d399;border:1px solid rgba(52,211,153,.25)}
@@ -3098,7 +3102,8 @@ body.is-admin #parlayCard{display:block}
 .hs-ini{font-family:'Playfair Display',serif;font-weight:800;font-size:1.2rem;color:#9ca3af;z-index:1}
 .pc-logo{width:22px;height:22px;position:absolute;bottom:-3px;right:-3px;z-index:3;background:#0f0f0f;border-radius:50%;padding:1px}
 .pc-id{flex:1;min-width:0}
-.pc-name{font-weight:800;color:#fff;font-size:1.02rem;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-name{font-weight:800;color:#fff;font-size:1.02rem;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;min-width:0}
+.pc-name-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .pc-meta{font-size:.74rem;color:#9ca3af;margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .pc-mkt{display:inline-block;font-size:.82rem;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:#fbbf24;margin-top:5px;padding:3px 8px;border:1px solid rgba(251,191,36,.42);border-radius:6px;background:rgba(251,191,36,.1);text-shadow:0 0 9px rgba(251,191,36,.25)}
 .pick-card.acc-pts .pc-mkt{color:#93c5fd;border-color:rgba(96,165,250,.5);background:rgba(96,165,250,.12);text-shadow:0 0 9px rgba(96,165,250,.3)}
@@ -3595,7 +3600,7 @@ function _fmtToi(sec){
   var m=Math.floor(sec/60),s=sec%60;
   return m+':'+(s<10?'0':'')+s;
 }
-function _sigBadges(p){
+function _sigBadges(p,hideForm){
   var out='';
   var rd=p.restDays;
   if(rd!=null){
@@ -3603,7 +3608,7 @@ function _sigBadges(p){
     else if(rd>=3) out+='<span class="sig-badge sig-fresh">'+rd+'d Rest</span>';
   }
   var hh=p.hotHits, ht=p.hotTotal;
-  if(ht>=3){
+   if(ht>=3&&!hideForm){
     if(hh>=4) out+='<span class="sig-badge sig-hot">&#128293; '+hh+'/'+ht+' Hot</span>';
     else if(hh<=1) out+='<span class="sig-badge sig-cold">&#10052; '+hh+'/'+ht+' Cold</span>';
   }
@@ -3617,6 +3622,14 @@ function _sigBadges(p){
     out+='<span class="sig-badge '+cls+'">Opp G .'+Math.round(sv*1000)+'</span>';
   }
   return out?'<div class="sig-row">'+out+'</div>':'';
+}
+function _nhlFormBadge(p,side){
+  if(p.hotTotal<3)return '';
+  var hits=Number(p.hotHits||0),total=Number(p.hotTotal||0);
+  var under=side==='UNDER';
+  if(hits<=1)return '<span class="goal-under-form goal-under-cold" title="0–1 hits in the last '+total+' home/away games">❄ COLD FOR '+(under?'UNDER':'OVER')+' · '+hits+'/'+total+'</span>';
+  if(hits>=4)return '<span class="goal-under-form goal-under-hot" title="4+ hits in the last '+total+' home/away games">🔥 HOT '+(under?'AGAINST UNDER':'FOR OVER')+' · '+hits+'/'+total+'</span>';
+  return '<span class="goal-under-form goal-under-neutral" title="2–3 hits in the last '+total+' home/away games">— NEUTRAL · '+hits+'/'+total+'</span>';
 }
 function _ladKey(p){ return 'nlad_'+p.pid+'_'+String(p.mkt||'').replace(/[^a-z]/gi,''); }
 function _rateHtml(rate,hits,tot){
@@ -3679,13 +3692,13 @@ function nhlCard(p,i){
          <img class="pc-logo" src="${logo}" onerror="this.style.display='none'"/>
        </div>
        <div class="pc-id">
-         <div class="pc-name">${p.name}</div>
+          <div class="pc-name"><span class="pc-name-text">${p.name}</span>${_nhlFormBadge(p,'OVER')}</div>
          <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></div>
          <div class="pc-mkt">${p.mkt||''}</div>
        </div>
      </div>
      <div class="pc-tagrow">${fmtTag(p.tag)}</div>
-     ${_sigBadges(p)}
+      ${_sigBadges(p,true)}
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Line</span></div>
      ${p.proj!=null?`<div class="pc-proj"><span class="pp-lab">Projected</span><span class="pp-num">${p.proj}</span><span class="pp-edge ${p.projEdge>=0?'pos':'neg'}">${p.projEdge>=0?'+':''}${p.projEdge}</span></div>`:''}
      <div class="pc-stats">
@@ -3732,12 +3745,12 @@ function nhlUnderCard(p,i){
          <img class="pc-logo" src="${logo}" onerror="this.style.display='none'"/>
        </div>
        <div class="pc-id">
-         <div class="pc-name">${p.name}</div>
+          <div class="pc-name"><span class="pc-name-text">${p.name}</span>${_nhlFormBadge(p,'UNDER')}</div>
          <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></div>
          <div class="pc-mkt">${p.mkt||''} · UNDER</div>
        </div>
      </div>
-     ${_sigBadges(p)}
+      ${_sigBadges(p,true)}
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Under Line</span></div>
      <div class="pc-stats">
        <div class="pc-stat"><div class="k">Under vs ${p.opponent}</div><div class="v">${voHtml}</div></div>
