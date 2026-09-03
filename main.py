@@ -1220,18 +1220,37 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
         return {}, {}, {}, {}, {}
 
 
-async def get_shot_lines(target_date: str, games: List[Dict] = None) -> Dict[str, Dict]:
+async def get_shot_lines(
+    target_date: str,
+    games: List[Dict] = None,
+    historical_cache_only: bool = False,
+) -> Dict[str, Dict]:
     """Fetch real shots on goal lines from The Odds API.
     Tries icehockey_nhl first, then icehockey_nhl_championship (playoffs).
     Returns empty maps when books have not posted lines; it never invents a
     sportsbook price or claims a model threshold is a book line.
     """
+    games = games or []
+    if historical_cache_only:
+        if date.fromisoformat(target_date) >= date.today():
+            raise RuntimeError(
+                "Historical cache-only mode requires a completed date")
+        durable = _nhl_load_historical_odds_cache(target_date)
+        if durable is None:
+            raise RuntimeError(
+                f"Durable historical odds cache missing for {target_date}")
+        print(f"[HistoricalLines] cache-only hit for {target_date}")
+        return (
+            durable.get("lines", {}), durable.get("pts", {}),
+            durable.get("ast", {}), durable.get("sv", {}),
+            durable.get("goals", {}),
+        )
+
     api_key = os.environ.get("ODDS_API_KEY", "")
     if not api_key:
         print("[Lines] ODDS_API_KEY not set — no sportsbook props can be published")
         return {}, {}, {}, {}, {}
 
-    games = games or []
     # A separate cache namespace prevents older date+tomorrow mixed slates from
     # being reused after lineup eligibility became date/game specific.
     _oc = _odds_cache_get("nhl_lineup_v4", target_date)
@@ -2346,7 +2365,14 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
     }
 
 
-async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
+async def run_picks(
+    target_date: str = None,
+    simulate: bool = False,
+    include_legacy_system: bool = False,
+    persist_historical_special: bool = True,
+    historical_odds_cache_only: bool = False,
+    skip_game_predictor: bool = False,
+) -> Dict:
     global _progress
     sem_nhl = asyncio.Semaphore(SEM_NHL)
 
@@ -2370,7 +2396,9 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
     # Games exist — now fetch SA map, lines, and goalie SV% map in parallel.
     sa_map, _lines_tuple, goalie_map = await asyncio.gather(
         get_team_sa_map(season),
-        get_shot_lines(target_date, games),
+        get_shot_lines(
+            target_date, games,
+            historical_cache_only=historical_odds_cache_only),
         get_opp_goalie_svpct(season),
     )
     lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map = _lines_tuple
@@ -2481,7 +2509,14 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
 
         # Under track (vs-opp OR any-opp H/A) + game log for the per-card dropdown
         uf = _under_fields(logs, "shots", line, hr, opp)
-        if not over_ok and not uf["underOk"]:
+        legacy_over_ok = bool(
+            ((t2 < MIN_GAMES) or (r2 >= HIT_THRESH))
+            and r3 >= HIT_THRESH
+        )
+        if (
+            not over_ok and not uf["underOk"]
+            and not (include_legacy_system and legacy_over_ok)
+        ):
             return None
         _ha = [g for g in logs if g["homeRoad"] == hr][:10]
         _gsrc = ([g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10] or _ha)
@@ -2523,7 +2558,7 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
             "rateB": r3, "hitsB": h3, "totB": t3,
             "dispScore": score,
             "realUnderOdds": p.get("realUnderOdds", ""),
-            **uf, "overOk": over_ok,
+            **uf, "overOk": over_ok, "legacyOverOk": legacy_over_ok,
             "proj": proj, "projEdge": proj_edge, "projPick": proj_pick,
             "oppFactor": opp_factor, "restFactor": rest_factor, "leagueSA": league_sa,
             "glog": glog,
@@ -2566,6 +2601,117 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
         simulate=simulate, allow_fallback=unpriced_mode and not simulate,
         lineup_maps=[sv_lines_map], schedule_context=schedule_context,
     )
+    # Admin comparison only: reproduce the attached pre-change system from the
+    # exact same corrected data/odds/lineup pool.  This changes selection and
+    # ordering only; it never triggers another external-data fetch.
+    legacy_system = {}
+    if include_legacy_system:
+        def _legacy_score(player):
+            return round(
+                (
+                    (float(player.get("rateA") or 0)
+                     + float(player.get("rateB") or 0)) / 2
+                    if int(player.get("totA") or 0)
+                    else float(player.get("rateB") or 0)
+                ),
+                1,
+            )
+
+        def _legacy_pick(player, shots=False):
+            item = dict(player)
+            score = _legacy_score(item)
+            item["dispScore"] = score
+            item["score"] = score
+            if item.get("mkt") == "Points (1+)":
+                item["ptsScore"] = score
+            item["scheduleFactor"] = 1.0
+            if shots:
+                legacy_proj, opp_factor, rest_factor = _proj_count(
+                    item.get("avg"), item.get("totB"),
+                    item.get("avgA"), item.get("totA"),
+                    item.get("oppSA"), item.get("leagueSA"),
+                    item.get("restDays"), 1.0,
+                )
+                item["proj"] = legacy_proj
+                item["projEdge"] = round(
+                    legacy_proj - float(item.get("dispLine") or 0), 2)
+                item["oppFactor"] = opp_factor
+                item["restFactor"] = rest_factor
+            return item
+
+        legacy_shots = [
+            _legacy_pick(player, shots=True)
+            for player in results_raw
+            if player and player.get("legacyOverOk")
+        ]
+        legacy_shots.sort(
+            key=lambda x: (
+                x.get("projEdge", -999), x.get("score", 0),
+                x.get("oppSA", 0)),
+            reverse=True)
+        legacy_shot_unders = [
+            _legacy_pick(player, shots=True) for player in shot_unders]
+        legacy_shot_unders.sort(
+            key=lambda x: (x["underRate"], x["underTotal"]),
+            reverse=True)
+
+        def _legacy_points_over(player):
+            return (
+                float(player.get("rateA") or 0) >= 65.0
+                if int(player.get("totA") or 0) >= MIN_GAMES
+                else float(player.get("rateB") or 0) >= 65.0
+            )
+
+        legacy_pts = [
+            _legacy_pick(player) for player in pts_all
+            if _legacy_points_over(player)]
+        legacy_ast = [_legacy_pick(player) for player in ast_all]
+        legacy_goals = [_legacy_pick(player) for player in goal_all]
+        legacy_saves = [_legacy_pick(player) for player in saves_all]
+        legacy_pts_unders = [_legacy_pick(player) for player in pts_unders]
+        legacy_ast_unders = [_legacy_pick(player) for player in ast_unders]
+        legacy_goal_unders = [
+            _legacy_pick(player) for player in goal_unders_all]
+        legacy_saves_unders = [
+            _legacy_pick(player) for player in saves_unders]
+
+        legacy_pts.sort(
+            key=lambda x: (x.get("ptsScore", 0), x.get("oppSA", 0)),
+            reverse=True)
+        legacy_ast.sort(
+            key=lambda x: (x.get("dispScore", 0), x.get("oppSA", 0)),
+            reverse=True)
+        legacy_goals.sort(
+            key=lambda x: (x.get("dispScore", 0), x.get("oppSA", 0)),
+            reverse=True)
+        legacy_saves.sort(
+            key=lambda x: (x.get("dispScore", 0), x.get("avg", 0)),
+            reverse=True)
+        for group in (
+            legacy_pts_unders, legacy_ast_unders,
+            legacy_goal_unders, legacy_saves_unders,
+        ):
+            group.sort(
+                key=lambda x: (x["underRate"], x["underTotal"]),
+                reverse=True)
+
+        def _split(primary, rest, values):
+            legacy_system[primary] = values[:TOP_N]
+            legacy_system[rest] = values[TOP_N:TOP_N*2]
+
+        _split("picks", "rest", legacy_shots)
+        _split("shotUnders", "shotUndersRest", legacy_shot_unders)
+        _split("ptsPicks", "ptsRest", legacy_pts)
+        _split("ptsUnders", "ptsUndersRest", legacy_pts_unders)
+        _split("astPicks", "astRest", legacy_ast)
+        _split("astUnders", "astUndersRest", legacy_ast_unders)
+        _split("goalPicks", "goalRest", legacy_goals)
+        _split("goalUnders", "goalUndersRest", legacy_goal_unders)
+        _split("savesPicks", "savesRest", legacy_saves)
+        _split("savesUnders", "savesUndersRest", legacy_saves_unders)
+        # Power Play Points did not exist in the attached old application.
+        for key in ("ppPicks", "ppRest", "ppUnders", "ppUndersRest"):
+            legacy_system[key] = []
     archived_line_count = len({
         (pick.get("pid"), pick.get("mkt"), pick.get("realLine"))
         for group in (
@@ -2577,13 +2723,16 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
     })
     # ── Game Predictor ─────────────────────────────────────────────────────
     _progress = {"stage": "Building Game Predictor...", "done": len(pool), "total": len(pool), "pct": 98}
-    try:
-        _gp_data   = await _nhl_gp_fetch_all(target_date, season)
-        _gp_data["schedule_context"] = schedule_context
-        game_preds = _nhl_gp_predict(games, _gp_data)
-    except Exception as _gp_err:
-        print(f"[GP] game predictor error: {_gp_err}")
+    if skip_game_predictor:
         game_preds = []
+    else:
+        try:
+            _gp_data   = await _nhl_gp_fetch_all(target_date, season)
+            _gp_data["schedule_context"] = schedule_context
+            game_preds = _nhl_gp_predict(games, _gp_data)
+        except Exception as _gp_err:
+            print(f"[GP] game predictor error: {_gp_err}")
+            game_preds = []
 
     # Full lookup-only profile pool.  This keeps the visible boards capped at
     # Top 10 + 10 overflow while allowing the player lookup to find qualified
@@ -2655,15 +2804,25 @@ async def run_picks(target_date: str = None, simulate: bool = False) -> Dict:
         "scheduleContext": schedule_context,
         "unpriced": bool(unpriced_mode and not simulate),
     }
+    if include_legacy_system:
+        _result.update({
+            "legacySystem": legacy_system,
+            "comparisonSystems": {
+                "A": "Current/new system",
+                "B": "Attached pre-change old system",
+                "B_unavailable_categories": ["Power Play Points"],
+            },
+        })
     if simulate:
         _result["simulationStats"] = _nhl_simulation_stats(
             target_date, game_preds, _result)
         _result["historicalTrackRecord"] = _nhl_historical_replay_payload(_result)
-        _nhl_save_historical_special_snapshot(target_date, _result)
-        _nhl_update_historical_special_ledger(target_date)
-        _result["historicalSpecialRecord"] = (
-            _nhl_historical_special_track_record_payload()
-        )
+        if persist_historical_special:
+            _nhl_save_historical_special_snapshot(target_date, _result)
+            _nhl_update_historical_special_ledger(target_date)
+            _result["historicalSpecialRecord"] = (
+                _nhl_historical_special_track_record_payload()
+            )
         if archived_line_count:
             _result["simulationStats"]["lineNote"] = (
                 f"{archived_line_count} archived player lines were used "
@@ -3141,7 +3300,7 @@ document.addEventListener('DOMContentLoaded',checkStatus);
   if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
   if(!localStorage.getItem(KEY)){window.location.href='https://moneypicksarena.com';}
 })();
-function _applyAdmin(){if(window.IS_ADMIN){document.body&&document.body.classList.add('is-admin');}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;document.body&&document.body.classList.add('is-admin');}}).catch(function(){});}}}
+function _applyAdmin(){function show(){document.body&&document.body.classList.add('is-admin');var h=document.getElementById('nhlHistAdmin');if(h)h.style.display='flex';}if(window.IS_ADMIN){show();}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;show();}}).catch(function(){});}}}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_applyAdmin);}else{_applyAdmin();}
 
 // ===== Admin Auto Parlay Builder (NHL) =====
@@ -5295,6 +5454,97 @@ async function pollNhlOctoberReplay(){
     else loadNhlHistoricalAnalysis();
   }catch(e){if(out)out.textContent=e.message||'Status unavailable';}
 }
+function _nhlGoalComparePct(v){
+  return v==null?'—':Number(v).toFixed(1)+'%';
+}
+function _nhlGoalCompareMoney(v){
+  v=Number(v||0);
+  return (v>=0?'+$':'-$')+Math.abs(v).toFixed(2);
+}
+function _nhlGoalCompareCard(title,stats,color){
+  stats=stats||{};
+  return '<div style="border:1px solid '+color+';border-radius:10px;padding:11px;background:#0b1120;min-width:220px;flex:1">'
+    +'<div style="font-weight:900;color:'+color+';margin-bottom:7px">'+title+'</div>'
+    +'<div style="color:#e2e8f0;font-size:.78rem;line-height:1.7">'
+    +'All rows model test: <b>'+Number(stats.model_wins||0)+'-'+Number(stats.model_losses||0)+'</b> · <b>'+_nhlGoalComparePct(stats.model_hit_rate)+'</b><br>'
+    +'Archived-price bets: <b>'+Number(stats.book_wins||0)+'-'+Number(stats.book_losses||0)+'</b> · <b>'+_nhlGoalComparePct(stats.book_hit_rate)+'</b><br>'
+    +'Priced: '+Number(stats.priced||0)+' · Net <b>'+_nhlGoalCompareMoney(stats.profit)+'</b> · ROI <b>'+_nhlGoalComparePct(stats.roi)+'</b>'
+    +'</div></div>';
+}
+function _nhlCompareCell(stats){
+  stats=stats||{};
+  if(!Number(stats.rows||0))return '<span style="color:#475569">N/A</span>';
+  return '<b>'+Number(stats.model_wins||0)+'-'+Number(stats.model_losses||0)+'</b> model · '+_nhlGoalComparePct(stats.model_hit_rate)
+    +'<br><span style="color:#94a3b8">'+Number(stats.book_wins||0)+'-'+Number(stats.book_losses||0)+' book · '+_nhlGoalComparePct(stats.roi)+' ROI</span>';
+}
+function renderNhlGoalComparison(data){
+  var out=document.getElementById('nhlGoalCompareResults');
+  if(!out)return;
+  var summary=(data&&data.summary)||{};
+  var current=summary.current||{},legacy=summary.legacy||{};
+  if(!current.main&&!legacy.main){
+    out.innerHTML='<div style="color:#94a3b8;font-size:.74rem">No completed comparison results yet.</div>';
+    return;
+  }
+  var catNames={};
+  Object.keys(current.categories||{}).forEach(function(k){catNames[k]=1;});
+  Object.keys(legacy.categories||{}).forEach(function(k){catNames[k]=1;});
+  var catRows=Object.keys(catNames).sort().map(function(cat){
+    var a=(current.categories||{})[cat]||{},b=(legacy.categories||{})[cat]||{};
+    var oldMissing=cat.indexOf('Power Play Points ')===0;
+    return '<tr><td style="color:#e2e8f0;font-weight:800">'+cat+(oldMissing?'<br><span style="color:#f59e0b;font-size:.62rem">A ONLY · absent from attached old app</span>':'')+'</td>'
+      +'<td>'+_nhlCompareCell(a.main)+'</td><td>'+_nhlCompareCell(b.main)+'</td>'
+      +'<td>'+_nhlCompareCell(a.overflow)+'</td><td>'+_nhlCompareCell(b.overflow)+'</td></tr>';
+  }).join('');
+  out.innerHTML='<div style="width:100%;border-top:1px solid #1e293b;padding-top:11px">'
+    +'<div style="color:#f8fafc;font-size:.8rem;font-weight:900;margin-bottom:8px">NOVEMBER 2025 · ALL NHL CATEGORIES · READ-ONLY A/B RESULT</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap">'
+      +_nhlGoalCompareCard('A NEW · Main Top 10',current.main,'#60a5fa')
+      +_nhlGoalCompareCard('B OLD · Main Top 10',legacy.main,'#fbbf24')
+    +'</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">'
+      +_nhlGoalCompareCard('A NEW · Overflow 11–20',current.overflow,'#93c5fd')
+      +_nhlGoalCompareCard('B OLD · Overflow 11–20',legacy.overflow,'#fcd34d')
+    +'</div>'
+    +'<div style="overflow-x:auto;margin-top:10px"><table class="nhl-trk-tbl"><thead><tr><th>Category / Side</th><th>A Main</th><th>B Main</th><th>A Overflow</th><th>B Overflow</th></tr></thead><tbody>'+catRows+'</tbody></table></div>'
+    +'<div style="color:#64748b;font-size:.68rem;margin-top:8px">Model results use each displayed row and its model line. Book results and ROI use only verified archived prices for that exact side. Nothing is written to Official, Overflow, Locks, Special, or GP records.</div>'
+    +'</div>';
+}
+async function preflightNhlGoalComparison(){
+  var out=document.getElementById('nhlGoalCompareStatus');
+  if(out)out.textContent='Checking November schedule and durable cache only…';
+  try{
+    var r=await fetch('/api/nhl/goals-under-comparison/preflight?token='+_nhlHistAuth());
+    if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
+    var d=await r.json();
+    if(out)out.textContent=d.date_count+' active dates · '+d.cached_dates.length+' cached · '+d.missing_cache_dates.length+' cache missing · '+(d.schedule_error_dates||[]).length+' schedule errors. '+(d.ready?'Ready. No Odds API request was made.':'Not ready; runner will fail closed.');
+  }catch(e){if(out)out.textContent=e.message||'Comparison preflight failed';}
+}
+async function startNhlGoalComparison(){
+  if(!confirm('Run A New and B Old across every NHL category for each active November 2025 date? The comparison is read-only and requires cached odds.'))return;
+  var phrase=prompt('Type RUN NOVEMBER 2025 to confirm.');
+  if(phrase!=='RUN NOVEMBER 2025')return;
+  var out=document.getElementById('nhlGoalCompareStatus');
+  try{
+    var r=await fetch('/api/nhl/goals-under-comparison/start?token='+_nhlHistAuth(),{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:phrase})
+    });
+    if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
+    if(out)out.textContent='November A New vs B Old all-category comparison started.';
+    pollNhlGoalComparison();
+  }catch(e){if(out)out.textContent=e.message||'Could not start comparison';}
+}
+async function pollNhlGoalComparison(){
+  var out=document.getElementById('nhlGoalCompareStatus');
+  try{
+    var r=await fetch('/api/nhl/goals-under-comparison/status?token='+_nhlHistAuth());
+    if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
+    var d=await r.json();
+    if(out)out.textContent=(d.message||d.status)+' · '+Number(d.completed||0)+'/'+Number(d.total||0)+(d.current_date?' · '+d.current_date:'');
+    renderNhlGoalComparison(d);
+    if(d.status==='running'||d.status==='starting')setTimeout(pollNhlGoalComparison,4000);
+  }catch(e){if(out)out.textContent=e.message||'Comparison status unavailable';}
+}
 </script>
 <!-- Standalone NHL Game Predictor Record -->
 <div id="nhl-gp-record-section" style="display:none;max-width:960px;margin:0 auto;padding:0 16px 24px">
@@ -5354,6 +5604,13 @@ async function pollNhlOctoberReplay(){
       <button onclick="preflightNhlOctober()" style="background:#0e7490;color:#fff;border:none;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Estimate Archive Coverage</button>
       <button onclick="startNhlOctoberReplay()" style="background:#7c2d12;color:#fed7aa;border:1px solid #c2410c;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Run October Replay</button>
       <span id="nhlHistBatchStatus" style="color:#94a3b8;font-size:.7rem">Not started. No Odds API request has been made.</span>
+      <div style="flex-basis:100%;height:1px;background:#1e293b;margin:3px 0"></div>
+      <span style="color:#fbbf24;font-size:.68rem;font-weight:900">ADMIN · NOVEMBER ALL-CATEGORY A/B</span>
+      <button onclick="preflightNhlGoalComparison()" style="background:#0e7490;color:#fff;border:none;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Check November Cache</button>
+      <button onclick="startNhlGoalComparison()" style="background:#713f12;color:#fef3c7;border:1px solid #d97706;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Run A New + B Old</button>
+      <button onclick="pollNhlGoalComparison()" style="background:#1e293b;color:#cbd5e1;border:1px solid #475569;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Load A/B Result</button>
+      <span id="nhlGoalCompareStatus" style="color:#94a3b8;font-size:.7rem">Not started. Comparison is view-only.</span>
+      <div id="nhlGoalCompareResults" style="flex-basis:100%;width:100%"></div>
     </div>
     <div id="nhlHistSummary"></div>
     <div id="nhlHistBody"><p style="color:#94a3b8;padding:18px">Loading saved Historical Analysis…</p></div>
@@ -7195,6 +7452,388 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
         raise HTTPException(status_code=400, detail=result.get("error") or result.get("message") or
                             "The historical replay could not be generated")
     return JSONResponse(_nhl_historical_replay_payload(result))
+
+
+_NHL_GOAL_COMPARE_START = "2025-11-01"
+_NHL_GOAL_COMPARE_END = "2025-11-30"
+_NHL_GOAL_COMPARE_LOCK = _bt_th.Lock()
+_NHL_GOAL_COMPARE = {
+    "status": "idle", "start": _NHL_GOAL_COMPARE_START,
+    "end": _NHL_GOAL_COMPARE_END, "completed": 0, "total": 0,
+    "current_date": "", "failed_dates": [], "days": [],
+    "message": "Not started",
+}
+
+
+def _nhl_comparison_replay(result: dict, legacy: bool = False) -> dict:
+    """Build one isolated all-category replay from shared corrected inputs."""
+    if not legacy:
+        return _nhl_historical_replay_payload(result)
+    alternate = dict(result)
+    alternate.update({
+        key: list(value or [])
+        for key, value in (result.get("legacySystem") or {}).items()
+    })
+    return _nhl_historical_replay_payload(alternate)
+
+
+def _nhl_comparison_rows(replay: dict, overflow: bool) -> list:
+    source = (
+        replay.get("overflow_detail") if overflow
+        else replay.get("detail")
+    ) or []
+    return [
+        dict(row or {}) for row in source
+        if row.get("category") != "80-100% Locks"
+        and bool(row.get("is_overflow")) == bool(overflow)
+    ]
+
+
+def _nhl_comparison_stats(rows: list) -> dict:
+    priced = [
+        row for row in rows
+        if row.get("result") in ("WIN", "LOSS")
+        and row.get("odds") not in (None, "", "0")
+    ]
+    book_wins = sum(1 for row in priced if row.get("result") == "WIN")
+    book_losses = sum(1 for row in priced if row.get("result") == "LOSS")
+    profit = round(sum(float(row.get("profit") or 0) for row in priced), 2)
+    staked = len(priced) * _NHL_TRK_STAKE
+
+    model_wins = model_losses = model_pushes = model_voids = 0
+    for row in rows:
+        try:
+            actual = float(row.get("actual"))
+            line = float(row.get("model_line"))
+            side = row.get("side")
+            if actual == line:
+                model_pushes += 1
+            elif (
+                (side == "OVER" and actual > line)
+                or (side == "UNDER" and actual < line)
+            ):
+                model_wins += 1
+            else:
+                model_losses += 1
+        except (TypeError, ValueError):
+            model_voids += 1
+    model_decided = model_wins + model_losses
+    book_decided = book_wins + book_losses
+    return {
+        "rows": len(rows),
+        "book_wins": book_wins, "book_losses": book_losses,
+        "book_hit_rate": round(book_wins / book_decided * 100, 1)
+        if book_decided else None,
+        "priced": len(priced), "profit": profit,
+        "roi": round(profit / staked * 100, 1) if staked else None,
+        "model_wins": model_wins, "model_losses": model_losses,
+        "model_pushes": model_pushes, "model_voids": model_voids,
+        "model_hit_rate": round(model_wins / model_decided * 100, 1)
+        if model_decided else None,
+    }
+
+
+def _nhl_comparison_compact_rows(rows: list) -> list:
+    return [{
+        key: row.get(key) for key in (
+            "name", "team", "opponent", "category", "side", "rank",
+            "line", "model_line", "odds", "actual", "result", "profit",
+            "line_source",
+        )
+    } for row in rows]
+
+
+def _nhl_comparison_day(result: dict) -> dict:
+    current_replay = _nhl_comparison_replay(result, legacy=False)
+    legacy_replay = _nhl_comparison_replay(result, legacy=True)
+    payload = {
+        "date": result.get("date") or result.get("targetDate"),
+        "official_mutation": False,
+        "systems": result.get("comparisonSystems") or {},
+    }
+    for mode, replay in (
+        ("current", current_replay), ("legacy", legacy_replay)):
+        main_rows = _nhl_comparison_rows(replay, False)
+        overflow_rows = _nhl_comparison_rows(replay, True)
+        categories = {}
+        for row in main_rows + overflow_rows:
+            category_key = f"{row.get('category')} {row.get('side')}"
+            bucket = categories.setdefault(
+                category_key, {"main_rows": [], "overflow_rows": []})
+            bucket[
+                "overflow_rows" if row.get("is_overflow") else "main_rows"
+            ].append(row)
+        payload[mode] = {
+            "main": _nhl_comparison_stats(main_rows),
+            "overflow": _nhl_comparison_stats(overflow_rows),
+            "main_rows": _nhl_comparison_compact_rows(main_rows),
+            "overflow_rows": _nhl_comparison_compact_rows(overflow_rows),
+            "categories": {
+                key: {
+                    "main": _nhl_comparison_stats(value["main_rows"]),
+                    "overflow": _nhl_comparison_stats(
+                        value["overflow_rows"]),
+                }
+                for key, value in sorted(categories.items())
+            },
+        }
+    return payload
+
+
+def _nhl_comparison_aggregate(days: list, mode: str, pool: str,
+                              category: str = None) -> dict:
+    stats = [
+        (
+            ((((day.get(mode) or {}).get("categories") or {})
+              .get(category) or {}).get(pool) or {})
+            if category else ((day.get(mode) or {}).get(pool) or {})
+        )
+        for day in days
+    ]
+    out = {
+        "rows": sum(int(s.get("rows") or 0) for s in stats),
+        "book_wins": sum(int(s.get("book_wins") or 0) for s in stats),
+        "book_losses": sum(int(s.get("book_losses") or 0) for s in stats),
+        "priced": sum(int(s.get("priced") or 0) for s in stats),
+        "profit": round(sum(float(s.get("profit") or 0) for s in stats), 2),
+        "model_wins": sum(int(s.get("model_wins") or 0) for s in stats),
+        "model_losses": sum(int(s.get("model_losses") or 0) for s in stats),
+        "model_pushes": sum(int(s.get("model_pushes") or 0) for s in stats),
+        "model_voids": sum(int(s.get("model_voids") or 0) for s in stats),
+    }
+    book_decided = out["book_wins"] + out["book_losses"]
+    model_decided = out["model_wins"] + out["model_losses"]
+    out["book_hit_rate"] = (
+        round(out["book_wins"] / book_decided * 100, 1)
+        if book_decided else None
+    )
+    out["model_hit_rate"] = (
+        round(out["model_wins"] / model_decided * 100, 1)
+        if model_decided else None
+    )
+    staked = out["priced"] * _NHL_TRK_STAKE
+    out["roi"] = (
+        round(out["profit"] / staked * 100, 1) if staked else None
+    )
+    return out
+
+
+def _nhl_comparison_summary(days: list) -> dict:
+    category_names = sorted({
+        category
+        for day in days
+        for mode in ("current", "legacy")
+        for category in (
+            ((day.get(mode) or {}).get("categories") or {}).keys()
+        )
+    })
+    return {
+        mode: {
+            "main": _nhl_comparison_aggregate(days, mode, "main"),
+            "overflow": _nhl_comparison_aggregate(
+                days, mode, "overflow"),
+            "categories": {
+                category: {
+                    pool: _nhl_comparison_aggregate(
+                        days, mode, pool, category)
+                    for pool in ("main", "overflow")
+                }
+                for category in category_names
+            },
+        }
+        for mode in ("current", "legacy")
+    }
+
+
+async def _nhl_goal_under_compare_calendar() -> dict:
+    """Read-only November schedule and durable-cache coverage preflight."""
+    start = date.fromisoformat(_NHL_GOAL_COMPARE_START)
+    end = date.fromisoformat(_NHL_GOAL_COMPARE_END)
+    dates = []
+    cursor = start
+    while cursor <= end:
+        dates.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+        payloads = await asyncio.gather(
+            *[_fetch(f"{NHL_API}/schedule/{day}", client) for day in dates],
+            return_exceptions=True,
+        )
+    active = []
+    schedule_errors = []
+    for day, payload in zip(dates, payloads):
+        if not isinstance(payload, dict):
+            schedule_errors.append(day)
+            continue
+        games = 0
+        for week_day in payload.get("gameWeek", []):
+            if week_day.get("date") == day:
+                games = len(week_day.get("games", []) or [])
+                break
+        if games:
+            active.append({"date": day, "games": games})
+
+    cached_dates = []
+    missing_cache = []
+    goal_price_counts = {}
+    for row in active:
+        cached = _nhl_load_historical_odds_cache(row["date"])
+        if isinstance(cached, dict):
+            cached_dates.append(row["date"])
+            goals = cached.get("goals") or {}
+            goal_price_counts[row["date"]] = sum(
+                1 for info in goals.values()
+                if isinstance(info, dict)
+                and info.get("under_odds") not in (None, "", "0")
+            )
+        else:
+            missing_cache.append(row["date"])
+    return {
+        "start": _NHL_GOAL_COMPARE_START,
+        "end": _NHL_GOAL_COMPARE_END,
+        "active_dates": active,
+        "date_count": len(active),
+        "game_count": sum(row["games"] for row in active),
+        "cached_dates": cached_dates,
+        "missing_cache_dates": missing_cache,
+        "goal_under_price_counts": goal_price_counts,
+        "schedule_error_dates": schedule_errors,
+        "ready": bool(active) and not missing_cache and not schedule_errors,
+        "odds_api_called": False,
+        "note": (
+            "Comparison will use only the durable archived-odds cache. "
+            "It refuses to start when an active date is missing from cache."
+        ),
+    }
+
+
+async def _nhl_run_goal_under_comparison():
+    global _NHL_GOAL_COMPARE
+    try:
+        calendar = await _nhl_goal_under_compare_calendar()
+        active = calendar.get("active_dates") or []
+        if not calendar.get("ready"):
+            raise RuntimeError(
+                "November comparison stopped: preflight found "
+                f"{len(calendar.get('missing_cache_dates') or [])} missing "
+                "odds-cache date(s) and "
+                f"{len(calendar.get('schedule_error_dates') or [])} "
+                "schedule error(s)."
+            )
+        with _NHL_GOAL_COMPARE_LOCK:
+            _NHL_GOAL_COMPARE.update({
+                "status": "running", "total": len(active), "completed": 0,
+                "current_date": "", "failed_dates": [], "days": [],
+                "summary": {}, "message": "Running both November systems",
+                "odds_api_called": False, "official_mutation": False,
+            })
+        completed_days = []
+        for index, row in enumerate(active, 1):
+            day = row["date"]
+            with _NHL_GOAL_COMPARE_LOCK:
+                _NHL_GOAL_COMPARE["current_date"] = day
+            try:
+                result = await run_picks(
+                    day, simulate=True, include_legacy_system=True,
+                    persist_historical_special=False,
+                    historical_odds_cache_only=True,
+                    skip_game_predictor=True)
+                if result.get("error") or result.get("no_games"):
+                    raise RuntimeError(
+                        result.get("error") or result.get("message")
+                        or "Replay payload was empty")
+                completed_days.append(_nhl_comparison_day(result))
+            except Exception as exc:
+                logger.exception(
+                    "NHL Goals Under comparison failed for %s", day)
+                with _NHL_GOAL_COMPARE_LOCK:
+                    _NHL_GOAL_COMPARE["failed_dates"].append({
+                        "date": day, "error": str(exc)[:240]})
+            with _NHL_GOAL_COMPARE_LOCK:
+                _NHL_GOAL_COMPARE["completed"] = index
+                _NHL_GOAL_COMPARE["days"] = list(completed_days)
+                _NHL_GOAL_COMPARE["summary"] = (
+                    _nhl_comparison_summary(completed_days)
+                )
+        with _NHL_GOAL_COMPARE_LOCK:
+            failures = len(_NHL_GOAL_COMPARE["failed_dates"])
+            _NHL_GOAL_COMPARE.update({
+                "status": "completed_with_errors" if failures else "completed",
+                "current_date": "",
+                "message": (
+                    f"November comparison finished with {failures} failed date(s)"
+                    if failures else "November comparison finished"
+                ),
+            })
+    except Exception as exc:
+        logger.exception("NHL Goals Under comparison stopped")
+        with _NHL_GOAL_COMPARE_LOCK:
+            _NHL_GOAL_COMPARE.update({
+                "status": "failed", "current_date": "",
+                "message": str(exc)[:240],
+                "odds_api_called": False, "official_mutation": False,
+            })
+
+
+def _nhl_goal_under_compare_thread():
+    asyncio.run(_nhl_run_goal_under_comparison())
+
+
+@app.get("/api/nhl/goals-under-comparison/preflight")
+async def nhl_goal_under_comparison_preflight(
+        request: Request, token: str = ""):
+    if not _nhl_historical_batch_auth(request, token):
+        raise HTTPException(status_code=403, detail="Admin only")
+    return JSONResponse(await _nhl_goal_under_compare_calendar())
+
+
+@app.get("/api/nhl/goals-under-comparison/status")
+async def nhl_goal_under_comparison_status(
+        request: Request, token: str = ""):
+    if not _nhl_historical_batch_auth(request, token):
+        raise HTTPException(status_code=403, detail="Admin only")
+    with _NHL_GOAL_COMPARE_LOCK:
+        return JSONResponse(dict(_NHL_GOAL_COMPARE))
+
+
+@app.post("/api/nhl/goals-under-comparison/start")
+async def nhl_goal_under_comparison_start(
+        request: Request, token: str = ""):
+    global _NHL_GOAL_COMPARE
+    if not _nhl_historical_batch_auth(request, token):
+        raise HTTPException(status_code=403, detail="Admin only")
+    body = await request.json()
+    if body.get("confirm") != "RUN NOVEMBER 2025":
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit November 2025 confirmation is required")
+    calendar = await _nhl_goal_under_compare_calendar()
+    if not calendar.get("ready"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Comparison failed closed and will not spend Odds API quota. "
+                f"Missing durable cache for "
+                f"{len(calendar.get('missing_cache_dates') or [])} active "
+                f"date(s); schedule errors: "
+                f"{len(calendar.get('schedule_error_dates') or [])}."
+            ))
+    with _NHL_GOAL_COMPARE_LOCK:
+        if _NHL_GOAL_COMPARE.get("status") in ("starting", "running"):
+            raise HTTPException(
+                status_code=409, detail="Comparison already running")
+        _NHL_GOAL_COMPARE = {
+            "status": "starting", "start": _NHL_GOAL_COMPARE_START,
+            "end": _NHL_GOAL_COMPARE_END, "completed": 0,
+            "total": calendar.get("date_count") or 0,
+            "current_date": "", "failed_dates": [], "days": [],
+            "summary": {}, "message": "Preparing November comparison",
+            "odds_api_called": False, "official_mutation": False,
+        }
+    _bt_th.Thread(
+        target=_nhl_goal_under_compare_thread,
+        name="nhl-goals-under-november-comparison", daemon=True).start()
+    return JSONResponse(dict(_NHL_GOAL_COMPARE))
 
 
 _NHL_HIST_BATCH_LOCK = _bt_th.Lock()
