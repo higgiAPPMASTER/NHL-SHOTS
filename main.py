@@ -835,27 +835,47 @@ def _nhl_c_confidence_rate(hits: int, total: int, z: float = 1.28) -> float:
     return round(max(0.0, (centre - margin) / denom) * 100, 1)
 
 
-def _nhl_d_top_only(players: list, goalie: bool = False) -> list:
-    """Return D's top-position pool without changing the source ordering."""
-    if goalie:
-        return list(players or [])[:10]
-    forwards = [
-        p for p in (players or [])
-        if str(p.get("positionGroup") or "F").upper() == "F"
-    ][:6]
-    defense = [
-        p for p in (players or [])
-        if str(p.get("positionGroup") or "").upper() == "D"
-    ][:4]
-    selected = {
-        p.get("pid") if p.get("pid") is not None else p.get("name")
-        for p in forwards + defense
-    }
-    return [
-        p for p in (players or [])
-        if (p.get("pid") if p.get("pid") is not None else p.get("name"))
-        in selected
-    ]
+def _nhl_d_eligible_rosters(rosters: dict, logs_map: dict,
+                            target_date: str) -> dict:
+    """Limit D per team to top 6F by scoring and top 4D by deployment."""
+    eligible = {}
+    for team, players in (rosters or {}).items():
+        def rank(player):
+            logs = _nhl_pre_game_logs(
+                logs_map.get(player.get("id"), []), target_date)[:10]
+            toi = [int(g.get("toi_sec") or 0) for g in logs]
+            avg_toi = sum(toi) / len(toi) if toi else 0.0
+            avg_points = (
+                sum(float(g.get("points") or 0) for g in logs) / len(logs)
+                if logs else 0.0
+            )
+            # "Top six" means the team's strongest scoring forwards, not
+            # checking-line players whose penalty-kill minutes can inflate
+            # total TOI. Defense pairs are deployment-led.
+            if str(player.get("positionGroup") or "F").upper() == "D":
+                return avg_toi, avg_points, len(logs)
+            return avg_points, avg_toi, len(logs)
+
+        forwards = sorted(
+            [
+                p for p in players
+                if str(p.get("positionGroup") or "F").upper() == "F"
+            ],
+            key=rank, reverse=True,
+        )[:6]
+        defense = sorted(
+            [
+                p for p in players
+                if str(p.get("positionGroup") or "").upper() == "D"
+            ],
+            key=rank, reverse=True,
+        )[:4]
+        eligible[team] = forwards + defense
+        print(
+            f"[System D] {team}: {len(forwards)} top-six forwards + "
+            f"{len(defense)} top-four defensemen eligible"
+        )
+    return eligible
 
 
 def _proj_count(l10_avg, l10_n, opp_avg, opp_n, opp_sa, league_sa,
@@ -1616,6 +1636,7 @@ async def get_shot_qualified_players(
             pool.append({
                 "name":       p["name"],
                 "pid":        p["id"],
+                "positionGroup": p.get("positionGroup", "F"),
                 "team":       team,
                 "opponent":   opp,
                 "homeRoad":   hr,
@@ -2850,6 +2871,21 @@ async def run_picks(
     logs_map = {pid: (r if isinstance(r, list) else [])
                 for pid, r in zip(log_tasks.keys(), log_results)}
 
+    if d_mode:
+        skater_rosters = _nhl_d_eligible_rosters(
+            skater_rosters, logs_map, target_date)
+        eligible_ids = {
+            player.get("id")
+            for players in skater_rosters.values()
+            for player in players
+        }
+        pool = [player for player in pool if player.get("pid") in eligible_ids]
+        _progress["total"] = len(pool)
+        print(
+            f"[System D] {len(pool)} top-line/pair skaters eligible "
+            f"across {len(skater_rosters)} teams"
+        )
+
     _progress = {"stage": "Analyzing hit rates...", "done": 0, "total": len(pool), "pct": 70}
 
     # ── Steps 2 & 3 - NHL Stats API hit-rate analysis ────────────────────────────
@@ -3186,23 +3222,6 @@ async def run_picks(
                 continue
             profile_seen.add(profile_key)
             player_profiles.append(profile)
-
-    if d_mode:
-        # D isolates the top-player hypothesis: it uses A's qualification and
-        # ordering, then keeps six forwards and four defensemen per skater
-        # category. Goalie Saves uses the top ten goalies.
-        picks = _nhl_d_top_only(picks)
-        shot_unders = _nhl_d_top_only(shot_unders)
-        pts_all = _nhl_d_top_only(pts_all)
-        pts_unders = _nhl_d_top_only(pts_unders)
-        pp_all = _nhl_d_top_only(pp_all)
-        pp_unders = _nhl_d_top_only(pp_unders)
-        ast_all = _nhl_d_top_only(ast_all)
-        ast_unders = _nhl_d_top_only(ast_unders)
-        goal_all = _nhl_d_top_only(goal_all)
-        goal_unders_all = _nhl_d_top_only(goal_unders_all)
-        saves_all = _nhl_d_top_only(saves_all, goalie=True)
-        saves_unders = _nhl_d_top_only(saves_unders, goalie=True)
 
     _result = {
         "_nhlCacheVersion": 4,
@@ -5470,26 +5489,33 @@ function renderNhlOverflowDay(){
   function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
    function money(v){return v==null?'—':(v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(2);}
   function stats(list){
-    var w=list.filter(function(r){return r.result==='WIN';}).length;
-    var l=list.filter(function(r){return r.result==='LOSS';}).length;
+     var modelDecided=list.filter(function(r){return r.result==='WIN'||r.result==='LOSS';});
+     var modelW=modelDecided.filter(function(r){return r.result==='WIN';}).length;
+     var modelL=modelDecided.length-modelW;
     var push=list.filter(function(r){return r.result==='PUSH';}).length;
     var voids=list.filter(function(r){return r.result==='VOID';}).length;
      var unpriced=list.filter(function(r){return r.result==='UNPRICED';});
-     var modelRows=unpriced.filter(function(r){
+      var legacyModelRows=unpriced.filter(function(r){
        if(r.actual==null||r.model_line==null)return false;
        var actual=Number(r.actual),line=Number(r.model_line);
        return isFinite(actual)&&isFinite(line);
      });
-     var modelW=modelRows.filter(function(r){
+      var legacyModelW=legacyModelRows.filter(function(r){
        return r.side==='UNDER'?Number(r.actual)<Number(r.model_line):Number(r.actual)>Number(r.model_line);
      }).length;
-     var modelP=modelRows.filter(function(r){return Number(r.actual)===Number(r.model_line);}).length;
-     var modelL=modelRows.length-modelW-modelP;
-     var pending=list.length-w-l-push-voids-unpriced.length;
-    var priced=list.filter(hasOdds),pl=priced.reduce(function(x,r){return x+(_nhlTrkProfit(r,stake)||0);},0);
+      var legacyModelP=legacyModelRows.filter(function(r){return Number(r.actual)===Number(r.model_line);}).length;
+      var legacyModelL=legacyModelRows.length-legacyModelW-legacyModelP;
+      modelW+=legacyModelW; modelL+=legacyModelL;
+      var modelP=push+legacyModelP;
+      var pending=list.length-modelDecided.length-push-voids-unpriced.length;
+     var priced=modelDecided.filter(hasOdds);
+     var w=priced.filter(function(r){return r.result==='WIN';}).length;
+     var l=priced.length-w;
+     var pl=priced.reduce(function(x,r){return x+(_nhlTrkProfit(r,stake)||0);},0);
     var staked=priced.length*stake,roi=staked?pl/staked*100:null;
      return {
        w:w,l:l,push:push,voids:voids,pending:pending,unpriced:unpriced.length,
+        ungradedModel:unpriced.length-legacyModelW-legacyModelL-legacyModelP,
        modelW:modelW,modelL:modelL,modelP:modelP,
        modelRate:(modelW+modelL)?modelW/(modelW+modelL)*100:null,
        pl:pl,roi:roi,rate:(w+l)?w/(w+l)*100:null
@@ -5501,10 +5527,10 @@ function renderNhlOverflowDay(){
      var s=stats(list);
     var plColor=s.pl>=0?'#4ade80':'#f87171';
      var record='<span style="color:#64748b;font-size:.68rem">Book</span> '+s.w+' / '+(s.w+s.l);
-     if(s.modelW+s.modelL) record+=' <span style="color:#93c5fd;font-size:.68rem">· Model '+s.modelW+'/'+(s.modelW+s.modelL)+' ('+s.modelRate.toFixed(1)+'%)</span>';
+      if(s.modelW+s.modelL) record+=' <span style="color:#93c5fd;font-size:.68rem">· Model '+s.modelW+'/'+(s.modelW+s.modelL)+' ('+s.modelRate.toFixed(1)+'%)</span>';
     if(s.push) record+=' <span style="color:#facc15;font-size:.68rem">· '+s.push+' push</span>';
     if(s.voids) record+=' <span style="color:#94a3b8;font-size:.68rem">· '+s.voids+' void</span>';
-     var ungradedModel=s.unpriced-s.modelW-s.modelL-s.modelP;
+      var ungradedModel=s.ungradedModel;
      if(ungradedModel) record+=' <span style="color:#93c5fd;font-size:.68rem">· '+ungradedModel+' ungraded model-only</span>';
     if(s.pending) record+=' <span style="color:#facc15;font-size:.68rem">· '+s.pending+' pending</span>';
      var shownRate=s.rate!=null?s.rate:s.modelRate;
@@ -7114,12 +7140,16 @@ def _nhl_aggregate_graded(graded: dict) -> dict:
     # Sentinel lets the next deployment re-grade older locked snapshots once
     # so their stored overflow metadata is reflected in the split record.
     agg["__ovf_v1__"] = {"ALL": [0, 0]}
+    # Re-grade sentinel for the model-vs-book split.  Official model outcomes
+    # are retained even without sportsbook odds; book W/L and profit remain
+    # limited to rows that carry a real price.
+    agg["__model_book_v2__"] = {"ALL": [0, 0]}
     return agg
 
 def _nhl_detail_graded(graded: dict) -> list:
     out = []
     for row in graded.get("main", []) + graded.get("overflow", []) + graded.get("locks", []):
-        if row.get("result") not in ("WIN","LOSS"):
+        if row.get("result") not in ("WIN","LOSS","PUSH"):
             continue
         out.append({k: row.get(k) for k in
                     ("name","team","category","side","stat_key","line","odds","rank",
@@ -7180,7 +7210,7 @@ def _nhl_update_track_ledger(include_date: str = ""):
         locked = {
             r["date"] for r in locked_rows
             if r.get("date") and isinstance(r.get("detail"), dict)
-            and "__ovf_v1__" in r.get("detail", {})
+            and "__model_book_v2__" in r.get("detail", {})
         }
         special_locked_rows = _nhl_sb_get_all("mpa_track_ledger", {
             "app": f"eq.{_NHL_TRK_APP}",
