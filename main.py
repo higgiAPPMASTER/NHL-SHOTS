@@ -3208,6 +3208,14 @@ body.is-admin #parlayCard{display:block}
       <input type="date" id="datePicker"/>
     </div>
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
+    <div id="nhlReplayChoices" style="display:none;margin:14px auto 0">
+      <div style="color:#fbbf24;font-size:.72rem;font-weight:900;margin-bottom:8px">HISTORICAL REPLAY · CHOOSE A SYSTEM</div>
+      <div style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
+        <button id="nhlReplayA" onclick="_nhlSelectReplay('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">A · NEW</button>
+        <button id="nhlReplayB" onclick="_nhlSelectReplay('B')" style="background:#1e293b;color:#cbd5e1;border:2px solid #475569;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">B · OLD</button>
+      </div>
+      <div id="nhlReplayHint" style="color:#64748b;font-size:.68rem;margin-top:7px">Choose a completed date, then click A New or B Old.</div>
+    </div>
   </div>
 
   <div class="card" id="parlayCard" style="text-align:center;max-width:600px;margin:20px auto 0">
@@ -3300,7 +3308,7 @@ document.addEventListener('DOMContentLoaded',checkStatus);
   if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
   if(!localStorage.getItem(KEY)){window.location.href='https://moneypicksarena.com';}
 })();
-function _applyAdmin(){function show(){document.body&&document.body.classList.add('is-admin');var h=document.getElementById('nhlHistAdmin');if(h)h.style.display='flex';}if(window.IS_ADMIN){show();}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;show();}}).catch(function(){});}}}
+function _applyAdmin(){function show(){document.body&&document.body.classList.add('is-admin');var h=document.getElementById('nhlReplayChoices');if(h)h.style.display='block';_nhlPaintReplayChoice();}if(window.IS_ADMIN){show();}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;show();}}).catch(function(){});}}}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_applyAdmin);}else{_applyAdmin();}
 
 // ===== Admin Auto Parlay Builder (NHL) =====
@@ -3461,9 +3469,13 @@ async function getPicks(){
   }
   try{
     var _nhlTok=localStorage.getItem('__mpa_token')||'';
-    var url=isHistorical
-      ?'/api/picks?target_date='+encodeURIComponent(dt)+'&simulate=true&token='+encodeURIComponent(_nhlTok)
-      :'/api/cached?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok);
+    var replaySystem=window.NHL_HIST_SYSTEM||'A';
+    var adminReplay=isHistorical&&window.IS_ADMIN;
+    var url=isHistorical&&adminReplay
+      ?'/api/historical-track-replay?date_str='+encodeURIComponent(dt)+'&system='+encodeURIComponent(replaySystem)+'&token='+encodeURIComponent(_nhlTok)
+      :(isHistorical
+        ?'/api/picks?target_date='+encodeURIComponent(dt)+'&simulate=true&token='+encodeURIComponent(_nhlTok)
+        :'/api/cached?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok));
     var res=await fetch(url);
     if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
     if(!res.ok){ throw new Error('Could not load picks.'); }
@@ -3496,11 +3508,26 @@ async function getPicks(){
     }
     if(st && data.picks){
       st.textContent=isHistorical
-        ?'HISTORICAL REPLAY — pick board and Track Record updated for '+dt+'; not added to the official record'
+        ?'HISTORICAL REPLAY — '+(data.comparisonSystem||'A New')+' for '+dt+'; not added to the official record'
         :(data.qualified||0)+' players qualified -- '+data.picks.length+' top picks -- '+(data.date||'');
     }
   }catch(e){ if(st) st.textContent=''; alert(e.message||'Could not load picks. Please try again.'); }
   finally{if(pollTimer)clearInterval(pollTimer);btn.disabled=false;btn.textContent=orig;}
+}
+
+window.NHL_HIST_SYSTEM='A';
+function _nhlPaintReplayChoice(){
+  var a=document.getElementById('nhlReplayA'),b=document.getElementById('nhlReplayB');
+  var isB=window.NHL_HIST_SYSTEM==='B';
+  if(a){a.style.background=isB?'#1e293b':'#1d4ed8';a.style.borderColor=isB?'#475569':'#60a5fa';a.style.color=isB?'#cbd5e1':'#fff';}
+  if(b){b.style.background=isB?'#92400e':'#1e293b';b.style.borderColor=isB?'#fbbf24':'#475569';b.style.color=isB?'#fef3c7':'#cbd5e1';}
+}
+function _nhlSelectReplay(system){
+  window.NHL_HIST_SYSTEM=system==='B'?'B':'A';
+  _nhlPaintReplayChoice();
+  var dt=(document.getElementById('datePicker')||{}).value||'';
+  var today=new Date().toISOString().slice(0,10);
+  if(dt&&dt<today)getPicks();
 }
 
 function rateClass(r){ return r >= 90 ? 'green' : r >= 80 ? 'gold' : 'red-txt'; }
@@ -5152,8 +5179,6 @@ document.addEventListener('DOMContentLoaded',function(){
     hsp.addEventListener('change',function(){_nhlHistSpDayName();renderNhlHistoricalSpecialDay();});}
   _nhlTrkDayName();_nhlOvfDayName();_nhlSpDayName();_nhlHistSpDayName();
   loadNhlTrackRecord();
-  var histAdmin=document.getElementById('nhlHistAdmin');
-  if(histAdmin&&window.IS_ADMIN)histAdmin.style.display='flex';
   loadNhlHistoricalAnalysis();
   var top=document.getElementById('nhl-btn-top'),bot=document.getElementById('nhl-btn-bot');
   function _sc(){var y=window.pageYOffset||document.documentElement.scrollTop;
@@ -5477,74 +5502,6 @@ function _nhlCompareCell(stats){
   return '<b>'+Number(stats.model_wins||0)+'-'+Number(stats.model_losses||0)+'</b> model · '+_nhlGoalComparePct(stats.model_hit_rate)
     +'<br><span style="color:#94a3b8">'+Number(stats.book_wins||0)+'-'+Number(stats.book_losses||0)+' book · '+_nhlGoalComparePct(stats.roi)+' ROI</span>';
 }
-function renderNhlGoalComparison(data){
-  var out=document.getElementById('nhlGoalCompareResults');
-  if(!out)return;
-  var summary=(data&&data.summary)||{};
-  var current=summary.current||{},legacy=summary.legacy||{};
-  if(!current.main&&!legacy.main){
-    out.innerHTML='<div style="color:#94a3b8;font-size:.74rem">No completed comparison results yet.</div>';
-    return;
-  }
-  var catNames={};
-  Object.keys(current.categories||{}).forEach(function(k){catNames[k]=1;});
-  Object.keys(legacy.categories||{}).forEach(function(k){catNames[k]=1;});
-  var catRows=Object.keys(catNames).sort().map(function(cat){
-    var a=(current.categories||{})[cat]||{},b=(legacy.categories||{})[cat]||{};
-    var oldMissing=cat.indexOf('Power Play Points ')===0;
-    return '<tr><td style="color:#e2e8f0;font-weight:800">'+cat+(oldMissing?'<br><span style="color:#f59e0b;font-size:.62rem">A ONLY · absent from attached old app</span>':'')+'</td>'
-      +'<td>'+_nhlCompareCell(a.main)+'</td><td>'+_nhlCompareCell(b.main)+'</td>'
-      +'<td>'+_nhlCompareCell(a.overflow)+'</td><td>'+_nhlCompareCell(b.overflow)+'</td></tr>';
-  }).join('');
-  out.innerHTML='<div style="width:100%;border-top:1px solid #1e293b;padding-top:11px">'
-    +'<div style="color:#f8fafc;font-size:.8rem;font-weight:900;margin-bottom:8px">NOVEMBER 2025 · ALL NHL CATEGORIES · READ-ONLY A/B RESULT</div>'
-    +'<div style="display:flex;gap:8px;flex-wrap:wrap">'
-      +_nhlGoalCompareCard('A NEW · Main Top 10',current.main,'#60a5fa')
-      +_nhlGoalCompareCard('B OLD · Main Top 10',legacy.main,'#fbbf24')
-    +'</div>'
-    +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">'
-      +_nhlGoalCompareCard('A NEW · Overflow 11–20',current.overflow,'#93c5fd')
-      +_nhlGoalCompareCard('B OLD · Overflow 11–20',legacy.overflow,'#fcd34d')
-    +'</div>'
-    +'<div style="overflow-x:auto;margin-top:10px"><table class="nhl-trk-tbl"><thead><tr><th>Category / Side</th><th>A Main</th><th>B Main</th><th>A Overflow</th><th>B Overflow</th></tr></thead><tbody>'+catRows+'</tbody></table></div>'
-    +'<div style="color:#64748b;font-size:.68rem;margin-top:8px">Model results use each displayed row and its model line. Book results and ROI use only verified archived prices for that exact side. Nothing is written to Official, Overflow, Locks, Special, or GP records.</div>'
-    +'</div>';
-}
-async function preflightNhlGoalComparison(){
-  var out=document.getElementById('nhlGoalCompareStatus');
-  if(out)out.textContent='Checking November schedule and durable cache only…';
-  try{
-    var r=await fetch('/api/nhl/goals-under-comparison/preflight?token='+_nhlHistAuth());
-    if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
-    var d=await r.json();
-    if(out)out.textContent=d.date_count+' active dates · '+d.cached_dates.length+' cached · '+d.missing_cache_dates.length+' cache missing · '+(d.schedule_error_dates||[]).length+' schedule errors. '+(d.ready?'Ready. No Odds API request was made.':'Not ready; runner will fail closed.');
-  }catch(e){if(out)out.textContent=e.message||'Comparison preflight failed';}
-}
-async function startNhlGoalComparison(){
-  if(!confirm('Run A New and B Old across every NHL category for each active November 2025 date? The comparison is read-only and requires cached odds.'))return;
-  var phrase=prompt('Type RUN NOVEMBER 2025 to confirm.');
-  if(phrase!=='RUN NOVEMBER 2025')return;
-  var out=document.getElementById('nhlGoalCompareStatus');
-  try{
-    var r=await fetch('/api/nhl/goals-under-comparison/start?token='+_nhlHistAuth(),{
-      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:phrase})
-    });
-    if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
-    if(out)out.textContent='November A New vs B Old all-category comparison started.';
-    pollNhlGoalComparison();
-  }catch(e){if(out)out.textContent=e.message||'Could not start comparison';}
-}
-async function pollNhlGoalComparison(){
-  var out=document.getElementById('nhlGoalCompareStatus');
-  try{
-    var r=await fetch('/api/nhl/goals-under-comparison/status?token='+_nhlHistAuth());
-    if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
-    var d=await r.json();
-    if(out)out.textContent=(d.message||d.status)+' · '+Number(d.completed||0)+'/'+Number(d.total||0)+(d.current_date?' · '+d.current_date:'');
-    renderNhlGoalComparison(d);
-    if(d.status==='running'||d.status==='starting')setTimeout(pollNhlGoalComparison,4000);
-  }catch(e){if(out)out.textContent=e.message||'Comparison status unavailable';}
-}
 </script>
 <!-- Standalone NHL Game Predictor Record -->
 <div id="nhl-gp-record-section" style="display:none;max-width:960px;margin:0 auto;padding:0 16px 24px">
@@ -5598,19 +5555,6 @@ async function pollNhlGoalComparison(){
       <button onclick="loadNhlHistoricalAnalysis()" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer;font-size:.78rem">&#8635; Load Saved Archive</button>
       <button id="nhlHistBtnCat" onclick="_nhlHistSetTab('cat')" style="background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer;font-size:.78rem">By Category</button>
       <button id="nhlHistBtnList" onclick="_nhlHistSetTab('list')" style="background:#1e293b;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer;font-size:.78rem">Full List</button>
-    </div>
-    <div id="nhlHistAdmin" style="display:none;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:14px;padding:11px;border:1px dashed #334155;border-radius:10px;background:#080f1f">
-      <span style="color:#93c5fd;font-size:.68rem;font-weight:900">ADMIN · OCTOBER 2025 ONLY</span>
-      <button onclick="preflightNhlOctober()" style="background:#0e7490;color:#fff;border:none;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Estimate Archive Coverage</button>
-      <button onclick="startNhlOctoberReplay()" style="background:#7c2d12;color:#fed7aa;border:1px solid #c2410c;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Run October Replay</button>
-      <span id="nhlHistBatchStatus" style="color:#94a3b8;font-size:.7rem">Not started. No Odds API request has been made.</span>
-      <div style="flex-basis:100%;height:1px;background:#1e293b;margin:3px 0"></div>
-      <span style="color:#fbbf24;font-size:.68rem;font-weight:900">ADMIN · NOVEMBER ALL-CATEGORY A/B</span>
-      <button onclick="preflightNhlGoalComparison()" style="background:#0e7490;color:#fff;border:none;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Check November Cache</button>
-      <button onclick="startNhlGoalComparison()" style="background:#713f12;color:#fef3c7;border:1px solid #d97706;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Run A New + B Old</button>
-      <button onclick="pollNhlGoalComparison()" style="background:#1e293b;color:#cbd5e1;border:1px solid #475569;border-radius:7px;padding:7px 11px;font-weight:800;cursor:pointer;font-size:.72rem">Load A/B Result</button>
-      <span id="nhlGoalCompareStatus" style="color:#94a3b8;font-size:.7rem">Not started. Comparison is view-only.</span>
-      <div id="nhlGoalCompareResults" style="flex-basis:100%;width:100%"></div>
     </div>
     <div id="nhlHistSummary"></div>
     <div id="nhlHistBody"><p style="color:#94a3b8;padding:18px">Loading saved Historical Analysis…</p></div>
@@ -7436,7 +7380,7 @@ async def api_picks(request: Request, target_date: str = None, token: str = "",
 
 @app.get("/api/historical-track-replay")
 async def nhl_historical_track_replay(request: Request, date_str: str,
-                                      token: str = ""):
+                                      token: str = "", system: str = "A"):
     """Return a view-only historical replay; never save it to the ledger."""
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     if not _verify_hub_token(tok) or not _is_admin_token(tok):
@@ -7447,11 +7391,30 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
         raise HTTPException(status_code=400, detail="A valid historical date is required")
     if replay_date >= date.today():
         raise HTTPException(status_code=400, detail="Choose a completed NHL date")
-    result = await run_picks(date_str, simulate=True)
+    replay_system = str(system or "A").strip().upper()
+    if replay_system not in ("A", "B"):
+        raise HTTPException(status_code=400, detail="Historical system must be A or B")
+    result = await run_picks(
+        date_str,
+        simulate=True,
+        include_legacy_system=(replay_system == "B"),
+        persist_historical_special=False,
+        historical_odds_cache_only=True,
+        skip_game_predictor=True,
+    )
     if result.get("error") or result.get("no_games"):
         raise HTTPException(status_code=400, detail=result.get("error") or result.get("message") or
                             "The historical replay could not be generated")
-    return JSONResponse(_nhl_historical_replay_payload(result))
+    if replay_system == "B":
+        result["historicalTrackRecord"] = _nhl_comparison_replay(
+            result, legacy=True)
+        result["comparisonSystem"] = "B Old/attached ZIP"
+        result["historicalSpecialRecord"] = None
+        return JSONResponse(result)
+    result["historicalTrackRecord"] = _nhl_historical_replay_payload(result)
+    result["comparisonSystem"] = "A New/current"
+    result["historicalSpecialRecord"] = None
+    return JSONResponse(result)
 
 
 _NHL_GOAL_COMPARE_START = "2025-11-01"
