@@ -1183,9 +1183,11 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
     """Fetch archived pre-game player-prop lines for a completed NHL slate.
 
     Historical player props are only exposed through the Odds API's event
-    endpoint (not its all-games historical odds endpoint).  The 20:00 UTC
-    snapshot is a pre-game afternoon snapshot for the normal NHL evening
-    slate, and the API returns the closest archived snapshot at or before it.
+    endpoint (not its all-games historical odds endpoint).  Discover the slate
+    from an afternoon snapshot, then request each event 15 minutes before its
+    own puck drop, when sportsbooks are much more likely to have opened props.
+    Standard and alternate/milestone markets are fetched separately so an
+    unsupported alternate key cannot suppress valid standard-market results.
 
     Returns one map for each existing player market in the same order used by
     get_shot_lines: shots, points, assists, saves, and goals.
@@ -1226,12 +1228,21 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
         }
 
         async def _event_player_lines(ev: Dict) -> Dict[str, Dict]:
+            commence_raw = str(ev.get("commence_time") or "")
+            try:
+                commence_dt = datetime.fromisoformat(
+                    commence_raw.replace("Z", "+00:00"))
+                event_snapshot = (
+                    commence_dt - timedelta(minutes=15)
+                ).isoformat().replace("+00:00", "Z")
+            except (TypeError, ValueError):
+                event_snapshot = snapshot
             async with sem:
                 responses = await asyncio.gather(
                     c.get(
                         f"{event_url}/{ev['id']}/odds",
                         params={
-                            "apiKey": api_key, "date": snapshot,
+                            "apiKey": api_key, "date": event_snapshot,
                             "regions": "us,ca",
                             "markets": (
                                 "player_shots_on_goal,player_points,"
@@ -1243,7 +1254,21 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                     c.get(
                         f"{event_url}/{ev['id']}/odds",
                         params={
-                            "apiKey": api_key, "date": snapshot,
+                            "apiKey": api_key, "date": event_snapshot,
+                            "regions": "us,ca",
+                            "markets": (
+                                "player_shots_alternate,"
+                                "player_points_alternate,"
+                                "player_assists_alternate,"
+                                "player_total_saves_alternate"
+                            ),
+                            "oddsFormat": "american",
+                        },
+                    ),
+                    c.get(
+                        f"{event_url}/{ev['id']}/odds",
+                        params={
+                            "apiKey": api_key, "date": event_snapshot,
                             "regions": "us,ca",
                             "markets": "player_goal_scorer_anytime",
                             "oddsFormat": "american",
@@ -1252,6 +1277,12 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                     return_exceptions=True,
                 )
             found: Dict[str, Dict] = {}
+            alternate_to_standard = {
+                "player_shots_alternate": "player_shots_on_goal",
+                "player_points_alternate": "player_points",
+                "player_assists_alternate": "player_assists",
+                "player_total_saves_alternate": "player_total_saves",
+            }
             for response in responses:
                 if isinstance(response, Exception):
                     print(f"[HistoricalLines] event odds error for "
@@ -1265,7 +1296,9 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                 game = odds_payload.get("data", odds_payload)
                 for book in game.get("bookmakers", []):
                     for market in book.get("markets", []):
-                        market_key = market.get("key")
+                        raw_market_key = market.get("key")
+                        market_key = alternate_to_standard.get(
+                            raw_market_key, raw_market_key)
                         if market_key not in targets:
                             continue
                         for outcome in market.get("outcomes", []):
@@ -1295,12 +1328,18 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                                     continue
                             if not player:
                                 continue
-                            key = f"{market_key}:{player}"
+                            key = f"{raw_market_key}:{player}:{line}"
                             rec = found.setdefault(key, {
                                 "market": market_key,
+                                "raw_market": raw_market_key,
+                                "alternate": raw_market_key in alternate_to_standard,
                                 "player": player,
                                 "line": line, "odds": "", "under_odds": "",
-                                "source": "Historical Odds API",
+                                "source": (
+                                    "Historical Odds API (alternate)"
+                                    if raw_market_key in alternate_to_standard
+                                    else "Historical Odds API"
+                                ),
                             })
                             if abs(float(line) - float(rec["line"])) > 1e-9:
                                 continue
@@ -1312,7 +1351,17 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
 
         per_event = await asyncio.gather(*[_event_player_lines(ev) for ev in events])
         for event_lines in per_event:
-            for composite, rec in event_lines.items():
+            def _line_priority(rec: Dict) -> tuple:
+                # Prefer a standard book line. If only milestones exist, prefer
+                # a two-sided line closest to even pricing.
+                both = bool(rec.get("odds")) and bool(rec.get("under_odds"))
+                try:
+                    balance = abs(float(rec.get("odds") or 999)) + abs(
+                        float(rec.get("under_odds") or 999))
+                except (TypeError, ValueError):
+                    balance = 9999
+                return (bool(rec.get("alternate")), not both, balance)
+            for rec in sorted(event_lines.values(), key=_line_priority):
                 market = rec["market"]
                 player = rec["player"]
                 # The live parser uses player names as keys. Preserve that
@@ -6939,7 +6988,7 @@ _NHL_HIST_B_DETAIL_CAT = "__historical_analysis_b_detail__"
 _NHL_HIST_C_DETAIL_CAT = "__historical_analysis_c_detail__"
 _NHL_HIST_D_DETAIL_CAT = "__historical_analysis_d_detail__"
 _NHL_HIST_GP_CAT = "__historical_analysis_gp__"
-_NHL_HIST_ODDS_CAT = "__historical_odds_cache_v2__"
+_NHL_HIST_ODDS_CAT = "__historical_odds_cache_v3__"
 _NHL_HIST_BATCH_START = "2025-10-07"
 _NHL_HIST_BATCH_END = "2025-10-31"
 
