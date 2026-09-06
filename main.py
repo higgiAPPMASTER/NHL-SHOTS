@@ -3961,13 +3961,13 @@ body.is-admin #parlayCard{display:block}
     <div class="frank-ai-head">
       <div>
         <div class="frank-ai-kicker">Grounded NHL analysis</div>
-        <div class="frank-ai-title">Frank AI · Positive Edge Analyst</div>
-        <div class="frank-ai-sub">Ask about the NHL props already generated on this page. Frank Edge is the app probability minus the sportsbook implied probability.</div>
+        <div class="frank-ai-title">The Edge Coach · Positive Edge Analyst</div>
+        <div class="frank-ai-sub">Ask about the NHL props already generated on this page. Coach Edge is the app probability minus the sportsbook implied probability.</div>
       </div>
       <div class="frank-ai-badge">NO INVENTED PLAYS</div>
     </div>
     <div class="frank-ai-presets">
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the highest positive edge plays from -200 to -1000')">Frank scan · -200 to -1000</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the highest positive edge plays from -200 to -1000')">Coach scan · -200 to -1000</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge shots props?')">Best shots</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge goalie saves props?')">Best saves</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show only positive edge under plays')">Best unders</button>
@@ -3977,7 +3977,7 @@ body.is-admin #parlayCard{display:block}
       <input id="frankAiInput" class="frank-ai-input" type="text" placeholder="Example: Best positive edge shots props in TOR vs MTL from -200 to -500" onkeydown="if(event.key==='Enter')askFrank()"/>
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
-    <div class="frank-ai-note">Requires a loaded NHL board and a real price. App Probability uses the same qualified percentage behind the board and Locks. Model-only PP Points and plays without odds are excluded from Frank Edge.</div>
+    <div class="frank-ai-note">Requires a loaded NHL board and a real price. App Probability uses the same qualified percentage behind the board and Locks. Model-only PP Points and plays without odds are excluded from Coach Edge.</div>
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
 
@@ -4203,7 +4203,7 @@ function replaceNhlParlayLeg(index){
   _paintNhlParlay(next,parseInt(sel?sel.value:'3',10)||3,true);
 }
 
-// ===== Frank AI · grounded positive-probability-edge analyst ================
+// ===== The Edge Coach · grounded positive-probability-edge analyst =========
 function _frankNumber(v){
   if(v==null||v==='')return null;
   var n=Number(String(v).replace('+','').trim());
@@ -4361,7 +4361,7 @@ function _frankAccordions(p){
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Recent average</div><div class="frank-ai-stat-v">'+avg+'</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">App probability</div><div class="frank-ai-stat-v">'+p.appProb.toFixed(1)+'%</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Implied probability</div><div class="frank-ai-stat-v">'+p.implied.toFixed(1)+'%</div></div>'
-    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Frank Edge</div><div class="frank-ai-stat-v" style="color:#4ade80">+'+p.edge.toFixed(2)+' pts</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Coach Edge</div><div class="frank-ai-stat-v" style="color:#4ade80">+'+p.edge.toFixed(2)+' pts</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Line</div><div class="frank-ai-stat-v">'+p.side+' '+p.line+'</div></div>'
     +'</div></div></details>'
     +'<details><summary>Player &amp; Team Stats</summary><div class="frank-ai-accord-body"><div class="frank-ai-stat-grid">'
@@ -4376,7 +4376,7 @@ function _frankAccordions(p){
 function _frankRender(question,rows,totalPriced){
   var q='<div class="frank-ai-question">'+_frankEsc(question)+'</div>';
   if(!rows.length){
-    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">No loaded NHL prop matched that request with a real sportsbook price and a positive Frank Edge. Try removing the player, team, market, side, or odds restriction.</div></div></div>');
+    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">No loaded NHL prop matched that request with a real sportsbook price and a positive Coach Edge. Try removing the player, team, market, side, or odds restriction.</div></div></div>');
     return;
   }
   var table=rows.map(function(p,i){
@@ -4387,12 +4387,12 @@ function _frankRender(question,rows,totalPriced){
   }).join('');
   var detail=rows.map(function(p,i){
     return '<div class="frank-ai-play"><div class="frank-ai-play-title">'+(i+1)+'. '+_frankEsc(p.player)+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</div>'
-      +'<div class="frank-ai-play-copy">App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:#4ade80">+'+p.edge.toFixed(2)+' Frank Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
+      +'<div class="frank-ai-play-copy">App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:#4ade80">+'+p.edge.toFixed(2)+' Coach Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
       +_frankAccordions(p)+'</div>';
   }).join('');
   window.__FRANK_LAST_ROWS__=rows.slice();
   _frankCommit('<div>'+q+'<div class="frank-ai-summary">I checked '+totalPriced+' priced props from the loaded board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.</div>'
-    +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>Frank Edge</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
+    +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>Coach Edge</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
 }
 function askFrankPreset(question){
   var input=document.getElementById('frankAiInput');if(input)input.value=question;askFrank();
@@ -4405,7 +4405,7 @@ function askFrank(){
   if(!props.length){
     var el=document.getElementById('frankAiAnswer');
     if(el){
-      _frankCommit('<div><div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">Load an NHL board with Get Picks first. Frank AI only analyzes generated props that have real sportsbook prices.</div></div></div>');
+      _frankCommit('<div><div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">Load an NHL board with Get Picks first. The Edge Coach only analyzes generated props that have real sportsbook prices.</div></div></div>');
     }
     return;
   }
