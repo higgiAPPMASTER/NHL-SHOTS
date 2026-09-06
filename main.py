@@ -4648,7 +4648,12 @@ function _nhlSelectReplay(system){
   _nhlPaintTrackSystemButtons();
   var dt=(document.getElementById('datePicker')||{}).value||'';
   var today=new Date().toISOString().slice(0,10);
-  if(dt&&dt<today)getPicks();
+  var hint=document.getElementById('nhlReplayHint');
+  if(hint&&dt&&dt<today){
+    var labels={A:'A New',B:'B Old',C:'C Selective',D:'D Top Players'};
+    hint.textContent=(labels[window.NHL_HIST_SYSTEM]||'A New')+' selected for '+dt+'. Click Get Picks when you are ready.';
+    hint.style.color='#93c5fd';
+  }
 }
 
 function rateClass(r){ return r >= 90 ? 'green' : r >= 80 ? 'gold' : 'red-txt'; }
@@ -9504,7 +9509,13 @@ async def _nhl_historical_batch_calendar() -> dict:
         game_count = 0
         for day in payload.get("gameWeek", []):
             if day.get("date") == ds:
-                game_count = len(day.get("games", []) or [])
+                # The NHL schedule feed also carries international events
+                # during the Olympic break (gameType 9). Historical NHL odds,
+                # boards, and records must contain NHL games only.
+                game_count = sum(
+                    1 for game in (day.get("games", []) or [])
+                    if game.get("gameType") in (2, 3)
+                )
                 break
         if game_count:
             active.append({"date": ds, "games": game_count})
