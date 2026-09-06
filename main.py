@@ -3866,6 +3866,11 @@ body.is-admin #parlayCard{display:block}
 .frank-ai-presets{display:flex;gap:7px;flex-wrap:wrap;margin:15px 0 10px;position:relative}
 .frank-ai-preset{background:#171717;color:#d1d5db;border:1px solid #333;border-radius:999px;padding:7px 11px;font-size:.68rem;font-weight:800;cursor:pointer}
 .frank-ai-preset:hover{border-color:#fb923c;color:#fdba74}
+.frank-ai-systems{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:12px 0 3px}
+.frank-ai-system{background:#171717;color:#9ca3af;border:1px solid #3f3f46;border-radius:8px;padding:7px 12px;font-size:.68rem;font-weight:950;cursor:pointer}
+.frank-ai-system.active{color:#fff;border-color:#fb923c;background:rgba(234,88,12,.18);box-shadow:inset 0 0 0 1px rgba(251,146,60,.22)}
+.frank-ai-system-tag{display:inline-block;margin-left:7px;border:1px solid currentColor;border-radius:999px;padding:2px 6px;font-size:.55rem;font-weight:950;vertical-align:1px}
+body.is-admin .frank-ai-systems{display:flex!important}
 .frank-ai-row{display:flex;gap:8px;align-items:stretch;position:relative}
 .frank-ai-input{flex:1;min-width:0;background:#0b0b0b;color:#fff;border:1px solid #3f3f46;border-radius:11px;padding:12px 14px;font:inherit;font-size:.84rem;outline:none}
 .frank-ai-input:focus{border-color:#f97316;box-shadow:0 0 0 3px rgba(249,115,22,.1)}
@@ -3979,6 +3984,14 @@ body.is-admin #parlayCard{display:block}
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge goalie saves props?')">Best saves</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show only positive edge under plays')">Best unders</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')">Top 3</button>
+    </div>
+    <div class="frank-ai-systems admin-only" id="frankAiSystems">
+      <span style="color:#94a3b8;font-size:.65rem;font-weight:900;text-transform:uppercase;letter-spacing:.09em">Coach source</span>
+      <button id="frankSysA" class="frank-ai-system active" onclick="_frankSetSystem('A')">A · NEW</button>
+      <button id="frankSysB" class="frank-ai-system" onclick="_frankSetSystem('B')">B · OLD</button>
+      <button id="frankSysC" class="frank-ai-system" onclick="_frankSetSystem('C')">C · SELECTIVE</button>
+      <button id="frankSysD" class="frank-ai-system" onclick="_frankSetSystem('D')">D · TOP PLAYERS</button>
+      <span id="frankAiSystemStatus" style="color:#fbbf24;font-size:.64rem;font-weight:800">System A loaded board</span>
     </div>
     <div class="frank-ai-row">
       <input id="frankAiInput" class="frank-ai-input" type="text" placeholder="Example: Best positive edge shots props in TOR vs MTL from -200 to -500" onkeydown="if(event.key==='Enter')askFrank()"/>
@@ -4211,6 +4224,48 @@ function replaceNhlParlayLeg(index){
 }
 
 // ===== The Edge Coach · grounded positive-probability-edge analyst =========
+window.NHL_FRANK_SYSTEM='A';
+function _frankSystemLabel(system){
+  return system==='B'?'B · OLD':system==='C'?'C · SELECTIVE':system==='D'?'D · TOP PLAYERS':'A · NEW';
+}
+function _frankRawForSystem(system){
+  system=String(system||'A').toUpperCase();
+  var current=window.__NHL_RAW__||{};
+  if(!window.IS_ADMIN)return current;
+  var currentDate=String(current.date||window.__NHL_DATE__||'');
+  var live=String(window.__NHL_SYSTEM_RESULTS_DATE__||'')===currentDate
+    ?(window.__NHL_SYSTEM_RESULTS__||{})[system]:null;
+  if(live)return live;
+  var histAll=window.__NHL_HIST_ALL__||{};
+  var historical=String(histAll.date||'')===currentDate
+    ?((histAll.systems||{})[system]):null;
+  if(historical)return historical;
+  if(String(current.system||'A').toUpperCase()===system)return current;
+  if(system==='B'&&current.legacySystem){
+    var legacy=Object.assign({},current);
+    Object.keys(current.legacySystem||{}).forEach(function(key){legacy[key]=(current.legacySystem||{})[key];});
+    legacy.system='B';return legacy;
+  }
+  return null;
+}
+function _frankPaintSystemButtons(){
+  ['A','B','C','D'].forEach(function(system){
+    var b=document.getElementById('frankSys'+system);if(!b)return;
+    b.classList.toggle('active',window.NHL_FRANK_SYSTEM===system);
+    b.style.opacity=_frankRawForSystem(system)?'1':'.48';
+  });
+  var status=document.getElementById('frankAiSystemStatus');
+  if(status)status.textContent=_frankRawForSystem(window.NHL_FRANK_SYSTEM)
+    ?_frankSystemLabel(window.NHL_FRANK_SYSTEM)+' loaded board'
+    :_frankSystemLabel(window.NHL_FRANK_SYSTEM)+' is not loaded — run A+B+C+D first';
+}
+function _frankSetSystem(system){
+  if(!window.IS_ADMIN){window.NHL_FRANK_SYSTEM='A';return;}
+  window.NHL_FRANK_SYSTEM=['A','B','C','D'].indexOf(system)>=0?system:'A';
+  _frankPaintSystemButtons();
+  var answer=document.getElementById('frankAiAnswer');
+  if(answer){answer.innerHTML='';answer.style.display='none';}
+}
 function _frankNumber(v){
   if(v==null||v==='')return null;
   var n=Number(String(v).replace('+','').trim());
@@ -4232,7 +4287,8 @@ function _frankMarketKey(market){
   return '';
 }
 function _frankAllProps(){
-  var raw=window.__NHL_RAW__||{};
+  var sourceSystem=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
+  var raw=_frankRawForSystem(sourceSystem)||{};
   var defs=[
     ['picks','OVER'],['rest','OVER'],['ptsPicks','OVER'],['ptsRest','OVER'],
     ['ppPicks','OVER'],['ppRest','OVER'],['astPicks','OVER'],['astRest','OVER'],
@@ -4276,7 +4332,7 @@ function _frankAllProps(){
         average:p.avg!=null?Number(p.avg):null,
         oppositeOdds:side==='UNDER'?p.realOdds:p.realUnderOdds,
         splits:p.frankSplits||{},
-        source:p
+        system:sourceSystem,source:p
       });
     });
   });
@@ -4417,20 +4473,22 @@ function _frankRender(question,rows,totalPriced,mode){
     return;
   }
   var table=rows.map(function(p,i){
-    return '<tr><td>'+(i+1)+'</td><td><b>'+_frankEsc(p.player)+'</b><br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span></td>'
+    var sys=window.IS_ADMIN?'<span class="frank-ai-system-tag" style="color:#fb923c">'+_frankEsc(p.system||'A')+'</span>':'';
+    return '<tr><td>'+(i+1)+'</td><td><b>'+_frankEsc(p.player)+'</b>'+sys+'<br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span></td>'
       +'<td>'+_frankEsc(p.market)+'<br><b style="color:'+(p.side==='OVER'?'#4ade80':'#f87171')+'">'+p.side+' '+p.line+'</b></td>'
       +'<td>'+_frankOdds(p.odds)+'</td><td>'+p.appProb.toFixed(1)+'%</td><td>'+p.implied.toFixed(1)+'%</td>'
       +'<td class="frank-ai-edge" style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'!important">'+_frankSigned(p.edge)+' pts</td></tr>';
   }).join('');
   var detail=rows.map(function(p,i){
-    return '<details class="frank-ai-play" open><summary class="frank-ai-play-title"><span>'+(i+1)+'. '+_frankEsc(p.player)+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</span></summary><div class="frank-ai-play-body">'
+    var sys=window.IS_ADMIN?'<span class="frank-ai-system-tag" style="color:#fb923c">SYSTEM '+_frankEsc(p.system||'A')+'</span>':'';
+    return '<details class="frank-ai-play" open><summary class="frank-ai-play-title"><span>'+(i+1)+'. '+_frankEsc(p.player)+' '+sys+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</span></summary><div class="frank-ai-play-body">'
       +'<div class="frank-ai-play-copy">'+(mode==='safe'?'<b style="color:#fbbf24">Safety rank: '+p.implied.toFixed(1)+'% sportsbook-implied probability.</b> ':'')+'App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' Coach Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
       +_frankAccordions(p)+'</div></details>';
   }).join('');
   window.__FRANK_LAST_ROWS__=rows.slice();
   var summary=mode==='safe'
     ?'I checked both sides of the loaded priced props and ranked the matching plays by sportsbook-implied win probability. This is the safer-side list, not the highest Coach Edge list; heavily favored prices can require much more risk for a smaller return.'
-    :'I checked '+totalPriced+' priced props from the loaded board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.';
+    :'I checked '+totalPriced+' priced props from the loaded '+(window.IS_ADMIN?_frankSystemLabel(window.NHL_FRANK_SYSTEM||'A')+' ':'')+'board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.';
   _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div>'
     +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>Coach Edge</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
 }
@@ -4583,6 +4641,9 @@ async function runAllNhlSystems(){
       if(st)st.textContent=data.message||('No NHL games scheduled for '+dt+'.');
       return;
     }
+    window.__NHL_SYSTEM_RESULTS__=data.results||{};
+    window.__NHL_SYSTEM_RESULTS_DATE__=data.date||dt;
+    _frankPaintSystemButtons();
     var parts=[];
     ['A','B','C','D'].forEach(function(system){
       var row=(data.systems||{})[system]||{};
@@ -5251,6 +5312,11 @@ function renderResults(d){
   window.__NHL_SEASON__ = d.season || '20252026';
   window.__NHL_DATE__ = d.date || '';
   document.getElementById('out').innerHTML = '<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
+  if(window.IS_ADMIN){
+    var loadedSystem=String(d.system||window.NHL_HIST_SYSTEM||'A').toUpperCase();
+    if(['A','B','C','D'].indexOf(loadedSystem)>=0)window.NHL_FRANK_SYSTEM=loadedSystem;
+    _frankPaintSystemButtons();
+  }
   _nhlPaint('');
 }
 var _nhlPositionFilter='ALL';
