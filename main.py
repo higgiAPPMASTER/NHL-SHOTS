@@ -3879,8 +3879,14 @@ body.is-admin #parlayCard{display:block}
 .frank-ai-table th{background:#111;color:#9ca3af;text-align:left;padding:8px 9px;font-size:.59rem;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
 .frank-ai-table td{padding:9px;border-top:1px solid #222;color:#e5e7eb;vertical-align:top}
 .frank-ai-edge{color:#4ade80!important;font-weight:900}
-.frank-ai-play{margin-top:9px;background:#111;border:1px solid #292929;border-left:3px solid #f97316;border-radius:10px;padding:10px 12px}
+.frank-ai-play{margin-top:14px;background:#111;border:2px solid rgba(249,115,22,.42);border-left:5px solid #f97316;border-radius:12px;padding:12px 14px;box-shadow:0 5px 14px rgba(0,0,0,.34)}
+.frank-ai-play+.frank-ai-play{margin-top:18px}
 .frank-ai-play-title{color:#fff;font-weight:900;font-size:.78rem}
+.frank-ai-play>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer}
+.frank-ai-play>summary::-webkit-details-marker{display:none}
+.frank-ai-play>summary:after{content:"Expand";flex:0 0 auto;color:#fb923c;font-size:.61rem;font-weight:900;text-transform:uppercase;letter-spacing:.05em}
+.frank-ai-play[open]>summary:after{content:"Collapse"}
+.frank-ai-play-body{margin-top:7px}
 .frank-ai-play-copy{color:#9ca3af;font-size:.68rem;line-height:1.45;margin-top:4px}
 .frank-ai-accord{margin-top:9px;border-top:1px solid #242424}
 .frank-ai-accord details{border-bottom:1px solid #242424}
@@ -3961,13 +3967,14 @@ body.is-admin #parlayCard{display:block}
     <div class="frank-ai-head">
       <div>
         <div class="frank-ai-kicker">Grounded NHL analysis</div>
-        <div class="frank-ai-title">The Edge Coach · Positive Edge Analyst</div>
-        <div class="frank-ai-sub">Ask about the NHL props already generated on this page. Coach Edge is the app probability minus the sportsbook implied probability.</div>
+        <div class="frank-ai-title">The Edge Coach · NHL Props Analyst</div>
+        <div class="frank-ai-sub">Find the safest sportsbook sides or scan for positive Coach Edge. Coach Edge is the app probability minus the sportsbook implied probability.</div>
       </div>
       <div class="frank-ai-badge">NO INVENTED PLAYS</div>
     </div>
     <div class="frank-ai-presets">
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the highest positive edge plays from -200 to -1000')">Coach scan · -200 to -1000</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show me the safest bets')">Safest bets</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge shots props?')">Best shots</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge goalie saves props?')">Best saves</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show only positive edge under plays')">Best unders</button>
@@ -3977,7 +3984,7 @@ body.is-admin #parlayCard{display:block}
       <input id="frankAiInput" class="frank-ai-input" type="text" placeholder="Example: Best positive edge shots props in TOR vs MTL from -200 to -500" onkeydown="if(event.key==='Enter')askFrank()"/>
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
-    <div class="frank-ai-note">Requires a loaded NHL board and a real price. App Probability uses the same qualified percentage behind the board and Locks. Model-only PP Points and plays without odds are excluded from Coach Edge.</div>
+    <div class="frank-ai-note">Requires a loaded NHL board and a real price. Safest Bets ranks both sides by sportsbook-implied probability; Coach Edge compares the app probability with that implied probability. Model-only PP Points and plays without odds are excluded.</div>
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
 
@@ -4275,10 +4282,40 @@ function _frankAllProps(){
   });
   return out;
 }
+function _frankSafestProps(props){
+  var seen={},out=[];
+  (props||[]).forEach(function(p){
+    var currentKey=String(p.player)+'|'+p.market+'|'+p.side+'|'+p.line+'|'+p.odds;
+    if(!seen[currentKey]){seen[currentKey]=1;out.push(p);}
+  });
+  (props||[]).forEach(function(p){
+    var opposite=_frankNumber(p.oppositeOdds);
+    if(opposite==null)return;
+    var otherSide=p.side==='OVER'?'UNDER':'OVER';
+    var otherKey=String(p.player)+'|'+p.market+'|'+otherSide+'|'+p.line+'|'+opposite;
+    if(seen[otherKey])return;
+    seen[otherKey]=1;
+    var other=Object.assign({},p,{
+      side:otherSide,
+      odds:Number(opposite),
+      oppositeOdds:p.odds,
+      implied:_frankImplied(opposite),
+      appProb:Math.max(0,Math.min(100,100-Number(p.appProb||0))),
+      recentRate:p.recentTotal>0?Math.max(0,100-Number(p.recentRate||0)):0,
+      recentHits:p.recentTotal>0?Math.max(0,Number(p.recentTotal)-Number(p.recentHits||0)):0,
+      oppRate:p.oppTotal>0?Math.max(0,100-Number(p.oppRate||0)):0,
+      oppHits:p.oppTotal>0?Math.max(0,Number(p.oppTotal)-Number(p.oppHits||0)):0
+    });
+    other.edge=other.appProb-other.implied;
+    out.push(other);
+  });
+  return out;
+}
 function _frankParse(question,props){
   var q=String(question||'').toLowerCase();
   var padded=' '+q+' ';
-  var f={limit:5,side:'',market:'',teams:[],players:[],minOdds:null,maxOdds:null,minEdge:0};
+  var f={limit:5,side:'',market:'',teams:[],players:[],minOdds:null,maxOdds:null,minEdge:0,mode:'edge'};
+  if(q.indexOf('safest')>=0||q.indexOf('safe bet')>=0||q.indexOf('most likely')>=0||q.indexOf('highest probability')>=0)f.mode='safe';
   var top=q.match(/top +([0-9]{1,2})/);if(top)f.limit=Math.max(1,Math.min(10,Number(top[1])));
   if(padded.indexOf(' under ')>=0)f.side='UNDER';
   if(padded.indexOf(' over ')>=0)f.side='OVER';
@@ -4313,14 +4350,12 @@ function _frankEvidence(p){
   return bits.slice(0,4).join(' · ')||'Qualified by the loaded NHL board';
 }
 function _frankOdds(v){return v>0?'+'+v:String(v);}
+function _frankSigned(v){var n=Number(v||0);return (n>=0?'+':'')+n.toFixed(2);}
 function _frankEsc(v){return _nhlSafe(v);}
 function _frankCommit(html){
   var el=document.getElementById('frankAiAnswer');if(!el)return;
-  window.__FRANK_CHAT_HISTORY__=window.__FRANK_CHAT_HISTORY__||[];
-  window.__FRANK_CHAT_HISTORY__.push(html);
-  if(window.__FRANK_CHAT_HISTORY__.length>4)window.__FRANK_CHAT_HISTORY__.shift();
   el.style.display='block';
-  el.innerHTML='<div class="frank-ai-history">'+window.__FRANK_CHAT_HISTORY__.join('')+'</div>';
+  el.innerHTML='<div class="frank-ai-history">'+html+'</div>';
   el.scrollTop=el.scrollHeight;
 }
 function _frankRate(p,split){
@@ -4345,13 +4380,15 @@ function _frankToi(seconds){
 }
 function _frankAccordions(p){
   var opposite=_frankNumber(p.oppositeOdds);
+  var oppositeImplied=opposite!=null?_frankImplied(opposite):null;
+  var otherSide=p.side==='OVER'?'UNDER':'OVER';
   var schedule=p.source.scheduleContext||{},work=p.source.playerWorkload||{};
   var projection=p.projection!=null&&isFinite(p.projection)?p.projection.toFixed(2):'N/A';
   var avg=p.average!=null&&isFinite(p.average)?p.average.toFixed(2):'N/A';
   return '<div class="frank-ai-accord">'
     +'<details><summary>Odds Comparison</summary><div class="frank-ai-accord-body"><div class="frank-ai-stat-grid">'
-    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Selected side</div><div class="frank-ai-stat-v">'+p.side+' '+_frankOdds(p.odds)+'</div></div>'
-    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Other side</div><div class="frank-ai-stat-v">'+(opposite!=null?_frankOdds(opposite):'N/A')+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Selected side</div><div class="frank-ai-stat-v">'+p.side+' '+_frankOdds(p.odds)+' · '+p.implied.toFixed(1)+'% implied</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Other side</div><div class="frank-ai-stat-v">'+(opposite!=null?otherSide+' '+_frankOdds(opposite)+' · '+oppositeImplied.toFixed(1)+'% implied':'N/A')+'</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Source</div><div class="frank-ai-stat-v">'+_frankEsc(p.book||'Sportsbook line')+'</div></div>'
     +'</div><div style="margin-top:7px">Only prices carried by the loaded NHL prop are shown. This is not a full multi-book screen unless the source provides those books.</div></div></details>'
     +'<details open><summary>Hit Rate Chart</summary><div class="frank-ai-accord-body">'+_frankSplitTiles(p)+'</div></details>'
@@ -4361,7 +4398,7 @@ function _frankAccordions(p){
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Recent average</div><div class="frank-ai-stat-v">'+avg+'</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">App probability</div><div class="frank-ai-stat-v">'+p.appProb.toFixed(1)+'%</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Implied probability</div><div class="frank-ai-stat-v">'+p.implied.toFixed(1)+'%</div></div>'
-    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Coach Edge</div><div class="frank-ai-stat-v" style="color:#4ade80">+'+p.edge.toFixed(2)+' pts</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Coach Edge</div><div class="frank-ai-stat-v" style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' pts</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Line</div><div class="frank-ai-stat-v">'+p.side+' '+p.line+'</div></div>'
     +'</div></div></details>'
     +'<details><summary>Player &amp; Team Stats</summary><div class="frank-ai-accord-body"><div class="frank-ai-stat-grid">'
@@ -4373,7 +4410,7 @@ function _frankAccordions(p){
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Travel / B2B</div><div class="frank-ai-stat-v">'+(schedule.travel?'Travel ':'')+(schedule.b2b?'B2B':(!schedule.travel?'No flag':''))+'</div></div>'
     +'</div></div></details></div>';
 }
-function _frankRender(question,rows,totalPriced){
+function _frankRender(question,rows,totalPriced,mode){
   var q='<div class="frank-ai-question">'+_frankEsc(question)+'</div>';
   if(!rows.length){
     _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">No loaded NHL prop matched that request with a real sportsbook price and a positive Coach Edge. Try removing the player, team, market, side, or odds restriction.</div></div></div>');
@@ -4383,15 +4420,18 @@ function _frankRender(question,rows,totalPriced){
     return '<tr><td>'+(i+1)+'</td><td><b>'+_frankEsc(p.player)+'</b><br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span></td>'
       +'<td>'+_frankEsc(p.market)+'<br><b style="color:'+(p.side==='OVER'?'#4ade80':'#f87171')+'">'+p.side+' '+p.line+'</b></td>'
       +'<td>'+_frankOdds(p.odds)+'</td><td>'+p.appProb.toFixed(1)+'%</td><td>'+p.implied.toFixed(1)+'%</td>'
-      +'<td class="frank-ai-edge">+'+p.edge.toFixed(2)+' pts</td></tr>';
+      +'<td class="frank-ai-edge" style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'!important">'+_frankSigned(p.edge)+' pts</td></tr>';
   }).join('');
   var detail=rows.map(function(p,i){
-    return '<div class="frank-ai-play"><div class="frank-ai-play-title">'+(i+1)+'. '+_frankEsc(p.player)+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</div>'
-      +'<div class="frank-ai-play-copy">App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:#4ade80">+'+p.edge.toFixed(2)+' Coach Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
-      +_frankAccordions(p)+'</div>';
+    return '<details class="frank-ai-play" open><summary class="frank-ai-play-title"><span>'+(i+1)+'. '+_frankEsc(p.player)+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</span></summary><div class="frank-ai-play-body">'
+      +'<div class="frank-ai-play-copy">'+(mode==='safe'?'<b style="color:#fbbf24">Safety rank: '+p.implied.toFixed(1)+'% sportsbook-implied probability.</b> ':'')+'App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' Coach Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
+      +_frankAccordions(p)+'</div></details>';
   }).join('');
   window.__FRANK_LAST_ROWS__=rows.slice();
-  _frankCommit('<div>'+q+'<div class="frank-ai-summary">I checked '+totalPriced+' priced props from the loaded board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.</div>'
+  var summary=mode==='safe'
+    ?'I checked both sides of the loaded priced props and ranked the matching plays by sportsbook-implied win probability. This is the safer-side list, not the highest Coach Edge list; heavily favored prices can require much more risk for a smaller return.'
+    :'I checked '+totalPriced+' priced props from the loaded board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.';
+  _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div>'
     +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>Coach Edge</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
 }
 function askFrankPreset(question){
@@ -4410,14 +4450,15 @@ function askFrank(){
     return;
   }
   var f=_frankParse(question,props);
+  var candidates=f.mode==='safe'?_frankSafestProps(props):props;
   var ql=question.toLowerCase();
   var followup=(ql.indexOf('why')>=0||ql.indexOf('tell me more')>=0||ql.indexOf('number 1')>=0||ql.indexOf('first play')>=0);
   if(followup&&window.__FRANK_LAST_ROWS__&&window.__FRANK_LAST_ROWS__[0]&&!f.players.length){
     f.players=[String(window.__FRANK_LAST_ROWS__[0].player).toLowerCase()];
     f.limit=1;
   }
-  var rows=props.filter(function(p){
-    if(p.edge<=f.minEdge)return false;
+  var rows=candidates.filter(function(p){
+    if(f.mode!=='safe'&&p.edge<=f.minEdge)return false;
     if(f.side&&p.side!==f.side)return false;
     if(f.market&&p.marketKey!==f.market)return false;
     if(f.minOdds!=null&&(p.odds<f.minOdds||p.odds>f.maxOdds))return false;
@@ -4428,8 +4469,10 @@ function askFrank(){
     }
     return true;
   });
-  rows.sort(function(a,b){return b.edge-a.edge||b.appProb-a.appProb;});
-  _frankRender(question,rows.slice(0,f.limit),props.length);
+  rows.sort(f.mode==='safe'
+    ?function(a,b){return b.implied-a.implied||b.appProb-a.appProb;}
+    :function(a,b){return b.edge-a.edge||b.appProb-a.appProb;});
+  _frankRender(question,rows.slice(0,f.limit),candidates.length,f.mode);
 }
 
 // Get Picks loads today's saved board, or builds a view-only replay for any past date.
