@@ -1102,6 +1102,63 @@ def _under_fields(logs, stat_key, uline, hr, opp, min_vo=None, min_any=None,
     }
 
 
+def _nhl_frank_splits(logs: list, stat_key: str, line: float, home_road: str,
+                      opponent: str, target_date: str) -> dict:
+    """Pregame hit-rate profile used by the grounded Frank analyst.
+
+    Both sides are retained because one qualified row may appear on an OVER or
+    UNDER board.  All calculations use only games before the selected date.
+    """
+    try:
+        target = date.fromisoformat(str(target_date or "")[:10])
+    except (TypeError, ValueError):
+        target = date.today()
+    season_year = target.year if target.month >= 7 else target.year - 1
+    season_start = date(season_year, 7, 1).isoformat()
+    prior = [
+        row for row in (logs or [])
+        if str(row.get("date") or "")[:10] < target.isoformat()
+        and row.get(stat_key) is not None
+    ]
+    season = [
+        row for row in prior
+        if str(row.get("date") or "")[:10] >= season_start
+    ]
+
+    def summarize(rows: list) -> dict:
+        total = len(rows)
+        over_hits = sum(1 for row in rows if float(row.get(stat_key) or 0) > line)
+        under_hits = sum(1 for row in rows if float(row.get(stat_key) or 0) < line)
+        average = (
+            round(sum(float(row.get(stat_key) or 0) for row in rows) / total, 2)
+            if total else None
+        )
+        return {
+            "overHits": over_hits, "underHits": under_hits, "total": total,
+            "overRate": round(over_hits / total * 100, 1) if total else None,
+            "underRate": round(under_hits / total * 100, 1) if total else None,
+            "average": average,
+        }
+
+    return {
+        "l5": summarize(prior[:5]),
+        "l10": summarize(prior[:10]),
+        "l20": summarize(prior[:20]),
+        "season": summarize(season),
+        "homeAway": summarize([
+            row for row in season if row.get("homeRoad") == home_road
+        ]),
+        "vsOpponent": summarize([
+            row for row in prior if row.get("opponent") == opponent
+        ]),
+        "homeRoad": home_road,
+        "opponent": opponent,
+        "line": line,
+        "stat": stat_key,
+        "asOf": target.isoformat(),
+    }
+
+
 def _nhl_goal_under_rank_fields(under_fields: dict, goal_avg: float,
                                 toi_avg_sec: int, pp_toi_avg_sec: int) -> tuple:
     """Rank goal-under fades toward meaningful player roles without gate changes.
@@ -2118,6 +2175,8 @@ async def get_pts_picks(
                 "scheduleContext": schedule,
                 "scheduleFactor": schedule_factor,
                 "playerWorkload": workload,
+                "frankSplits": _nhl_frank_splits(
+                    logs, stat_key, line, hr, opp, target_date),
                 "simActual": sim_actual, "simVoidReason": sim_void_reason,
             }
 
@@ -2401,6 +2460,8 @@ async def get_saves_picks(
             "expectedSaves": expected_saves,
             "saveProjectionEdge": saves_edge,
             "playerWorkload": workload,
+            "frankSplits": _nhl_frank_splits(
+                logs, "saves", base_line, hr, opp, target_date),
             "simActual": sim_actual_sv, "simVoidReason": sim_void_reason_sv,
         }
         if over_ok: picks.append(rec)
@@ -3076,6 +3137,8 @@ async def run_picks(
             "scheduleContext": schedule,
             "scheduleFactor": combined_schedule_factor,
             "playerWorkload": workload,
+            "frankSplits": _nhl_frank_splits(
+                logs, "shots", line, hr, opp, target_date),
             "simActual": sim_actual, "simVoidReason": sim_void_reason,
         }
 
@@ -3793,6 +3856,48 @@ body.is-admin #parlayCard{display:block}
 .nhl-game-jump:hover{border-color:#f59e0b!important;transform:translateY(-1px)}
 .nhl-scroll-anchor{scroll-margin-top:18px;height:1px}
 .nhl-game-row{scroll-margin-top:18px}
+.frank-ai-card{position:relative;overflow:hidden;border:1px solid rgba(249,115,22,.42)!important;background:linear-gradient(145deg,rgba(18,18,18,.98),rgba(20,12,8,.98))!important}
+.frank-ai-card:before{content:"";position:absolute;inset:-80px auto auto -80px;width:210px;height:210px;border-radius:50%;background:rgba(249,115,22,.09);filter:blur(18px);pointer-events:none}
+.frank-ai-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;position:relative}
+.frank-ai-kicker{font-size:.65rem;font-weight:900;letter-spacing:.13em;color:#fb923c;text-transform:uppercase;margin-bottom:5px}
+.frank-ai-title{font-family:'Playfair Display',serif;font-size:1.35rem;color:#fff;font-weight:800}
+.frank-ai-sub{color:#94a3b8;font-size:.76rem;line-height:1.45;margin-top:5px;max-width:720px}
+.frank-ai-badge{flex:0 0 auto;border:1px solid rgba(74,222,128,.38);background:rgba(74,222,128,.09);color:#86efac;border-radius:999px;padding:5px 9px;font-size:.62rem;font-weight:900;letter-spacing:.06em}
+.frank-ai-presets{display:flex;gap:7px;flex-wrap:wrap;margin:15px 0 10px;position:relative}
+.frank-ai-preset{background:#171717;color:#d1d5db;border:1px solid #333;border-radius:999px;padding:7px 11px;font-size:.68rem;font-weight:800;cursor:pointer}
+.frank-ai-preset:hover{border-color:#fb923c;color:#fdba74}
+.frank-ai-row{display:flex;gap:8px;align-items:stretch;position:relative}
+.frank-ai-input{flex:1;min-width:0;background:#0b0b0b;color:#fff;border:1px solid #3f3f46;border-radius:11px;padding:12px 14px;font:inherit;font-size:.84rem;outline:none}
+.frank-ai-input:focus{border-color:#f97316;box-shadow:0 0 0 3px rgba(249,115,22,.1)}
+.frank-ai-send{flex:0 0 auto;background:linear-gradient(135deg,#ea580c,#f97316);color:#fff;border:0;border-radius:11px;padding:0 18px;font-weight:900;cursor:pointer}
+.frank-ai-note{color:#64748b;font-size:.64rem;line-height:1.4;margin-top:8px}
+.frank-ai-answer{display:none;margin-top:14px;border-top:1px solid rgba(249,115,22,.2);padding-top:14px}
+.frank-ai-question{margin-left:auto;max-width:82%;background:#27211d;border:1px solid rgba(249,115,22,.22);border-radius:12px 12px 3px 12px;padding:9px 12px;color:#fed7aa;font-size:.75rem;line-height:1.4}
+.frank-ai-summary{margin-top:11px;color:#e5e7eb;font-size:.76rem;line-height:1.5}
+.frank-ai-table-wrap{overflow-x:auto;margin-top:10px;border:1px solid #292929;border-radius:11px}
+.frank-ai-table{width:100%;border-collapse:collapse;font-size:.7rem;min-width:720px}
+.frank-ai-table th{background:#111;color:#9ca3af;text-align:left;padding:8px 9px;font-size:.59rem;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+.frank-ai-table td{padding:9px;border-top:1px solid #222;color:#e5e7eb;vertical-align:top}
+.frank-ai-edge{color:#4ade80!important;font-weight:900}
+.frank-ai-play{margin-top:9px;background:#111;border:1px solid #292929;border-left:3px solid #f97316;border-radius:10px;padding:10px 12px}
+.frank-ai-play-title{color:#fff;font-weight:900;font-size:.78rem}
+.frank-ai-play-copy{color:#9ca3af;font-size:.68rem;line-height:1.45;margin-top:4px}
+.frank-ai-accord{margin-top:9px;border-top:1px solid #242424}
+.frank-ai-accord details{border-bottom:1px solid #242424}
+.frank-ai-accord summary{display:flex;justify-content:space-between;align-items:center;gap:10px;list-style:none;cursor:pointer;padding:9px 2px;color:#d1d5db;font-size:.68rem;font-weight:900}
+.frank-ai-accord summary::-webkit-details-marker{display:none}
+.frank-ai-accord summary:after{content:"+";color:#fb923c;font-size:.9rem}
+.frank-ai-accord details[open] summary:after{content:"−"}
+.frank-ai-accord-body{padding:0 2px 10px;color:#94a3b8;font-size:.67rem;line-height:1.45}
+.frank-ai-stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+.frank-ai-stat{background:#171717;border:1px solid #2b2b2b;border-radius:8px;padding:8px}
+.frank-ai-stat-k{color:#71717a;font-size:.55rem;font-weight:900;text-transform:uppercase;letter-spacing:.05em}
+.frank-ai-stat-v{color:#f4f4f5;font-size:.74rem;font-weight:900;margin-top:3px}
+.frank-ai-ratebar{height:3px;background:#292929;border-radius:999px;margin-top:6px;overflow:hidden}
+.frank-ai-ratebar span{display:block;height:100%;background:#f97316;border-radius:999px}
+.frank-ai-history{display:flex;flex-direction:column;gap:14px}
+.frank-ai-empty{background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.24);color:#fca5a5;border-radius:10px;padding:11px 12px;font-size:.75rem;line-height:1.45}
+@media(max-width:620px){.frank-ai-head{display:block}.frank-ai-badge{display:inline-block;margin-top:9px}.frank-ai-row{display:block}.frank-ai-send{width:100%;padding:11px;margin-top:8px}.frank-ai-question{max-width:94%}.frank-ai-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 <div id="nhl-mybets-card" style="display:none;max-width:960px;margin:0 auto 24px;padding:0 16px">
   <div class="card" style="padding:20px 22px">
@@ -3850,6 +3955,30 @@ body.is-admin #parlayCard{display:block}
        </div>
        <div id="nhlReplayAllResults" style="display:none;margin-top:12px"></div>
     </div>
+  </div>
+
+  <div class="card frank-ai-card" id="frankAiCard">
+    <div class="frank-ai-head">
+      <div>
+        <div class="frank-ai-kicker">Grounded NHL analysis</div>
+        <div class="frank-ai-title">Frank AI · Positive Edge Analyst</div>
+        <div class="frank-ai-sub">Ask about the NHL props already generated on this page. Frank Edge is the app probability minus the sportsbook implied probability.</div>
+      </div>
+      <div class="frank-ai-badge">NO INVENTED PLAYS</div>
+    </div>
+    <div class="frank-ai-presets">
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the highest positive edge plays from -200 to -1000')">Frank scan · -200 to -1000</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge shots props?')">Best shots</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge goalie saves props?')">Best saves</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show only positive edge under plays')">Best unders</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')">Top 3</button>
+    </div>
+    <div class="frank-ai-row">
+      <input id="frankAiInput" class="frank-ai-input" type="text" placeholder="Example: Best positive edge shots props in TOR vs MTL from -200 to -500" onkeydown="if(event.key==='Enter')askFrank()"/>
+      <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
+    </div>
+    <div class="frank-ai-note">Requires a loaded NHL board and a real price. App Probability uses the same qualified percentage behind the board and Locks. Model-only PP Points and plays without odds are excluded from Frank Edge.</div>
+    <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
 
   <div class="card" id="parlayCard" style="text-align:center;max-width:600px;margin:20px auto 0">
@@ -4072,6 +4201,235 @@ function replaceNhlParlayLeg(index){
   window._lastParlay=next.map(function(l){return l.playerKey;});
   var sel=document.getElementById('parlayLegs');
   _paintNhlParlay(next,parseInt(sel?sel.value:'3',10)||3,true);
+}
+
+// ===== Frank AI · grounded positive-probability-edge analyst ================
+function _frankNumber(v){
+  if(v==null||v==='')return null;
+  var n=Number(String(v).replace('+','').trim());
+  return isFinite(n)&&n!==0?n:null;
+}
+function _frankImplied(american){
+  var a=_frankNumber(american);
+  if(a==null)return null;
+  return a<0?((-a)/((-a)+100)*100):(100/(a+100)*100);
+}
+function _frankMarketKey(market){
+  var m=String(market||'').toLowerCase();
+  if(m.indexOf('power play')>=0)return 'pp';
+  if(m.indexOf('shot')>=0)return 'shots';
+  if(m.indexOf('assist')>=0)return 'assists';
+  if(m.indexOf('goalie')>=0||m.indexOf('save')>=0)return 'saves';
+  if(m.indexOf('goal')>=0)return 'goals';
+  if(m.indexOf('point')>=0)return 'points';
+  return '';
+}
+function _frankAllProps(){
+  var raw=window.__NHL_RAW__||{};
+  var defs=[
+    ['picks','OVER'],['rest','OVER'],['ptsPicks','OVER'],['ptsRest','OVER'],
+    ['ppPicks','OVER'],['ppRest','OVER'],['astPicks','OVER'],['astRest','OVER'],
+    ['goalPicks','OVER'],['goalRest','OVER'],['savesPicks','OVER'],['savesRest','OVER'],
+    ['shotUnders','UNDER'],['shotUndersRest','UNDER'],['ptsUnders','UNDER'],
+    ['ptsUndersRest','UNDER'],['ppUnders','UNDER'],['ppUndersRest','UNDER'],
+    ['astUnders','UNDER'],['astUndersRest','UNDER'],['goalUnders','UNDER'],
+    ['goalUndersRest','UNDER'],['savesUnders','UNDER'],['savesUndersRest','UNDER']
+  ];
+  var seen={},out=[];
+  defs.forEach(function(def){
+    (raw[def[0]]||[]).forEach(function(p){
+      if(!p||!p.name)return;
+      var side=def[1],market=p.mkt||'Player Prop';
+      var line=p.realLine;
+      var odds=side==='UNDER'?p.realUnderOdds:p.realOdds;
+      var appProb=side==='UNDER'
+        ?Number(p.underConfidence||p.underRate||p.underRateAny||p.underRateVo||0)
+        :Number(p.dispScore||p.ptsScore||p.score||0);
+      var implied=_frankImplied(odds);
+      if(line==null||implied==null||!isFinite(appProb)||appProb<=0)return;
+      appProb=Math.max(0,Math.min(100,appProb));
+      var edge=appProb-implied;
+      var key=String(p.pid||p.name)+'|'+market+'|'+side+'|'+line+'|'+odds;
+      if(seen[key])return;seen[key]=1;
+      out.push({
+        player:p.name,team:p.team||'',opponent:p.opponent||'',market:market,
+        marketKey:_frankMarketKey(market),side:side,line:Number(line),odds:Number(odds),
+        book:p.lineSource||'',appProb:appProb,implied:implied,edge:edge,
+        projection:p.proj!=null?Number(p.proj):null,
+        projectionEdge:p.projEdge!=null?Number(p.projEdge):null,
+        recentRate:Number(p.rateB||p.step3Rate||p.pts3Rate||p.vsLineRate||0),
+        recentHits:Number(p.hitsB||p.step3Hits||p.pts3Hits||p.vsLineHits||0),
+        recentTotal:Number(p.totB||p.step3Total||p.pts3Total||p.vsLineTotal||0),
+        oppRate:Number(p.rateA||p.step2Rate||p.pts2Rate||0),
+        oppHits:Number(p.hitsA||p.step2Hits||p.pts2Hits||0),
+        oppTotal:Number(p.totA||p.step2Total||p.pts2Total||0),
+        restDays:p.restDays,hotHits:p.hotHits,hotTotal:p.hotTotal,
+        toiAvgSec:p.toiAvgSec,ppToiAvgSec:p.ppToiAvgSec,
+        scheduleFactor:p.scheduleFactor,oppGoalieSv:p.oppGoalieSv,
+        average:p.avg!=null?Number(p.avg):null,
+        oppositeOdds:side==='UNDER'?p.realOdds:p.realUnderOdds,
+        splits:p.frankSplits||{},
+        source:p
+      });
+    });
+  });
+  return out;
+}
+function _frankParse(question,props){
+  var q=String(question||'').toLowerCase();
+  var padded=' '+q+' ';
+  var f={limit:5,side:'',market:'',teams:[],players:[],minOdds:null,maxOdds:null,minEdge:0};
+  var top=q.match(/top +([0-9]{1,2})/);if(top)f.limit=Math.max(1,Math.min(10,Number(top[1])));
+  if(padded.indexOf(' under ')>=0)f.side='UNDER';
+  if(padded.indexOf(' over ')>=0)f.side='OVER';
+  if(q.indexOf('power play')>=0)f.market='pp';
+  else if(q.indexOf('shot')>=0)f.market='shots';
+  else if(q.indexOf('assist')>=0)f.market='assists';
+  else if(q.indexOf('save')>=0||q.indexOf('goalie')>=0)f.market='saves';
+  else if(q.indexOf('goal')>=0)f.market='goals';
+  else if(q.indexOf('point')>=0)f.market='points';
+  var neg=q.match(/-[0-9]{2,4}/g)||[];
+  if(neg.length>=2){var nums=neg.slice(0,2).map(Number);f.minOdds=Math.min.apply(null,nums);f.maxOdds=Math.max.apply(null,nums);}
+  var edge=q.match(/([0-9]+(?:[.][0-9]+)?) *%? *(?:edge|advantage)/);
+  if(edge)f.minEdge=Number(edge[1]);
+  var teamSeen={};
+  props.forEach(function(p){
+    [p.team,p.opponent].forEach(function(t){
+      var tl=String(t||'').toLowerCase();
+      if(tl&&q.indexOf(tl)>=0&&!teamSeen[tl]){teamSeen[tl]=1;f.teams.push(tl);}
+    });
+    var nl=String(p.player||'').toLowerCase();
+    if(nl&&q.indexOf(nl)>=0&&f.players.indexOf(nl)<0)f.players.push(nl);
+  });
+  return f;
+}
+function _frankEvidence(p){
+  var bits=[];
+  if(p.recentTotal>0)bits.push('recent '+Math.round(p.recentRate)+'% ('+p.recentHits+'/'+p.recentTotal+')');
+  if(p.oppTotal>0)bits.push('vs opponent '+Math.round(p.oppRate)+'% ('+p.oppHits+'/'+p.oppTotal+')');
+  if(p.projection!=null&&isFinite(p.projection))bits.push('projection '+p.projection.toFixed(2)+' vs '+p.line);
+  if(p.hotTotal>0)bits.push('hot run '+p.hotHits+'/'+p.hotTotal);
+  if(p.restDays!=null)bits.push(String(p.restDays)+' rest day'+(Number(p.restDays)===1?'':'s'));
+  return bits.slice(0,4).join(' · ')||'Qualified by the loaded NHL board';
+}
+function _frankOdds(v){return v>0?'+'+v:String(v);}
+function _frankEsc(v){return _nhlSafe(v);}
+function _frankCommit(html){
+  var el=document.getElementById('frankAiAnswer');if(!el)return;
+  window.__FRANK_CHAT_HISTORY__=window.__FRANK_CHAT_HISTORY__||[];
+  window.__FRANK_CHAT_HISTORY__.push(html);
+  if(window.__FRANK_CHAT_HISTORY__.length>4)window.__FRANK_CHAT_HISTORY__.shift();
+  el.style.display='block';
+  el.innerHTML='<div class="frank-ai-history">'+window.__FRANK_CHAT_HISTORY__.join('')+'</div>';
+  el.scrollTop=el.scrollHeight;
+}
+function _frankRate(p,split){
+  var row=(p.splits||{})[split]||{};
+  var rate=p.side==='UNDER'?row.underRate:row.overRate;
+  var hits=p.side==='UNDER'?row.underHits:row.overHits;
+  return {rate:rate,total:Number(row.total||0),hits:Number(hits||0),average:row.average};
+}
+function _frankSplitTiles(p){
+  var defs=[['l5','L5'],['l10','L10'],['l20','L20'],['season','Season'],['homeAway',p.splits&&p.splits.homeRoad==='R'?'Away':'Home'],['vsOpponent','vs Opponent']];
+  return '<div class="frank-ai-stat-grid">'+defs.map(function(def){
+    var r=_frankRate(p,def[0]),shown=r.rate!=null&&r.total>0;
+    var value=shown?(Number(r.rate).toFixed(0)+'%'):'N/A';
+    var meta=shown?(' · '+r.hits+'/'+r.total):'';
+    return '<div class="frank-ai-stat"><div class="frank-ai-stat-k">'+_frankEsc(def[1])+'</div><div class="frank-ai-stat-v">'+value+meta+'</div>'
+      +'<div class="frank-ai-ratebar"><span style="width:'+(shown?Math.max(0,Math.min(100,Number(r.rate))):0)+'%"></span></div></div>';
+  }).join('')+'</div>';
+}
+function _frankToi(seconds){
+  var n=Number(seconds||0);if(!n)return 'N/A';
+  return Math.floor(n/60)+':'+String(Math.round(n%60)).padStart(2,'0');
+}
+function _frankAccordions(p){
+  var opposite=_frankNumber(p.oppositeOdds);
+  var schedule=p.source.scheduleContext||{},work=p.source.playerWorkload||{};
+  var projection=p.projection!=null&&isFinite(p.projection)?p.projection.toFixed(2):'N/A';
+  var avg=p.average!=null&&isFinite(p.average)?p.average.toFixed(2):'N/A';
+  return '<div class="frank-ai-accord">'
+    +'<details><summary>Odds Comparison</summary><div class="frank-ai-accord-body"><div class="frank-ai-stat-grid">'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Selected side</div><div class="frank-ai-stat-v">'+p.side+' '+_frankOdds(p.odds)+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Other side</div><div class="frank-ai-stat-v">'+(opposite!=null?_frankOdds(opposite):'N/A')+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Source</div><div class="frank-ai-stat-v">'+_frankEsc(p.book||'Sportsbook line')+'</div></div>'
+    +'</div><div style="margin-top:7px">Only prices carried by the loaded NHL prop are shown. This is not a full multi-book screen unless the source provides those books.</div></div></details>'
+    +'<details open><summary>Hit Rate Chart</summary><div class="frank-ai-accord-body">'+_frankSplitTiles(p)+'</div></details>'
+    +'<details><summary>Line Movement</summary><div class="frank-ai-accord-body">Line movement is unavailable because the NHL app does not yet store timestamped opening and closing prices. No movement or sharp-money claim is generated.</div></details>'
+    +'<details><summary>Key Stats</summary><div class="frank-ai-accord-body"><div class="frank-ai-stat-grid">'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Projection</div><div class="frank-ai-stat-v">'+projection+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Recent average</div><div class="frank-ai-stat-v">'+avg+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">App probability</div><div class="frank-ai-stat-v">'+p.appProb.toFixed(1)+'%</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Implied probability</div><div class="frank-ai-stat-v">'+p.implied.toFixed(1)+'%</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Frank Edge</div><div class="frank-ai-stat-v" style="color:#4ade80">+'+p.edge.toFixed(2)+' pts</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Line</div><div class="frank-ai-stat-v">'+p.side+' '+p.line+'</div></div>'
+    +'</div></div></details>'
+    +'<details><summary>Player &amp; Team Stats</summary><div class="frank-ai-accord-body"><div class="frank-ai-stat-grid">'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Matchup</div><div class="frank-ai-stat-v">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Rest</div><div class="frank-ai-stat-v">'+(p.restDays!=null?p.restDays+' day'+(Number(p.restDays)===1?'':'s'):'N/A')+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Avg TOI</div><div class="frank-ai-stat-v">'+_frankToi(p.toiAvgSec)+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Avg PP TOI</div><div class="frank-ai-stat-v">'+_frankToi(p.ppToiAvgSec)+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Games last 7 days</div><div class="frank-ai-stat-v">'+(work.gamesLast7!=null?work.gamesLast7:'N/A')+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Travel / B2B</div><div class="frank-ai-stat-v">'+(schedule.travel?'Travel ':'')+(schedule.b2b?'B2B':(!schedule.travel?'No flag':''))+'</div></div>'
+    +'</div></div></details></div>';
+}
+function _frankRender(question,rows,totalPriced){
+  var q='<div class="frank-ai-question">'+_frankEsc(question)+'</div>';
+  if(!rows.length){
+    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">No loaded NHL prop matched that request with a real sportsbook price and a positive Frank Edge. Try removing the player, team, market, side, or odds restriction.</div></div></div>');
+    return;
+  }
+  var table=rows.map(function(p,i){
+    return '<tr><td>'+(i+1)+'</td><td><b>'+_frankEsc(p.player)+'</b><br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span></td>'
+      +'<td>'+_frankEsc(p.market)+'<br><b style="color:'+(p.side==='OVER'?'#4ade80':'#f87171')+'">'+p.side+' '+p.line+'</b></td>'
+      +'<td>'+_frankOdds(p.odds)+'</td><td>'+p.appProb.toFixed(1)+'%</td><td>'+p.implied.toFixed(1)+'%</td>'
+      +'<td class="frank-ai-edge">+'+p.edge.toFixed(2)+' pts</td></tr>';
+  }).join('');
+  var detail=rows.map(function(p,i){
+    return '<div class="frank-ai-play"><div class="frank-ai-play-title">'+(i+1)+'. '+_frankEsc(p.player)+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</div>'
+      +'<div class="frank-ai-play-copy">App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:#4ade80">+'+p.edge.toFixed(2)+' Frank Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
+      +_frankAccordions(p)+'</div>';
+  }).join('');
+  window.__FRANK_LAST_ROWS__=rows.slice();
+  _frankCommit('<div>'+q+'<div class="frank-ai-summary">I checked '+totalPriced+' priced props from the loaded board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.</div>'
+    +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>Frank Edge</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
+}
+function askFrankPreset(question){
+  var input=document.getElementById('frankAiInput');if(input)input.value=question;askFrank();
+}
+function askFrank(){
+  var input=document.getElementById('frankAiInput');
+  var question=String(input&&input.value||'').trim();
+  if(!question){if(input)input.focus();return;}
+  var props=_frankAllProps();
+  if(!props.length){
+    var el=document.getElementById('frankAiAnswer');
+    if(el){
+      _frankCommit('<div><div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">Load an NHL board with Get Picks first. Frank AI only analyzes generated props that have real sportsbook prices.</div></div></div>');
+    }
+    return;
+  }
+  var f=_frankParse(question,props);
+  var ql=question.toLowerCase();
+  var followup=(ql.indexOf('why')>=0||ql.indexOf('tell me more')>=0||ql.indexOf('number 1')>=0||ql.indexOf('first play')>=0);
+  if(followup&&window.__FRANK_LAST_ROWS__&&window.__FRANK_LAST_ROWS__[0]&&!f.players.length){
+    f.players=[String(window.__FRANK_LAST_ROWS__[0].player).toLowerCase()];
+    f.limit=1;
+  }
+  var rows=props.filter(function(p){
+    if(p.edge<=f.minEdge)return false;
+    if(f.side&&p.side!==f.side)return false;
+    if(f.market&&p.marketKey!==f.market)return false;
+    if(f.minOdds!=null&&(p.odds<f.minOdds||p.odds>f.maxOdds))return false;
+    if(f.players.length&&f.players.indexOf(String(p.player).toLowerCase())<0)return false;
+    if(f.teams.length){
+      var tm=String(p.team).toLowerCase(),op=String(p.opponent).toLowerCase();
+      if(f.teams.indexOf(tm)<0&&f.teams.indexOf(op)<0)return false;
+    }
+    return true;
+  });
+  rows.sort(function(a,b){return b.edge-a.edge||b.appProb-a.appProb;});
+  _frankRender(question,rows.slice(0,f.limit),props.length);
 }
 
 // Get Picks loads today's saved board, or builds a view-only replay for any past date.
@@ -6448,16 +6806,16 @@ async function preflightNhlOctober(){
   }catch(e){if(out)out.textContent=e.message||'Preflight failed';}
 }
 async function startNhlOctoberReplay(){
-  if(!confirm('Start the October 2025 NHL historical replay now? This will use Odds API quota for uncached dates.'))return;
-  var phrase=prompt('Type RUN OCTOBER 2025 to confirm the bounded replay.');
-  if(phrase!=='RUN OCTOBER 2025')return;
+  if(!confirm('Start the October–December 2025 A/B/C/D historical replay now? This will use Odds API quota for uncached dates.'))return;
+  var phrase=prompt('Type RUN A B C D OCT NOV DEC 2025 to confirm the bounded replay.');
+  if(phrase!=='RUN A B C D OCT NOV DEC 2025')return;
   var out=document.getElementById('nhlHistBatchStatus');
   try{
     var r=await fetch('/api/nhl/historical-batch/start?token='+_nhlHistAuth(),{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:phrase})
     });
     if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
-    if(out)out.textContent='October replay started.';
+    if(out)out.textContent='A/B/C/D October–December replay started.';
     pollNhlOctoberReplay();
   }catch(e){if(out)out.textContent=e.message||'Could not start replay';}
 }
@@ -6990,7 +7348,7 @@ _NHL_HIST_D_DETAIL_CAT = "__historical_analysis_d_detail__"
 _NHL_HIST_GP_CAT = "__historical_analysis_gp__"
 _NHL_HIST_ODDS_CAT = "__historical_odds_cache_v3__"
 _NHL_HIST_BATCH_START = "2025-10-07"
-_NHL_HIST_BATCH_END = "2025-10-31"
+_NHL_HIST_BATCH_END = "2025-12-31"
 
 
 def _nhl_load_historical_odds_cache(date_str: str):
@@ -8638,7 +8996,6 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
             "C Enhanced/selective" if replay_system == "C"
             else "D Top 6 forwards/4 defensemen"
         )
-        result["historicalSpecialRecord"] = None
         return JSONResponse(result)
     result["historicalTrackRecord"] = _nhl_historical_replay_payload(result)
     result["comparisonSystem"] = "A New/current"
@@ -9151,12 +9508,22 @@ async def _nhl_historical_batch_calendar() -> dict:
                 break
         if game_count:
             active.append({"date": ds, "games": game_count})
-    existing = {
-        row.get("date") for row in
-        _nhl_historical_analysis_payload().get("dates", [])
-        if row.get("date")
+    saved_by_system = {
+        system: {
+            row.get("date") for row in
+            _nhl_historical_analysis_payload(system).get("dates", [])
+            if row.get("date")
+        }
+        for system in ("A", "B", "C", "D")
     }
-    remaining = [row for row in active if row["date"] not in existing]
+    missing_odds = [
+        row["date"] for row in active
+        if not isinstance(_nhl_load_historical_odds_cache(row["date"]), dict)
+    ]
+    # This bounded refresh intentionally recalculates every active date for all
+    # four systems. Dates already fetched under the current durable odds-cache
+    # version are replayed from cache and do not repurchase archive responses.
+    remaining = list(active)
     total_games = sum(row["games"] for row in active)
     remaining_games = sum(row["games"] for row in remaining)
     return {
@@ -9166,10 +9533,10 @@ async def _nhl_historical_batch_calendar() -> dict:
         "saved_dates": len(active) - len(remaining),
         "remaining_dates": remaining,
         "remaining_game_count": remaining_games,
-        # One archive event-list lookup per date plus two isolated event odds
-        # lookups per game (goals stay separate so unavailable scorer markets
-        # cannot erase shots/points/assists/saves).
-        "estimated_http_requests": len(remaining) + (remaining_games * 2),
+        "missing_odds_cache_dates": missing_odds,
+        # One event-list lookup plus three isolated event odds calls per game:
+        # standard props, alternate milestones, and anytime goals.
+        "estimated_http_requests": len(remaining) + (remaining_games * 3),
         "markets": [
             "Shots on Goal", "Points", "Assists", "Goals", "Goalie Saves",
         ],
@@ -9186,7 +9553,8 @@ async def _nhl_run_historical_october_batch():
             _NHL_HIST_BATCH.update({
                 "status": "running", "completed": 0,
                 "total": len(remaining), "current_date": "",
-                "failed_dates": [], "message": "October replay running",
+                 "failed_dates": [],
+                 "message": "A/B/C/D October-December replay running",
                 "preflight": calendar,
             })
         for index, row in enumerate(remaining, 1):
@@ -9196,14 +9564,49 @@ async def _nhl_run_historical_october_batch():
                 _NHL_HIST_BATCH["message"] = (
                     f"Replaying {ds} ({index}/{len(remaining)})")
             try:
-                result = await run_picks(ds, simulate=True)
-                replay = result.get("historicalTrackRecord") or {}
-                if result.get("error") or result.get("no_games") or not replay:
+                a = await run_picks(
+                    ds, simulate=True, include_legacy_system=True,
+                    persist_historical_special=True, system="A")
+                replay_a = a.get("historicalTrackRecord") or {}
+                if a.get("error") or a.get("no_games") or not replay_a:
                     raise RuntimeError(
-                        result.get("error") or result.get("message")
+                        a.get("error") or a.get("message")
                         or "Replay payload was empty")
-                if not _nhl_save_historical_analysis(ds, replay):
-                    raise RuntimeError("Historical archive write failed")
+                if not _nhl_save_historical_analysis(ds, replay_a, system="A"):
+                    raise RuntimeError("A historical archive write failed")
+
+                b = dict(a)
+                legacy = a.get("legacySystem") or {}
+                b.update({
+                    key: list(value or [])
+                    for key, value in legacy.items()
+                })
+                b["system"] = "B"
+                b_replay = _nhl_comparison_replay(a, legacy=True)
+                if not _nhl_save_historical_analysis(ds, b_replay, system="B"):
+                    raise RuntimeError("B historical archive write failed")
+                _nhl_save_historical_special_snapshot(ds, b, system="B")
+                _nhl_update_historical_special_ledger(ds, system="B")
+
+                for replay_system in ("C", "D"):
+                    system_result = await run_picks(
+                        ds, simulate=True,
+                        persist_historical_special=True,
+                        historical_odds_cache_only=True,
+                        skip_game_predictor=True, system=replay_system)
+                    system_replay = (
+                        system_result.get("historicalTrackRecord") or {})
+                    if (system_result.get("error")
+                            or system_result.get("no_games")
+                            or not system_replay):
+                        raise RuntimeError(
+                            system_result.get("error")
+                            or system_result.get("message")
+                            or f"{replay_system} replay payload was empty")
+                    if not _nhl_save_historical_analysis(
+                            ds, system_replay, system=replay_system):
+                        raise RuntimeError(
+                            f"{replay_system} historical archive write failed")
             except Exception as exc:
                 logger.exception("NHL historical batch failed for %s", ds)
                 with _NHL_HIST_BATCH_LOCK:
@@ -9217,12 +9620,13 @@ async def _nhl_run_historical_october_batch():
                 "status": "completed_with_errors" if failures else "completed",
                 "current_date": "",
                 "message": (
-                    f"October replay finished with {failures} failed date(s)"
-                    if failures else "October replay finished"
+                    f"A/B/C/D October-December replay finished with "
+                    f"{failures} failed date(s)"
+                    if failures else "A/B/C/D October-December replay finished"
                 ),
             })
     except Exception as exc:
-        logger.exception("NHL historical October batch stopped")
+        logger.exception("NHL historical A/B/C/D batch stopped")
         with _NHL_HIST_BATCH_LOCK:
             _NHL_HIST_BATCH.update({
                 "status": "failed", "current_date": "",
@@ -9255,10 +9659,10 @@ async def nhl_historical_batch_start(request: Request, token: str = ""):
     if not _nhl_historical_batch_auth(request, token):
         raise HTTPException(status_code=403, detail="Admin only")
     body = await request.json()
-    if body.get("confirm") != "RUN OCTOBER 2025":
+    if body.get("confirm") != "RUN A B C D OCT NOV DEC 2025":
         raise HTTPException(
             status_code=400,
-            detail="Explicit October 2025 confirmation is required")
+            detail="Explicit A/B/C/D October-December confirmation is required")
     with _NHL_HIST_BATCH_LOCK:
         if _NHL_HIST_BATCH.get("status") == "running":
             raise HTTPException(status_code=409, detail="Batch already running")
@@ -9266,11 +9670,11 @@ async def nhl_historical_batch_start(request: Request, token: str = ""):
             "status": "starting", "start": _NHL_HIST_BATCH_START,
             "end": _NHL_HIST_BATCH_END, "completed": 0, "total": 0,
             "current_date": "", "failed_dates": [],
-            "message": "Preparing October schedule",
+            "message": "Preparing A/B/C/D October-December schedule",
         }
     _bt_th.Thread(
         target=_nhl_historical_batch_thread,
-        name="nhl-historical-october", daemon=True).start()
+        name="nhl-historical-abcd-october-december", daemon=True).start()
     return JSONResponse(dict(_NHL_HIST_BATCH))
 
 
@@ -9367,7 +9771,7 @@ async def _nhl_run_c_historical_batch():
                     f"Replaying C {ds} ({index}/{len(remaining)})")
             try:
                 result = await run_picks(
-                    ds, simulate=True, persist_historical_special=False,
+                    ds, simulate=True, persist_historical_special=True,
                     historical_odds_cache_only=True,
                     skip_game_predictor=True, system="C")
                 replay = result.get("historicalTrackRecord") or {}
@@ -9560,7 +9964,7 @@ async def _nhl_run_d_historical_batch():
                     f"Replaying D {ds} ({index}/{len(remaining)})")
             try:
                 result = await run_picks(
-                    ds, simulate=True, persist_historical_special=False,
+                    ds, simulate=True, persist_historical_special=True,
                     historical_odds_cache_only=True,
                     skip_game_predictor=True, system="D")
                 replay = result.get("historicalTrackRecord") or {}
