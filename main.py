@@ -4171,6 +4171,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
 .frank-ai-table{width:100%;border-collapse:collapse;font-size:.7rem;min-width:720px}
 .frank-ai-table th{background:#111;color:#9ca3af;text-align:left;padding:8px 9px;font-size:.59rem;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
 .frank-ai-table td{padding:9px;border-top:1px solid #222;color:#e5e7eb;vertical-align:top}
+.frank-ai-player-link{appearance:none;background:none;border:0;padding:0;color:#f8fafc;font:inherit;font-weight:900;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:rgba(251,146,60,.55);text-underline-offset:3px}
+.frank-ai-player-link:hover,.frank-ai-player-link:focus-visible{color:#fb923c;text-decoration-color:#fb923c;outline:none}
 .frank-ai-edge{color:#4ade80!important;font-weight:900}
 .frank-ai-play{margin-top:14px;background:#111;border:2px solid rgba(249,115,22,.42);border-left:5px solid #f97316;border-radius:12px;padding:12px 14px;box-shadow:0 5px 14px rgba(0,0,0,.34)}
 .frank-ai-play+.frank-ai-play{margin-top:18px}
@@ -4682,6 +4684,23 @@ function _frankCommit(html){
   el.innerHTML='<div class="frank-ai-history">'+html+'</div>';
   el.scrollTop=el.scrollHeight;
 }
+function _frankOpenPlayer(index){
+  var row=(window.__FRANK_LAST_ROWS__||[])[Number(index)];
+  if(!row)return;
+  var source=row.source&&row.source.name?row.source:null;
+  if(!source){
+    var directory=typeof _nhlPlayerDirectory==='function'?_nhlPlayerDirectory():[];
+    source=directory.find(function(p){
+      if(row.pid!=null&&p.pid!=null&&String(row.pid)===String(p.pid))return true;
+      return String(p.name||'').toLowerCase()===String(row.player||'').toLowerCase()
+        &&(!row.team||!p.team||String(p.team)===String(row.team));
+    })||null;
+  }
+  openNhlPlayerSummary(source||{
+    pid:row.pid,name:row.player,team:row.team,opponent:row.opponent,
+    homeRoad:row.homeRoad||(row.source&&row.source.homeRoad)||''
+  });
+}
 function _frankRate(p,split){
   var row=(p.splits||{})[split]||{};
   var rate=p.side==='UNDER'?row.underRate:row.overRate;
@@ -4742,14 +4761,14 @@ function _frankRender(question,rows,totalPriced,mode){
   }
   var table=rows.map(function(p,i){
     var sys=window.IS_ADMIN?'<span class="frank-ai-system-tag" style="color:#fb923c">'+_frankEsc(p.system||'A')+'</span>':'';
-    return '<tr><td>'+(i+1)+'</td><td><b>'+_frankEsc(p.player)+'</b>'+sys+'<br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span></td>'
+    return '<tr><td>'+(i+1)+'</td><td><button type="button" class="frank-ai-player-link" onclick="_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button>'+sys+'<br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span></td>'
       +'<td>'+_frankEsc(p.market)+'<br><b style="color:'+(p.side==='OVER'?'#4ade80':'#f87171')+'">'+p.side+' '+p.line+'</b></td>'
       +'<td>'+_frankOdds(p.odds)+'</td><td>'+p.appProb.toFixed(1)+'%</td><td>'+p.implied.toFixed(1)+'%</td>'
       +'<td class="frank-ai-edge" style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'!important">'+_frankSigned(p.edge)+' pts</td></tr>';
   }).join('');
   var detail=rows.map(function(p,i){
     var sys=window.IS_ADMIN?'<span class="frank-ai-system-tag" style="color:#fb923c">SYSTEM '+_frankEsc(p.system||'A')+'</span>':'';
-    return '<details class="frank-ai-play" open><summary class="frank-ai-play-title"><span>'+(i+1)+'. '+_frankEsc(p.player)+' '+sys+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</span></summary><div class="frank-ai-play-body">'
+    return '<details class="frank-ai-play" open><summary class="frank-ai-play-title"><span>'+(i+1)+'. <button type="button" class="frank-ai-player-link" onclick="event.stopPropagation();_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button> '+sys+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</span></summary><div class="frank-ai-play-body">'
       +'<div class="frank-ai-play-copy">'+(mode==='safe'?'<b style="color:#fbbf24">Safety rank: '+p.implied.toFixed(1)+'% sportsbook-implied probability.</b> ':'')+'App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' Coach Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
       +_frankAccordions(p)+'</div></details>';
   }).join('');
