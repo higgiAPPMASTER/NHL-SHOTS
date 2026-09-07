@@ -4286,7 +4286,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <input id="frankAiInput" class="frank-ai-input" type="text" placeholder="Example: Best positive edge shots props in TOR vs MTL from -200 to -500" onkeydown="if(event.key==='Enter')askFrank()"/>
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
-    <div class="frank-ai-note">Requires a loaded NHL board and a real price. Safest Bets ranks both sides by sportsbook-implied probability; Coach Edge compares the app probability with that implied probability. Model-only PP Points and plays without odds are excluded.</div>
+    <div class="frank-ai-note">Requires a loaded NHL board and a real price. Safest Bets uses only the exact side that qualified for the loaded board, keeps only positive Coach Edge, then ranks by sportsbook-implied probability. Model-only PP Points and plays without odds are excluded.</div>
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
 
@@ -4633,27 +4633,6 @@ function _frankSafestProps(props){
     var currentKey=String(p.player)+'|'+p.market+'|'+p.side+'|'+p.line+'|'+p.odds;
     if(!seen[currentKey]){seen[currentKey]=1;out.push(p);}
   });
-  (props||[]).forEach(function(p){
-    var opposite=_frankNumber(p.oppositeOdds);
-    if(opposite==null)return;
-    var otherSide=p.side==='OVER'?'UNDER':'OVER';
-    var otherKey=String(p.player)+'|'+p.market+'|'+otherSide+'|'+p.line+'|'+opposite;
-    if(seen[otherKey])return;
-    seen[otherKey]=1;
-    var other=Object.assign({},p,{
-      side:otherSide,
-      odds:Number(opposite),
-      oppositeOdds:p.odds,
-      implied:_frankImplied(opposite),
-      appProb:Math.max(0,Math.min(100,100-Number(p.appProb||0))),
-      recentRate:p.recentTotal>0?Math.max(0,100-Number(p.recentRate||0)):0,
-      recentHits:p.recentTotal>0?Math.max(0,Number(p.recentTotal)-Number(p.recentHits||0)):0,
-      oppRate:p.oppTotal>0?Math.max(0,100-Number(p.oppRate||0)):0,
-      oppHits:p.oppTotal>0?Math.max(0,Number(p.oppTotal)-Number(p.oppHits||0)):0
-    });
-    other.edge=other.appProb-other.implied;
-    out.push(other);
-  });
   return out;
 }
 function _frankParse(question,props){
@@ -4778,7 +4757,7 @@ function _frankRender(question,rows,totalPriced,mode){
   var summary=window.__NHL_ALT_COACH_ACTIVE__
     ?'I checked '+totalPriced+' genuinely priced NHL alternate-line candidates. Every result recomputes the exact alternate line from pregame NHL game-log evidence, has at least 85% app probability and 70% sportsbook-implied probability, and has positive Coach Edge. Each player keeps only their largest-edge side/line.'
     :mode==='safe'
-    ?'I checked both sides of the loaded priced props and ranked the matching plays by sportsbook-implied win probability. This is the safer-side list, not the highest Coach Edge list; heavily favored prices can require much more risk for a smaller return.'
+    ?'I checked only the exact sides that qualified for the loaded board, removed every zero or negative Coach Edge play, and ranked the remaining plays by sportsbook-implied win probability.'
     :'I checked '+totalPriced+' priced props from the loaded '+(window.IS_ADMIN?_frankSystemLabel(window.NHL_FRANK_SYSTEM||'A')+' ':'')+'board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.';
   _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div>'
     +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>Coach Edge</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
@@ -4850,7 +4829,9 @@ function askFrank(){
     f.limit=1;
   }
   var rows=candidates.filter(function(p){
-    if(f.mode!=='safe'&&p.edge<=f.minEdge)return false;
+    // Every Coach recommendation must be a positive-edge side that actually
+    // qualified for the loaded board. Never manufacture the opposite side.
+    if(p.edge<=f.minEdge)return false;
     if(window.__NHL_ALT_COACH_ACTIVE__&&(p.appProb<85||p.implied<70||p.edge<=0))return false;
     if(f.side&&p.side!==f.side)return false;
     if(f.market&&p.marketKey!==f.market)return false;
@@ -6312,8 +6293,10 @@ function _nhlTrackSystemButtonStyle(system){
 }
 function _nhlPaintTrackSystemButtons(){
   ['A','B','C','D'].forEach(function(system){
-    var b=document.getElementById('nhlTrkSystem'+system);
-    if(b)b.style.cssText=_nhlTrackSystemButtonStyle(system);
+    ['nhlTrkSystem','nhlOvfSystem'].forEach(function(prefix){
+      var b=document.getElementById(prefix+system);
+      if(b)b.style.cssText=_nhlTrackSystemButtonStyle(system);
+    });
   });
 }
 function _nhlUseTrackSystemData(data,system){
@@ -7393,10 +7376,10 @@ function _nhlCompareCell(stats){
     </div>
      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-4px 0 14px">
        <span style="color:#94a3b8;font-size:.7rem;font-weight:900;letter-spacing:.08em">SYSTEM</span>
-       <button onclick="_nhlSetTrackSystem('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">A · NEW</button>
-       <button class="admin-only" onclick="_nhlSetTrackSystem('B')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">B · OLD</button>
-       <button class="admin-only" onclick="_nhlSetTrackSystem('C')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">C · SELECTIVE</button>
-       <button class="admin-only" onclick="_nhlSetTrackSystem('D')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">D · TOP PLAYERS</button>
+       <button id="nhlOvfSystemA" onclick="_nhlSetTrackSystem('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">A · NEW</button>
+       <button class="admin-only" id="nhlOvfSystemB" onclick="_nhlSetTrackSystem('B')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">B · OLD</button>
+       <button class="admin-only" id="nhlOvfSystemC" onclick="_nhlSetTrackSystem('C')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">C · SELECTIVE</button>
+       <button class="admin-only" id="nhlOvfSystemD" onclick="_nhlSetTrackSystem('D')" style="background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:8px 13px;font-weight:900;cursor:pointer">D · TOP PLAYERS</button>
        <span style="color:#64748b;font-size:.68rem">same selected system as the main record</span>
      </div>
     <div id="nhlOvfSummary"></div>
