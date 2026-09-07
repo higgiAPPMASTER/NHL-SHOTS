@@ -62,6 +62,14 @@ MIN_GP        = 10    # minimum games played for valid average
 
 MIN_GAMES     = 2     # min games required for hit-rate calc
 RECENT_DAYS   = 14    # player must have a game within this many days to count as "playing today"
+LIVE_ALTERNATE_PROP_MARKETS = (
+    "player_shots_alternate",
+    "player_points_alternate",
+    "player_assists_alternate",
+    "player_total_saves_alternate",
+)
+_NHL_ALT_COACH_TTL = 2 * 3600
+_NHL_ALT_COACH_INFLIGHT: Dict[str, asyncio.Task] = {}
 HIT_THRESH         = 70.0  # % hit rate to qualify against the posted sportsbook line
 HIT_THRESH_PTS     = 60.0  # % hit rate to qualify for Points
 HIT_THRESH_PP      = 50.0  # % hit rate to qualify for model-only Power Play Points
@@ -1494,7 +1502,16 @@ async def get_shot_lines(
         # A past simulation could previously cache an empty live-endpoint
         # response. Do not let that stale miss prevent the new historical
         # player-prop lookup from running.
-        if not (date.fromisoformat(target_date) < date.today() and not cached_lines):
+        # Live alternate markets were added to this cached payload separately
+        # from board inputs.  Let a pre-change live cache refresh once so a
+        # normal run warms those genuine markets too; historical replay keeps
+        # its existing cache-only/request behavior unchanged.
+        cached_live_alternates = (
+            date.fromisoformat(target_date) >= date.today()
+            and "alternates" not in _oc
+        )
+        if (not cached_live_alternates
+                and not (date.fromisoformat(target_date) < date.today() and not cached_lines)):
             return (
                 cached_lines, _oc.get("pts", {}),
                 _oc.get("ast", {}), _oc.get("sv", {}),
@@ -1520,6 +1537,12 @@ async def get_shot_lines(
         ast_lines: Dict[str, Dict] = {}
         sv_lines: Dict[str, Dict] = {}
         goal_lines: Dict[str, Dict] = {}
+        # Alternate ladders are deliberately retained in a separate cache
+        # payload.  No current board reads them, which prevents an alternate
+        # point from changing a standard board's displayed line or analysis.
+        alternate_lines: Dict[str, Dict[str, Dict]] = {
+            market: {} for market in LIVE_ALTERNATE_PROP_MARKETS
+        }
         async with httpx.AsyncClient(timeout=20) as c:
             if date.fromisoformat(target_date) < date.today():
                 (lines, pts_lines, ast_lines, sv_lines,
@@ -1549,17 +1572,31 @@ async def get_shot_lines(
                 if not events:
                     continue
 
-                # Fetch all events' odds concurrently (main markets + goal scorer
-                # in parallel per event, then all events gathered at once).
+                # Fetch all events' odds concurrently. Alternate ladders use a
+                # distinct request and cache path, matching the historical
+                # loader's supported genuine keys without merging them into
+                # standard board inputs.
                 async def _fetch_ev_odds(ev):
-                    # Main O/U markets
-                    r2 = await c.get(
-                        f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                        params={"apiKey": api_key, "regions": "us,us2,eu,ca",
-                                "markets": ("player_shots_on_goal,player_points,"
-                                            "player_assists,player_total_saves"),
-                                "oddsFormat": "american"})
-                    if r2.status_code == 200:
+                    r2, ra, rg = await asyncio.gather(
+                        c.get(
+                            f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
+                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                                    "markets": ("player_shots_on_goal,player_points,"
+                                                "player_assists,player_total_saves"),
+                                    "oddsFormat": "american"}),
+                        c.get(
+                            f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
+                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                                    "markets": ",".join(LIVE_ALTERNATE_PROP_MARKETS),
+                                    "oddsFormat": "american"}),
+                        c.get(
+                            f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
+                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                                    "markets": "player_goal_scorer_anytime",
+                                    "oddsFormat": "american"}),
+                        return_exceptions=True,
+                    )
+                    if isinstance(r2, httpx.Response) and r2.status_code == 200:
                         targets = {
                             "player_shots_on_goal": lines,
                             "player_points":        pts_lines,
@@ -1587,43 +1624,78 @@ async def get_shot_lines(
                                         rec["odds"] = str(oc.get("price", ""))
                                     elif nm == "Under" and not rec["under_odds"]:
                                         rec["under_odds"] = str(oc.get("price", ""))
-                    # Anytime goal scorer — isolated call so a bad market never wipes main
-                    try:
-                        rg = await c.get(
-                            f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
-                                    "markets": "player_goal_scorer_anytime",
-                                    "oddsFormat": "american"})
-                        if rg.status_code == 200:
-                            for book in rg.json().get("bookmakers", []):
-                                for mkt in book.get("markets", []):
-                                    if mkt.get("key") != "player_goal_scorer_anytime":
+                    if isinstance(ra, httpx.Response) and ra.status_code == 200:
+                        for book in ra.json().get("bookmakers", []):
+                            for mkt in book.get("markets", []):
+                                alternate_target = alternate_lines.get(mkt.get("key"))
+                                if alternate_target is None:
+                                    continue
+                                book_name = book.get("title") or book.get("key") or "OddsAPI"
+                                for oc in mkt.get("outcomes", []):
+                                    nm = oc.get("name")
+                                    if nm not in ("Over", "Under"):
                                         continue
-                                    for oc in mkt.get("outcomes", []):
-                                        if oc.get("name") != "Yes":
-                                            continue
-                                        player = oc.get("description", "").strip()
-                                        if not player:
-                                            continue
-                                        rec = goal_lines.setdefault(player, {
-                                            "line": 0.5, "odds": "",
-                                            "under_odds": "", "source": "OddsAPI"})
-                                        if not rec["odds"]:
-                                            rec["odds"] = str(oc.get("price", ""))
-                    except Exception as _ge:
-                        print(f"[Lines] goal-scorer fetch skipped: {_ge}")
+                                    player = oc.get("description", "").strip()
+                                    try:
+                                        line = float(oc.get("point"))
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if not player or line <= 0:
+                                        continue
+                                    alternate_key = f"{player}|{line:g}"
+                                    rec = alternate_target.setdefault(alternate_key, {
+                                        "player": player,
+                                        "line": line, "odds": "",
+                                        "under_odds": "", "odds_book": "",
+                                        "under_book": "", "source": "OddsAPI (alternate)"})
+                                    price = oc.get("price")
+                                    try:
+                                        better = (
+                                            not rec["odds"] or float(price) > float(rec["odds"])
+                                            if nm == "Over"
+                                            else not rec["under_odds"] or float(price) > float(rec["under_odds"])
+                                        )
+                                    except (TypeError, ValueError):
+                                        better = False
+                                    if nm == "Over" and better:
+                                        rec["odds"] = str(price)
+                                        rec["odds_book"] = book_name
+                                    elif nm == "Under" and better:
+                                        rec["under_odds"] = str(price)
+                                        rec["under_book"] = book_name
+                    # Anytime goal scorer remains isolated from both standard
+                    # and alternate O/U player props.
+                    if isinstance(rg, httpx.Response) and rg.status_code == 200:
+                        for book in rg.json().get("bookmakers", []):
+                            for mkt in book.get("markets", []):
+                                if mkt.get("key") != "player_goal_scorer_anytime":
+                                    continue
+                                for oc in mkt.get("outcomes", []):
+                                    if oc.get("name") != "Yes":
+                                        continue
+                                    player = oc.get("description", "").strip()
+                                    if not player:
+                                        continue
+                                    rec = goal_lines.setdefault(player, {
+                                        "line": 0.5, "odds": "",
+                                        "under_odds": "", "source": "OddsAPI"})
+                                    if not rec["odds"]:
+                                        rec["odds"] = str(oc.get("price", ""))
 
                 await asyncio.gather(*[_fetch_ev_odds(ev) for ev in events])
 
-                if lines or pts_lines or ast_lines or sv_lines or goal_lines:
+                if (lines or pts_lines or ast_lines or sv_lines or goal_lines
+                        or any(alternate_lines.values())):
                     break  # found lines — no need to try next sport key
 
         print(f"[Lines] {len(lines)} shot | {len(pts_lines)} point | "
               f"{len(ast_lines)} assist | {len(sv_lines)} saves | {len(goal_lines)} goals lines from The Odds API")
-        if lines or pts_lines or ast_lines or sv_lines or goal_lines:
-                    _odds_cache_set("nhl_lineup_v4", target_date, {
+        if (lines or pts_lines or ast_lines or sv_lines or goal_lines
+                or any(alternate_lines.values())):
+            _odds_cache_set("nhl_lineup_v4", target_date, {
                 "lines": lines, "pts": pts_lines,
-                "ast": ast_lines, "sv": sv_lines, "goals": goal_lines})
+                "ast": ast_lines, "sv": sv_lines, "goals": goal_lines,
+                "alternates": alternate_lines})
         return lines, pts_lines, ast_lines, sv_lines, goal_lines
     except Exception as e:
         print(f"[Lines] Odds API error: {e}")
@@ -2482,6 +2554,222 @@ async def get_saves_picks(
         unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
     print(f"[SAVES] {len(picks)} goalies over | {len(unders)} unders")
     return picks, unders
+
+
+def _nhl_alt_coach_cache_get(date_key: str, system: str):
+    path = _CACHE_DIR / f"nhl_alt_coach_v1_{system}_{date_key}.json"
+    try:
+        if path.exists() and time.time() - path.stat().st_mtime < _NHL_ALT_COACH_TTL:
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[NHLAltCoach] cache read error: {exc}")
+    return None
+
+
+def _nhl_alt_coach_cache_set(date_key: str, system: str, payload: dict) -> None:
+    try:
+        (_CACHE_DIR / f"nhl_alt_coach_v1_{system}_{date_key}.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        print(f"[NHLAltCoach] cache write error: {exc}")
+
+
+def _nhl_alt_implied(odds) -> Optional[float]:
+    try:
+        american = float(str(odds).replace("+", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if not american:
+        return None
+    return round(
+        ((-american / (-american + 100)) if american < 0 else (100 / (american + 100))) * 100,
+        2,
+    )
+
+
+async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
+    """Evaluate only cached, genuinely priced live alternate NHL ladders.
+
+    This intentionally does not call run_picks: standard-board lines and their
+    probabilities must never leak into an alternate-line Coach result.
+    """
+    system = str(system or "A").upper()
+    cached = _nhl_alt_coach_cache_get(date_str, system)
+    if cached is not None:
+        return cached
+    games = await get_today_games(date_str)
+    if not games:
+        return {"date": date_str, "system": system, "picks": [],
+                "error": "No NHL games found for this date."}
+
+    # get_shot_lines owns the live alternate cache.  It safely refreshes an old
+    # nhl_lineup_v4 payload that predates the alternates field.
+    live_cache = _odds_cache_get("nhl_lineup_v4", date_str)
+    if not isinstance(live_cache, dict) or "alternates" not in live_cache:
+        await get_shot_lines(date_str, games)
+        live_cache = _odds_cache_get("nhl_lineup_v4", date_str)
+    alternates = (live_cache or {}).get("alternates") or {}
+    if not any(alternates.get(k) for k in LIVE_ALTERNATE_PROP_MARKETS):
+        return {"date": date_str, "system": system, "picks": [],
+                "error": "No genuine NHL alternate lines are currently available."}
+
+    sem = asyncio.Semaphore(SEM_NHL)
+    team_ctx = {}
+    for game in games:
+        team_ctx[game["homeTeam"]] = (game["awayTeam"], "H")
+        team_ctx[game["awayTeam"]] = (game["homeTeam"], "R")
+    skater_markets = {
+        "player_shots_alternate": ("shots", "Shots on Goal"),
+        "player_points_alternate": ("points", "Points (1+)"),
+        "player_assists_alternate": ("assists", "Assists (1+)"),
+    }
+    # Only names listed in the alternate cache establish pregame eligibility.
+    skater_names = {
+        rec.get("player", ""): rec
+        for market in skater_markets for rec in (alternates.get(market) or {}).values()
+        if isinstance(rec, dict) and rec.get("player")
+    }
+    goalie_names = {
+        rec.get("player", ""): rec
+        for rec in (alternates.get("player_total_saves_alternate") or {}).values()
+        if isinstance(rec, dict) and rec.get("player")
+    }
+    roster_values = await asyncio.gather(
+        *[get_roster(team, sem) for team in team_ctx], return_exceptions=True)
+    goalie_values = await asyncio.gather(
+        *[get_goalies(team, sem) for team in team_ctx], return_exceptions=True)
+    skaters = _lineup_filtered_rosters(
+        games, {t: r if isinstance(r, list) else [] for t, r in zip(team_ctx, roster_values)},
+        [skater_names], "skaters")
+    goalies = _lineup_filtered_rosters(
+        games, {t: r if isinstance(r, list) else [] for t, r in zip(team_ctx, goalie_values)},
+        [goalie_names], "goalies")
+
+    people = []
+    for team, players in skaters.items():
+        for player in players:
+            people.append((player, team, *team_ctx[team], "skater"))
+    for team, players in goalies.items():
+        for player in players:
+            people.append((player, team, *team_ctx[team], "goalie"))
+    if system == "D":
+        # D's published source is its top-player skater restriction; retain
+        # listed goalies, which are not part of that skater-only rule.
+        logs_for_d = await asyncio.gather(
+            *[_nhl_player_logs(p["id"], sem) for p, _, _, _, kind in people if kind == "skater"])
+        d_ids = {
+            p["id"] for rows in _nhl_d_eligible_rosters(
+                skaters, {p["id"]: logs for (p, _, _, _, kind), logs in zip(
+                    [x for x in people if x[4] == "skater"], logs_for_d)}, date_str).values()
+            for p in rows
+        }
+        people = [x for x in people if x[4] != "skater" or x[0]["id"] in d_ids]
+
+    log_results = await asyncio.gather(
+        *[_nhl_player_logs(p["id"], sem) for p, *_ in people], return_exceptions=True)
+    log_map = {p["id"]: logs if isinstance(logs, list) else []
+               for (p, *_), logs in zip(people, log_results)}
+    rows = []
+    for player, team, opponent, home_road, kind in people:
+        logs = _nhl_pre_game_logs(log_map.get(player["id"], []), date_str)
+        if not logs or not _played_recently(logs, date_str):
+            continue
+        for market, (stat_key, label) in skater_markets.items():
+            if kind != "skater":
+                continue
+            ladder = alternates.get(market) or {}
+            exact_lines = [rec for rec in ladder.values() if isinstance(rec, dict)
+                           and _match_odds_name(rec.get("player", ""), [player])]
+            for rec in exact_lines:
+                rows.extend(_nhl_alt_coach_exact_rows(
+                    player, team, opponent, home_road, logs, stat_key, label, rec, system, date_str))
+        if kind == "goalie":
+            for rec in (alternates.get("player_total_saves_alternate") or {}).values():
+                if isinstance(rec, dict) and _match_odds_name(rec.get("player", ""), [player]):
+                    rows.extend(_nhl_alt_coach_exact_rows(
+                        player, team, opponent, home_road, logs, "saves", "Goalie Saves",
+                        rec, system, date_str))
+    best = {}
+    for row in rows:
+        key = str(row["pid"])
+        if key not in best or (row["edge"], row["appProb"]) > (best[key]["edge"], best[key]["appProb"]):
+            best[key] = row
+    picks = sorted(best.values(), key=lambda r: (r["edge"], r["appProb"]), reverse=True)[:10]
+    payload = {"date": date_str, "system": system, "picks": picks, "lines": len(rows)}
+    _nhl_alt_coach_cache_set(date_str, system, payload)
+    return payload
+
+
+def _nhl_alt_coach_exact_rows(player, team, opponent, home_road, logs, stat_key,
+                              label, rec, system, target_date):
+    """Compute each side from this precise alternate point and its own odds."""
+    try:
+        line = float(rec.get("line"))
+    except (TypeError, ValueError):
+        return []
+    recent = [g for g in logs if g.get("homeRoad") == home_road and stat_key in g][:10]
+    versus = [g for g in recent if g.get("opponent") == opponent][:10]
+    if len(recent) < (C_MIN_SAMPLE if system == "C" else MIN_GAMES):
+        return []
+    out = []
+    for side, odds_key in (("OVER", "odds"), ("UNDER", "under_odds")):
+        odds = rec.get(odds_key)
+        implied = _nhl_alt_implied(odds)
+        if implied is None:  # never manufacture an absent side or price
+            continue
+        hit = lambda g: float(g.get(stat_key) or 0) > line if side == "OVER" else float(g.get(stat_key) or 0) < line
+        h3 = sum(hit(g) for g in recent)
+        h2 = sum(hit(g) for g in versus)
+        r3 = h3 / len(recent) * 100
+        r2 = h2 / len(versus) * 100 if versus else None
+        # Same H/A recent + H/A opponent evidence structure used by NHL props;
+        # C preserves its confidence-score source, while A/B/D retain hit rate.
+        if system == "C":
+            app_prob = ((_nhl_c_confidence_rate(h3, len(recent))
+                         + _nhl_c_confidence_rate(h2, len(versus))) / 2
+                        if len(versus) >= C_MIN_SAMPLE
+                        else _nhl_c_confidence_rate(h3, len(recent)))
+        else:
+            app_prob = ((r3 + r2) / 2 if r2 is not None and len(versus) >= MIN_GAMES else r3)
+        app_prob = round(app_prob, 1)
+        edge = round(app_prob - implied, 2)
+        if app_prob < 85 or implied < 70 or edge <= 0:
+            continue
+        avg = round(sum(float(g.get(stat_key) or 0) for g in recent) / len(recent), 2)
+        row = {
+            "player": player["name"], "pid": player["id"], "team": team, "opponent": opponent,
+            "market": label, "marketKey": _frank_market_key_py(label), "side": side,
+            "line": line, "odds": float(str(odds).replace("+", "")),
+            "book": rec.get("under_book" if side == "UNDER" else "odds_book")
+                    or rec.get("source", "OddsAPI (alternate)"),
+            "oppositeOdds": rec.get("odds" if side == "UNDER" else "under_odds"),
+            "appProb": app_prob, "implied": implied, "edge": edge, "isAlternate": True,
+            "recentRate": round(r3, 1), "recentHits": h3, "recentTotal": len(recent),
+            "oppRate": round(r2, 1) if r2 is not None else 0, "oppHits": h2,
+            "oppTotal": len(versus), "average": avg, "projection": avg,
+            "splits": _nhl_frank_splits(logs, stat_key, line, home_road, opponent, target_date),
+            "system": system, "source": {},
+        }
+        out.append(row)
+    return out
+
+
+def _frank_market_key_py(label: str) -> str:
+    return {"Shots on Goal": "shots", "Points (1+)": "points",
+            "Assists (1+)": "assists", "Goalie Saves": "saves"}.get(label, "")
+
+
+async def _warm_nhl_alt_coach(date_str: str, system: str) -> dict:
+    key = f"{date_str}|{system}"
+    task = _NHL_ALT_COACH_INFLIGHT.get(key)
+    if task is None or task.done():
+        task = asyncio.create_task(_build_nhl_alt_coach(date_str, system))
+        _NHL_ALT_COACH_INFLIGHT[key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _NHL_ALT_COACH_INFLIGHT.get(key) is task:
+            _NHL_ALT_COACH_INFLIGHT.pop(key, None)
 
 
 
@@ -3980,6 +4268,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
     <div class="frank-ai-presets">
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the highest positive edge plays from -200 to -1000')">Coach scan · -200 to -1000</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show me the safest bets')">Safest bets</button>
+      <button class="frank-ai-preset" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" style="border-color:#f59e0b;color:#fde68a">Best Alt-Line Edge Plays · Top 10</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge shots props?')">Best shots</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge goalie saves props?')">Best saves</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show only positive edge under plays')">Best unders</button>
@@ -4486,7 +4775,9 @@ function _frankRender(question,rows,totalPriced,mode){
       +_frankAccordions(p)+'</div></details>';
   }).join('');
   window.__FRANK_LAST_ROWS__=rows.slice();
-  var summary=mode==='safe'
+  var summary=window.__NHL_ALT_COACH_ACTIVE__
+    ?'I checked '+totalPriced+' genuinely priced NHL alternate-line candidates. Every result recomputes the exact alternate line from pregame NHL game-log evidence, has at least 85% app probability and 70% sportsbook-implied probability, and has positive Coach Edge. Each player keeps only their largest-edge side/line.'
+    :mode==='safe'
     ?'I checked both sides of the loaded priced props and ranked the matching plays by sportsbook-implied win probability. This is the safer-side list, not the highest Coach Edge list; heavily favored prices can require much more risk for a smaller return.'
     :'I checked '+totalPriced+' priced props from the loaded '+(window.IS_ADMIN?_frankSystemLabel(window.NHL_FRANK_SYSTEM||'A')+' ':'')+'board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.';
   _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div>'
@@ -4495,11 +4786,54 @@ function _frankRender(question,rows,totalPriced,mode){
 function askFrankPreset(question){
   var input=document.getElementById('frankAiInput');if(input)input.value=question;askFrank();
 }
+async function askNhlAltCoach(){
+  var btn=document.getElementById('nhlAltCoachBtn'),answer=document.getElementById('frankAiAnswer');
+  if(window.__NHL_ALT_COACH_ABORT__){
+    window.__NHL_ALT_COACH_ABORT__.abort();
+    delete window.__NHL_ALT_COACH_ABORT__;
+    if(btn){btn.disabled=false;btn.textContent='Best Alt-Line Edge Plays · Top 10';}
+    if(answer){answer.style.display='block';answer.innerHTML='<div class="frank-ai-summary">Alternate-line scan cancelled. Click the button again to retry.</div>';}
+    return;
+  }
+  var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},125000);
+  window.__NHL_ALT_COACH_ABORT__=controller;
+  if(btn){btn.disabled=false;btn.textContent='Cancel alternate-line scan';}
+  if(answer){answer.style.display='block';answer.innerHTML='<div class="frank-ai-summary">Fetching genuine sportsbook NHL alternate-line ladders and recomputing each exact line from pregame game logs. This can take up to two minutes on a cold start. Click the button again to cancel.</div>';}
+  try{
+    var token=localStorage.getItem('__mpa_token')||'',dateEl=document.getElementById('datePicker');
+    var selected=(dateEl&&dateEl.value)||new Date().toISOString().slice(0,10);
+    var system=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
+    var admin=new URLSearchParams(location.search).get('admin')||'';
+    var res=await fetch('/api/nhl/coach-alternates?date_str='+encodeURIComponent(selected)+'&system='+encodeURIComponent(system)+'&token='+encodeURIComponent(token)+'&admin='+encodeURIComponent(admin),{signal:controller.signal});
+    var data=await res.json();
+    if(!res.ok||data.error)throw new Error(data.detail||data.error||('HTTP '+res.status));
+    window.__NHL_ALT_COACH_ROWS__=data.picks||[];
+    if(!window.__NHL_ALT_COACH_ROWS__.length){
+      _frankCommit('<div><div class="frank-ai-question">Best Alt-Line Edge Plays · Top 10</div><div class="frank-ai-summary"><div class="frank-ai-empty">No genuine NHL alternate line currently meets all three safe-value gates: at least 85% app probability, at least 70% sportsbook-implied probability, and positive Coach Edge.</div></div></div>');
+      return;
+    }
+    window.__NHL_ALT_COACH_ACTIVE__=true;
+    var input=document.getElementById('frankAiInput');
+    if(input)input.value='Show the top 10 safe-value alternate-line plays at 85% model probability and 70% book probability or better';
+    askFrank();
+  }catch(e){
+    var msg=e&&e.name==='AbortError'
+      ?'The alternate-line scan was cancelled or exceeded two minutes. Click the button to retry.'
+      :(e.message||'Alternate-line scan failed.');
+    if(answer)answer.innerHTML='<div class="frank-ai-summary"><div class="frank-ai-empty">'+_frankEsc(msg)+'</div></div>';
+  }finally{
+    clearTimeout(timer);
+    if(window.__NHL_ALT_COACH_ABORT__===controller)delete window.__NHL_ALT_COACH_ABORT__;
+    window.__NHL_ALT_COACH_ACTIVE__=false;
+    if(btn){btn.disabled=false;btn.textContent='Best Alt-Line Edge Plays · Top 10';}
+  }
+}
 function askFrank(){
   var input=document.getElementById('frankAiInput');
   var question=String(input&&input.value||'').trim();
   if(!question){if(input)input.focus();return;}
-  var props=_frankAllProps();
+  var props=window.__NHL_ALT_COACH_ACTIVE__
+    ?(window.__NHL_ALT_COACH_ROWS__||[]):_frankAllProps();
   if(!props.length){
     var el=document.getElementById('frankAiAnswer');
     if(el){
@@ -4508,7 +4842,7 @@ function askFrank(){
     return;
   }
   var f=_frankParse(question,props);
-  var candidates=f.mode==='safe'?_frankSafestProps(props):props;
+  var candidates=window.__NHL_ALT_COACH_ACTIVE__?props:(f.mode==='safe'?_frankSafestProps(props):props);
   var ql=question.toLowerCase();
   var followup=(ql.indexOf('why')>=0||ql.indexOf('tell me more')>=0||ql.indexOf('number 1')>=0||ql.indexOf('first play')>=0);
   if(followup&&window.__FRANK_LAST_ROWS__&&window.__FRANK_LAST_ROWS__[0]&&!f.players.length){
@@ -4517,6 +4851,7 @@ function askFrank(){
   }
   var rows=candidates.filter(function(p){
     if(f.mode!=='safe'&&p.edge<=f.minEdge)return false;
+    if(window.__NHL_ALT_COACH_ACTIVE__&&(p.appProb<85||p.implied<70||p.edge<=0))return false;
     if(f.side&&p.side!==f.side)return false;
     if(f.market&&p.marketKey!==f.market)return false;
     if(f.minOdds!=null&&(p.odds<f.minOdds||p.odds>f.maxOdds))return false;
@@ -4530,7 +4865,7 @@ function askFrank(){
   rows.sort(f.mode==='safe'
     ?function(a,b){return b.implied-a.implied||b.appProb-a.appProb;}
     :function(a,b){return b.edge-a.edge||b.appProb-a.appProb;});
-  _frankRender(question,rows.slice(0,f.limit),candidates.length,f.mode);
+  _frankRender(question,rows.slice(0,window.__NHL_ALT_COACH_ACTIVE__?10:f.limit),candidates.length,f.mode);
 }
 
 // Get Picks loads today's saved board, or builds a view-only replay for any past date.
@@ -9033,6 +9368,31 @@ async def validate_dashboard_shell():
 async def index(admin: str = "", token: str = ""):
     is_admin = (bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__")) or _is_admin_token(token)
     return HTMLResponse(_render_dashboard_shell(is_admin))
+
+@app.get("/api/nhl/coach-alternates")
+async def api_nhl_coach_alternates(request: Request, date_str: str = "",
+                                   token: str = "", system: str = "A",
+                                   admin: str = ""):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    direct_admin = bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__")
+    if not (_verify_hub_token(tok) or direct_admin):
+        raise HTTPException(status_code=401, detail="Subscription required — please log in via moneypicksarena.com")
+    try:
+        selected_date = date.fromisoformat(date_str) if date_str else date.today()
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="A valid NHL date is required")
+    if selected_date < date.today():
+        raise HTTPException(status_code=400, detail="Alternate-line Coach scans are available for current and upcoming slates.")
+    selected_system = str(system or "A").upper()
+    if selected_system not in ("A", "B", "C", "D"):
+        raise HTTPException(status_code=400, detail="Coach system must be A, B, C, or D")
+    if selected_system != "A" and not (_is_admin_token(tok) or direct_admin):
+        selected_system = "A"
+    try:
+        return JSONResponse(await asyncio.wait_for(
+            _warm_nhl_alt_coach(selected_date.isoformat(), selected_system), timeout=120))
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="The alternate-line scan timed out after 2 minutes. Please try again; completed data will be reused from cache.")
 
 @app.get("/api/picks")
 async def api_picks(request: Request, target_date: str = None, token: str = "",
