@@ -4174,15 +4174,22 @@ body.is-admin .frank-ai-systems{display:flex!important}
 .frank-ai-player-link{appearance:none;background:none;border:0;padding:0;color:#f8fafc;font:inherit;font-weight:900;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:rgba(251,146,60,.55);text-underline-offset:3px}
 .frank-ai-player-link:hover,.frank-ai-player-link:focus-visible{color:#fb923c;text-decoration-color:#fb923c;outline:none}
 .frank-ai-edge{color:#4ade80!important;font-weight:900}
-.frank-ai-play{margin-top:14px;background:#111;border:2px solid rgba(249,115,22,.42);border-left:5px solid #f97316;border-radius:12px;padding:12px 14px;box-shadow:0 5px 14px rgba(0,0,0,.34)}
-.frank-ai-play+.frank-ai-play{margin-top:18px}
-.frank-ai-play-title{color:#fff;font-weight:900;font-size:.78rem}
-.frank-ai-play>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer}
+.frank-ai-play{margin-top:14px;background:#111;border:2px solid rgba(249,115,22,.3);border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.45);overflow:hidden;}
+.frank-ai-play+.frank-ai-play{margin-top:20px}
+.frank-ai-play-title{display:none}
+.frank-ai-play>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer;padding:16px 18px;border-bottom:1px solid #222}
 .frank-ai-play>summary::-webkit-details-marker{display:none}
-.frank-ai-play>summary:after{content:"Expand";flex:0 0 auto;color:#fb923c;font-size:.61rem;font-weight:900;text-transform:uppercase;letter-spacing:.05em}
-.frank-ai-play[open]>summary:after{content:"Collapse"}
-.frank-ai-play-body{margin-top:7px}
-.frank-ai-play-copy{color:#9ca3af;font-size:.68rem;line-height:1.45;margin-top:4px}
+.frank-ai-play>summary:after{content:"Details";flex:0 0 auto;color:#fdba74;border:1px solid rgba(251,146,60,.38);background:rgba(249,115,22,.1);border-radius:999px;padding:5px 8px;font-size:.55rem;font-weight:950;text-transform:uppercase;letter-spacing:.08em}
+.frank-ai-play[open]>summary:after{content:"Hide"}
+.frank-ai-play-body{padding:16px 18px 20px;background:#111}
+.frank-ai-play-copy{color:#9ca3af;font-size:.7rem;line-height:1.5;margin-top:0;margin-bottom:16px;}
+.frank-ai-player-face{position:relative;width:72px;height:72px;flex:0 0 auto;border-radius:50%;overflow:hidden;background:#222;display:flex;align-items:center;justify-content:center;}
+.frank-ai-player-face img{position:absolute;z-index:2;width:100%;height:100%;object-fit:cover;object-position:top;}
+.frank-ai-player-initials{color:#777;font-size:1.3rem;font-weight:900;position:absolute;z-index:1;}
+.frank-ai-metric-grid{display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;}
+.frank-ai-metric{flex:1;min-width:100px;background:#18181b;border:1px solid #27272a;border-radius:10px;padding:12px;text-align:center;}
+.frank-ai-metric-val{font-size:1.35rem;font-weight:900;line-height:1.1;}
+.frank-ai-metric-lbl{color:#71717a;font-size:.65rem;font-weight:900;text-transform:uppercase;margin-top:6px;letter-spacing:.06em;}
 .frank-ai-accord{margin-top:9px;border-top:1px solid #242424}
 .frank-ai-accord details{border-bottom:1px solid #242424}
 .frank-ai-accord summary{display:flex;justify-content:space-between;align-items:center;gap:10px;list-style:none;cursor:pointer;padding:9px 2px;color:#d1d5db;font-size:.68rem;font-weight:900}
@@ -4198,7 +4205,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
 .frank-ai-ratebar span{display:block;height:100%;background:#f97316;border-radius:999px}
 .frank-ai-history{display:flex;flex-direction:column;gap:14px}
 .frank-ai-empty{background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.24);color:#fca5a5;border-radius:10px;padding:11px 12px;font-size:.75rem;line-height:1.45}
-@media(max-width:620px){.frank-ai-head{display:block}.frank-ai-badge{display:inline-block;margin-top:9px}.frank-ai-row{display:block}.frank-ai-send{width:100%;padding:11px;margin-top:8px}.frank-ai-question{max-width:94%}.frank-ai-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){.frank-ai-head{display:block}.frank-ai-badge{display:inline-block;margin-top:9px}.frank-ai-row{display:block}.frank-ai-send{width:100%;padding:11px;margin-top:8px}.frank-ai-question{max-width:94%}.frank-ai-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.frank-ai-play-name-col>div:first-child{font-size:1.08rem!important}.frank-ai-play-side-col>div:first-child{font-size:1.32rem!important}.frank-ai-player-face{width:54px!important;height:54px!important}.frank-ai-play>summary{padding:12px!important;gap:7px}.frank-ai-play-summary-inner{gap:10px!important}.frank-ai-play>summary:after{display:none}.frank-ai-metric{min-width:82px;padding:10px 7px}.frank-ai-metric-val{font-size:1.15rem}}
 </style>
 <div id="nhl-mybets-card" style="display:none;max-width:960px;margin:0 auto 24px;padding:0 16px">
   <div class="card" style="padding:20px 22px">
@@ -4769,8 +4776,41 @@ function _frankRender(question,rows,totalPriced,mode){
   }).join('');
   var detail=rows.map(function(p,i){
     var sys=window.IS_ADMIN?'<span class="frank-ai-system-tag" style="color:#fb923c">'+_frankEsc(p.poolTag||((p.system||'A')+' T10'))+'</span>':'';
-    return '<details class="frank-ai-play" open><summary class="frank-ai-play-title"><span>'+(i+1)+'. <button type="button" class="frank-ai-player-link" onclick="event.stopPropagation();_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button> '+sys+' '+p.side+' '+p.line+' '+_frankEsc(p.market)+' ('+_frankOdds(p.odds)+')</span></summary><div class="frank-ai-play-body">'
-      +'<div class="frank-ai-play-copy">'+(mode==='safe'?'<b style="color:#fbbf24">Safety rank: '+p.implied.toFixed(1)+'% sportsbook-implied probability.</b> ':'')+'App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' Coach Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
+    var head='https://assets.nhle.com/mugs/nhl/'+(window.__NHL_SEASON__||'20252026')+'/'+(p.team||'')+'/'+(p.source?p.source.pid:p.pid||'')+'.png';
+    var initialStr=_nhlSafe(_initials(p.player));
+    var sideColor = p.side === 'OVER' ? '#10b981' : '#f43f5e';
+    var sideBg = p.side === 'OVER' ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)';
+    return '<details class="frank-ai-play" open><summary style="background:linear-gradient(to right, '+sideBg+', transparent);">'
+      + '<div class="frank-ai-play-summary-inner" style="display:flex;align-items:center;gap:16px;flex:1;min-width:0;">'
+      + '<div class="frank-ai-player-face" style="border:2px solid '+sideColor+';">'
+      + '<span class="frank-ai-player-initials">'+initialStr+'</span>'
+      + '<img src="'+_nhlSafe(head)+'" onerror="this.style.display=\\'none\\'" />'
+      + '</div>'
+      + '<div class="frank-ai-play-name-col" style="flex:1;min-width:0;">'
+      + '<div style="font-size:1.4rem;font-weight:900;color:#fff;line-height:1.1;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:Georgia,serif;"><span style="color:#64748b;font-size:1rem;margin-right:6px;">'+(i+1)+'.</span><button type="button" class="frank-ai-player-link" onclick="event.stopPropagation();_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button> '+sys+'</div>'
+      + '<div style="color:#94a3b8;font-size:0.85rem;font-weight:700;">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</div>'
+      + '</div>'
+      + '<div class="frank-ai-play-side-col" style="text-align:right;flex:0 0 auto;">'
+      + '<div style="font-size:1.8rem;font-weight:900;color:'+sideColor+';line-height:1;margin-bottom:4px;white-space:nowrap;">'+p.side+' '+p.line+'</div>'
+      + '<div style="color:#e2e8f0;font-size:0.8rem;font-weight:800;text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap;">'+_frankEsc(p.market)+'</div>'
+      + '</div>'
+      + '</div>'
+      + '</summary><div class="frank-ai-play-body">'
+      + '<div class="frank-ai-metric-grid">'
+      + '<div class="frank-ai-metric">'
+      + '<div class="frank-ai-metric-val" style="color:#fbbf24">'+_frankOdds(p.odds)+'</div>'
+      + '<div class="frank-ai-metric-lbl">Odds</div>'
+      + '</div>'
+      + '<div class="frank-ai-metric">'
+      + '<div class="frank-ai-metric-val" style="color:#e2e8f0">'+p.appProb.toFixed(1)+'%</div>'
+      + '<div class="frank-ai-metric-lbl">App Prob</div>'
+      + '</div>'
+      + '<div class="frank-ai-metric">'
+      + '<div class="frank-ai-metric-val" style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' pts</div>'
+      + '<div class="frank-ai-metric-lbl">Coach Edge</div>'
+      + '</div>'
+      + '</div>'
+      + '<div class="frank-ai-play-copy">'+(mode==='safe'?'<b style="color:#fbbf24">Safety rank: '+p.implied.toFixed(1)+'% sportsbook-implied probability.</b> ':'')+'App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' Coach Edge points</b>. '+_frankEsc(_frankEvidence(p))+'.</div>'
       +_frankAccordions(p)+'</div></details>';
   }).join('');
   window.__FRANK_LAST_ROWS__=rows.slice();
