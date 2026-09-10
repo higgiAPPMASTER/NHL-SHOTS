@@ -4531,6 +4531,10 @@ function _frankRawForSystem(system){
   var current=window.__NHL_RAW__||{};
   if(!window.IS_ADMIN)return current;
   var currentDate=String(current.date||window.__NHL_DATE__||'');
+  // The system currently rendered on screen is the authoritative Coach source.
+  // Prefer it over same-date multi-system caches so Coach cannot recommend a
+  // player who is absent from the published Top 10 and Overflow lists on screen.
+  if(String(current.system||'A').toUpperCase()===system)return current;
   var live=String(window.__NHL_SYSTEM_RESULTS_DATE__||'')===currentDate
     ?(window.__NHL_SYSTEM_RESULTS__||{})[system]:null;
   if(live)return live;
@@ -4538,7 +4542,6 @@ function _frankRawForSystem(system){
   var historical=String(histAll.date||'')===currentDate
     ?((histAll.systems||{})[system]):null;
   if(historical)return historical;
-  if(String(current.system||'A').toUpperCase()===system)return current;
   if(system==='B'&&current.legacySystem){
     var legacy=Object.assign({},current);
     Object.keys(current.legacySystem||{}).forEach(function(key){legacy[key]=(current.legacySystem||{})[key];});
