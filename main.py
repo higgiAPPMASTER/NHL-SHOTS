@@ -4015,7 +4015,7 @@ body.is-admin #parlayCard{display:block}
 .pick-card.acc-ast .pc-mkt{color:#c4b5fd;border-color:rgba(167,139,250,.5);background:rgba(167,139,250,.12);text-shadow:0 0 9px rgba(167,139,250,.3)}
 .pick-card.acc-sv .pc-mkt{color:#6ee7b7;border-color:rgba(52,211,153,.5);background:rgba(52,211,153,.12);text-shadow:0 0 9px rgba(52,211,153,.3)}
 .pick-card.acc-goals .pc-mkt{color:#6ee7b7;border-color:rgba(52,211,153,.5);background:rgba(52,211,153,.12);text-shadow:0 0 9px rgba(52,211,153,.3)}
-.pc-tagrow{min-height:1px;margin-bottom:8px}
+.pc-tagrow{min-height:1px;margin-bottom:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .pc-line-row{display:flex;align-items:center;justify-content:space-between;background:#0e0e0e;border:1px solid #242424;border-radius:10px;padding:8px 12px;margin-bottom:10px}
 .pc-line-row .ln{font-weight:900;color:#4ade80;font-size:1.05rem}
 .pc-line-row .od{color:#6b7280;font-size:.76rem}
@@ -4269,13 +4269,24 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <div class="frank-ai-badge">NO INVENTED PLAYS</div>
     </div>
     <div class="frank-ai-presets">
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the highest positive edge plays from -200 to -1000')">Coach scan · -200 to -1000</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show me the safest bets')">Safest bets</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays from -200 to -1000')">Coach Edge · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show me the top 10 safest bets')">Safest Bets · Top 10</button>
       <button class="frank-ai-preset" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" style="border-color:#f59e0b;color:#fde68a">Best Alt-Line Edge Plays · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge shots props?')">Best shots</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('What are the best positive edge goalie saves props?')">Best saves</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show only positive edge under plays')">Best unders</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')">Top 3</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')">Top 3 Plays</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge over plays')">Best Overs · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge under plays')">Best Unders · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge shots over props')">Shots Overs</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge shots under props')">Shots Unders</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge points over props')">Points Overs</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge points under props')">Points Unders</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge power play points over props')">PP Points Overs</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge power play points under props')">PP Points Unders</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge assists over props')">Assists Overs</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge assists under props')">Assists Unders</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge goals over props')">Goals Overs</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge goals under props')">Goals Unders</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge goalie saves over props')">Saves Overs</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge goalie saves under props')">Saves Unders</button>
     </div>
     <div class="frank-ai-systems admin-only" id="frankAiSystems">
       <span style="color:#94a3b8;font-size:.65rem;font-weight:900;text-transform:uppercase;letter-spacing:.09em">Coach source</span>
@@ -4321,6 +4332,28 @@ body.is-admin .frank-ai-systems{display:flex!important}
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="SAVES_U" checked onchange="_nhlParlayCatChanged()"> Goalie Saves — UNDER</label>
         </div>
       </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;max-width:540px;margin:14px auto">
+      <details style="border:1px solid rgba(59,130,246,.38);border-radius:10px;background:#111827;text-align:left">
+        <summary style="display:flex;justify-content:space-between;gap:8px;padding:11px 12px;color:#7dd3fc;font-size:.72rem;font-weight:900;cursor:pointer;list-style:none">
+          <span>CHOOSE GAMES</span><span id="nhlParlayGamesSummary" style="color:#94a3b8;font-size:.64rem">Run picks to load games</span>
+        </summary>
+        <div style="border-top:1px solid rgba(59,130,246,.22);padding:9px 11px">
+          <div style="text-align:right;margin-bottom:6px"><button type="button" onclick="_nhlParlayGameSetAll(true)" style="background:none;border:0;color:#5eead4;cursor:pointer;font-weight:900">All</button><button type="button" onclick="_nhlParlayGameSetAll(false)" style="background:none;border:0;color:#fb7185;cursor:pointer;font-weight:900">None</button></div>
+          <div id="nhlParlayGames" style="max-height:220px;overflow:auto"><div style="color:#64748b;font-size:.72rem">Run today&#39;s picks to load games.</div></div>
+        </div>
+      </details>
+      <details style="border:1px solid rgba(34,197,94,.35);border-radius:10px;background:#111827;text-align:left">
+        <summary style="display:flex;justify-content:space-between;gap:8px;padding:11px 12px;color:#86efac;font-size:.72rem;font-weight:900;cursor:pointer;list-style:none">
+          <span>COACH CATEGORIES</span><span id="nhlParlayCoachSummary" style="color:#94a3b8;font-size:.64rem">18/18</span>
+        </summary>
+        <div style="border-top:1px solid rgba(34,197,94,.2);padding:9px 11px">
+          <div style="text-align:right;margin-bottom:6px"><button type="button" onclick="_nhlParlayCoachSetAll(true)" style="background:none;border:0;color:#5eead4;cursor:pointer;font-weight:900">All</button><button type="button" onclick="_nhlParlayCoachSetAll(false)" style="background:none;border:0;color:#fb7185;cursor:pointer;font-weight:900">None</button></div>
+          <div id="nhlParlayCoachCats" style="max-height:260px;overflow:auto"></div>
+        </div>
+      </details>
+    </div>
+    <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap">
       <button class="btn-run" onclick="buildParlay()">Build Best Parlay</button>
       <button class="btn-run" onclick="generateParlay()" style="background:#7c3aed;box-shadow:0 4px 14px rgba(124,58,237,.28)">🎲 Generate New</button>
     </div>
@@ -4393,13 +4426,83 @@ function _fmtOdds(o){if(o==null||o==='')return null;var s=String(o).trim();if(!s
 function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(odds);if(isNaN(a)||a===0)return true;return a>=-500;}
 function _legScore(c){return (c.hasOdds?1:0)*1e9+(c.rate||0)*1e4+(c.dec?Math.min(c.dec,11)*100:0);}
 window.NHL_PARLAY_CATS = {SHOTS_O:true,SHOTS_U:true,POINTS_O:true,POINTS_U:true,ASSISTS_O:true,ASSISTS_U:true,GOALS_O:true,GOALS_U:true,SAVES_O:true,SAVES_U:true};
+window.NHL_PARLAY_GAMES=window.NHL_PARLAY_GAMES||{};
+var _NHL_PARLAY_COACH_CATS=[
+  {key:'coach_edge',label:'Coach Edge — Top 10'},{key:'safest_bets',label:'Safest Bets — Top 10'},
+  {key:'alt_line_edge',label:'Best Alt-Line Edge — Top 10'},{key:'top_3',label:'Top 3 Plays'},
+  {key:'best_overs',label:'Best Overs — Top 10'},{key:'best_unders',label:'Best Unders — Top 10'},
+  {key:'shots_over',label:'Best Shots Overs'},{key:'shots_under',label:'Best Shots Unders'},
+  {key:'points_over',label:'Best Points Overs'},{key:'points_under',label:'Best Points Unders'},
+  {key:'pp_over',label:'Best PP Points Overs'},{key:'pp_under',label:'Best PP Points Unders'},
+  {key:'assists_over',label:'Best Assists Overs'},{key:'assists_under',label:'Best Assists Unders'},
+  {key:'goals_over',label:'Best Goals Overs'},{key:'goals_under',label:'Best Goals Unders'},
+  {key:'saves_over',label:'Best Saves Overs'},{key:'saves_under',label:'Best Saves Unders'}
+];
+window.NHL_PARLAY_COACH_CATS=window.NHL_PARLAY_COACH_CATS||{};
+_NHL_PARLAY_COACH_CATS.forEach(function(c){if(!(c.key in window.NHL_PARLAY_COACH_CATS))window.NHL_PARLAY_COACH_CATS[c.key]=true;});
 function _nhlParlayCatCount(){var n=0,t=0;for(var k in window.NHL_PARLAY_CATS){t++;if(window.NHL_PARLAY_CATS[k])n++;}return n+'/'+t;}
 function _paintNhlParlayCatBtn(){var b=document.getElementById('nhl-parlay-cats-btn');if(b)b.innerHTML='&#9776; Categories ('+_nhlParlayCatCount()+') &#9662;';}
 function toggleNhlCatMenu(e){if(e)e.stopPropagation();var m=document.getElementById('nhl-parlay-cats-menu');if(m)m.style.display=m.style.display==='block'?'none':'block';}
 function _syncNhlParlayCats(){var cbs=document.querySelectorAll('.nhl-parlay-cat-cb');for(var i=0;i<cbs.length;i++)window.NHL_PARLAY_CATS[cbs[i].value]=cbs[i].checked;}
 function _nhlParlayCatChanged(){_syncNhlParlayCats();_paintNhlParlayCatBtn();if((document.getElementById('parlayResult').innerHTML||'').trim())buildParlay();}
 function _nhlParlayCatSetAll(v){var cbs=document.querySelectorAll('.nhl-parlay-cat-cb');for(var i=0;i<cbs.length;i++)cbs[i].checked=v;_nhlParlayCatChanged();}
-document.addEventListener('DOMContentLoaded',function(){_syncNhlParlayCats();_paintNhlParlayCatBtn();});
+function _nhlParlayGameKey(team,opp){return [String(team||'').toUpperCase(),String(opp||'').toUpperCase()].sort().join('|');}
+function _nhlParlayLoadedGames(){
+  var seen={},games=[];
+  (window.__NHL_PLAYS__||[]).forEach(function(p){
+    if(!p||!p.team||!p.opponent)return;
+    var key=_nhlParlayGameKey(p.team,p.opponent);
+    if(seen[key])return;seen[key]=1;games.push({key:key,label:String(p.team)+' vs '+String(p.opponent)});
+  });
+  return games.sort(function(a,b){return a.label.localeCompare(b.label);});
+}
+function _nhlParlayGameOn(team,opp){return window.NHL_PARLAY_GAMES[_nhlParlayGameKey(team,opp)]!==false;}
+function _nhlParlayGameSummary(){
+  var games=_nhlParlayLoadedGames(),selected=games.filter(function(g){return window.NHL_PARLAY_GAMES[g.key]!==false;}).length;
+  var el=document.getElementById('nhlParlayGamesSummary');if(!el)return;
+  el.textContent=!games.length?'Run picks to load games':selected===games.length?'All '+games.length+' selected':selected===0?'None selected':selected+' of '+games.length+' selected';
+}
+function _nhlParlayGameChanged(cb){
+  window.NHL_PARLAY_GAMES[decodeURIComponent(cb.getAttribute('data-key')||'')]=!!cb.checked;
+  _nhlParlayGameSummary();
+  var out=document.getElementById('parlayResult');if(out&&(out.innerHTML||'').trim())buildParlay();
+}
+function _nhlParlayGameSetAll(value){
+  _nhlParlayLoadedGames().forEach(function(g){window.NHL_PARLAY_GAMES[g.key]=!!value;});
+  _renderNhlParlayGames();
+  var out=document.getElementById('parlayResult');if(out&&(out.innerHTML||'').trim())buildParlay();
+}
+function _renderNhlParlayGames(){
+  var games=_nhlParlayLoadedGames(),box=document.getElementById('nhlParlayGames');if(!box)return;
+  games.forEach(function(g){if(!(g.key in window.NHL_PARLAY_GAMES))window.NHL_PARLAY_GAMES[g.key]=true;});
+  box.innerHTML=games.length?games.map(function(g){
+    return '<label style="display:flex;gap:8px;align-items:center;padding:6px 2px;color:#d1d5db;font-size:.75rem;cursor:pointer"><input type="checkbox" data-key="'+encodeURIComponent(g.key)+'"'+(window.NHL_PARLAY_GAMES[g.key]!==false?' checked':'')+' onchange="_nhlParlayGameChanged(this)"> <span>'+_nhlSafe(g.label)+'</span></label>';
+  }).join(''):'<div style="color:#64748b;font-size:.72rem">Run today&#39;s picks to load games.</div>';
+  _nhlParlayGameSummary();
+}
+function _nhlParlayCoachOn(key){return window.NHL_PARLAY_COACH_CATS[key]!==false;}
+function _nhlParlayCoachSummary(){
+  var selected=_NHL_PARLAY_COACH_CATS.filter(function(c){return _nhlParlayCoachOn(c.key);}).length;
+  var el=document.getElementById('nhlParlayCoachSummary');if(el)el.textContent=selected+'/'+_NHL_PARLAY_COACH_CATS.length;
+}
+function _nhlParlayCoachChanged(cb){
+  window.NHL_PARLAY_COACH_CATS[decodeURIComponent(cb.getAttribute('data-key')||'')]=!!cb.checked;
+  _nhlParlayCoachSummary();
+  var out=document.getElementById('parlayResult');if(out&&(out.innerHTML||'').trim())buildParlay();
+}
+function _nhlParlayCoachSetAll(value){
+  _NHL_PARLAY_COACH_CATS.forEach(function(c){window.NHL_PARLAY_COACH_CATS[c.key]=!!value;});
+  _renderNhlParlayCoachCats();
+  var out=document.getElementById('parlayResult');if(out&&(out.innerHTML||'').trim())buildParlay();
+}
+function _renderNhlParlayCoachCats(){
+  var box=document.getElementById('nhlParlayCoachCats');if(!box)return;
+  box.innerHTML=_NHL_PARLAY_COACH_CATS.map(function(c){
+    return '<label style="display:flex;gap:8px;align-items:center;padding:6px 2px;color:#d1d5db;font-size:.75rem;cursor:pointer"><input type="checkbox" data-key="'+encodeURIComponent(c.key)+'"'+(_nhlParlayCoachOn(c.key)?' checked':'')+' onchange="_nhlParlayCoachChanged(this)"> <span>'+_nhlSafe(c.label)+'</span></label>';
+  }).join('');
+  _nhlParlayCoachSummary();
+}
+document.addEventListener('DOMContentLoaded',function(){_syncNhlParlayCats();_paintNhlParlayCatBtn();_renderNhlParlayGames();_renderNhlParlayCoachCats();});
 function _nhlLeg(p){
   var market=p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
   var line=p.realLine;
@@ -4409,20 +4512,72 @@ function _nhlLeg(p){
     ?(p.underRate||p.underRateAny||p.underRateVo||0)
     :(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
   var odds=dir==='UNDER'?(p.realUnderOdds||''):(p.realOdds||'');var dec=_amToDec(odds);
-  return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec};
+  return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec,source:'normal'};
 }
 function _nhlParlayCatKey(c){
   var base={'Shots on Goal':'SHOTS','Points (1+)':'POINTS','Assists (1+)':'ASSISTS','Goals (1+)':'GOALS','Goalie Saves':'SAVES'}[c.market]||'SHOTS';
   return base+(c.dir==='UNDER'?'_U':'_O');
 }
+function _nhlCoachParlayCandidates(){
+  if(typeof _frankAllProps!=='function')return [];
+  function select(rows,sorter,limit){
+    var seen={};
+    return rows.slice().sort(sorter).filter(function(p){
+      var key=String(p.player||'').trim().toLowerCase();
+      if(!key||seen[key])return false;seen[key]=1;return true;
+    }).slice(0,limit||10);
+  }
+  function leg(p,isAlternate){
+    var odds=Number(p.odds),dec=_amToDec(odds);
+    return {player:p.player,playerKey:String((p.source&&p.source.pid)||p.pid||p.player||''),team:p.team||'',opp:p.opponent||'',
+      market:p.market||'NHL Prop',dir:p.side,line:p.line,rate:Math.round(Number(p.appProb||0)),odds:odds,dec:dec,
+      hasOdds:!!dec,edge:Number(p.edge||0),isAlternate:!!isAlternate,source:'coach',coachCats:[]};
+  }
+  var positive=_frankAllProps().filter(function(p){
+    return p.edge>0&&_floorOk(p.odds)&&_nhlParlayGameOn(p.team,p.opponent);
+  });
+  var byEdge=function(a,b){return b.edge-a.edge||b.appProb-a.appProb;};
+  var bySafe=function(a,b){return b.implied-a.implied||b.appProb-a.appProb;};
+  var pools={
+    coach_edge:select(positive.filter(function(p){return p.odds>=-1000&&p.odds<=-200;}),byEdge,10),
+    safest_bets:select(positive,bySafe,10),
+    top_3:select(positive,byEdge,3),
+    best_overs:select(positive.filter(function(p){return p.side==='OVER';}),byEdge,10),
+    best_unders:select(positive.filter(function(p){return p.side==='UNDER';}),byEdge,10)
+  };
+  ['shots','points','pp','assists','goals','saves'].forEach(function(market){
+    ['OVER','UNDER'].forEach(function(side){
+      pools[market+'_'+side.toLowerCase()]=select(positive.filter(function(p){return p.marketKey===market&&p.side===side;}),byEdge,10);
+    });
+  });
+  pools.alt_line_edge=(window.__NHL_ALT_COACH_ROWS__||[]).filter(function(p){
+    return p&&p.edge>0&&Number(p.appProb)>=85&&Number(p.implied)>=70&&_floorOk(p.odds)&&_nhlParlayGameOn(p.team,p.opponent);
+  }).slice(0,10);
+  var merged={};
+  Object.keys(pools).forEach(function(cat){
+    pools[cat].forEach(function(p){
+      var c=leg(p,cat==='alt_line_edge'),key=[c.player,c.market,c.dir,c.line,c.odds].join('|');
+      if(!c.player||!c.dir||!c.hasOdds)return;
+      if(!merged[key])merged[key]=c;
+      if(merged[key].coachCats.indexOf(cat)<0)merged[key].coachCats.push(cat);
+    });
+  });
+  return Object.keys(merged).map(function(key){return merged[key];});
+}
 function _parlayPool(){
-  var plays=window.__NHL_PLAYS__||[];var byP={};
+  var plays=window.__NHL_PLAYS__||[],normal=[],byP={};
   plays.forEach(function(p){
     if(!p||!p.name)return;
     var c=_nhlLeg(p);
     if(!c)return;
     if(window.NHL_PARLAY_CATS&&window.NHL_PARLAY_CATS[_nhlParlayCatKey(c)]===false)return;
+    if(!_nhlParlayGameOn(c.team,c.opp))return;
     if(!_floorOk(c.odds))return;
+    normal.push(c);
+  });
+  normal.concat(_nhlCoachParlayCandidates()).filter(function(c){
+    return c.source!=='coach'||(c.coachCats||[]).some(function(cat){return _nhlParlayCoachOn(cat);});
+  }).forEach(function(c){
     var cur=byP[c.playerKey];
     if(!cur||_legScore(c)>_legScore(cur))byP[c.playerKey]=c;
   });
@@ -4441,9 +4596,14 @@ function _renderParlay(randomize){
   if(!out)return;
   _syncNhlParlayCats();
   var anyCat=false;for(var cat in window.NHL_PARLAY_CATS){if(window.NHL_PARLAY_CATS[cat]){anyCat=true;break;}}
-  if(!anyCat){out.innerHTML='<div style="color:#f87171;padding:10px">Pick at least one category from the Categories menu.</div>';return;}
+  var anyCoach=_NHL_PARLAY_COACH_CATS.some(function(cat){return _nhlParlayCoachOn(cat.key);});
+  if(!anyCat&&!anyCoach){out.innerHTML='<div style="color:#f87171;padding:10px">Pick at least one normal or Coach category.</div>';return;}
   var cands=_parlayPool();
-  if(!cands.length){out.innerHTML='<div style="color:#888;padding:10px">Run today&#39;s picks first, then build a parlay.</div>';return;}
+  if(!cands.length){
+    var loadedGames=_nhlParlayLoadedGames(),selectedGames=loadedGames.filter(function(g){return window.NHL_PARLAY_GAMES[g.key]!==false;});
+    out.innerHTML='<div style="color:#888;padding:10px">'+(loadedGames.length&&!selectedGames.length?'Select at least one game for the parlay.':'No qualifying plays match the selected games, normal categories, and Coach categories.')+'</div>';
+    return;
+  }
   var avoid={};
   if(randomize&&window._lastParlay&&window._lastParlay.length){
     window._lastParlay.forEach(function(playerKey){avoid[playerKey]=1;});
@@ -5238,12 +5398,12 @@ function nhlCard(p,i){
          <img class="pc-logo" src="${logo}" onerror="this.style.display='none'"/>
        </div>
        <div class="pc-id">
-          <div class="pc-name"><span class="pc-name-text">${p.name}</span>${_nhlFormBadge(p,'OVER')}</div>
+           <div class="pc-name"><span class="pc-name-text">${p.name}</span></div>
          <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></div>
          <div class="pc-mkt">${p.mkt||''}</div>
        </div>
      </div>
-     <div class="pc-tagrow">${fmtTag(p.tag)}</div>
+      <div class="pc-tagrow">${fmtTag(p.tag)}${_nhlFormBadge(p,'OVER')}</div>
       ${_sigBadges(p,true)}
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Line</span></div>
      ${p.proj!=null?`<div class="pc-proj"><span class="pp-lab">Projected</span><span class="pp-num">${p.proj}</span><span class="pp-edge ${p.projEdge>=0?'pos':'neg'}">${p.projEdge>=0?'+':''}${p.projEdge}</span></div>`:''}
@@ -5291,11 +5451,12 @@ function nhlUnderCard(p,i){
          <img class="pc-logo" src="${logo}" onerror="this.style.display='none'"/>
        </div>
        <div class="pc-id">
-          <div class="pc-name"><span class="pc-name-text">${p.name}</span>${_nhlFormBadge(p,'UNDER')}</div>
+           <div class="pc-name"><span class="pc-name-text">${p.name}</span></div>
          <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></div>
          <div class="pc-mkt">${p.mkt||''} · UNDER</div>
        </div>
      </div>
+      <div class="pc-tagrow">${fmtTag(p.tag||'FADE')}${_nhlFormBadge(p,'UNDER')}</div>
       ${_sigBadges(p,true)}
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Under Line</span></div>
      <div class="pc-stats">
@@ -6007,6 +6168,8 @@ function _nhlPaint(q){
     .concat(_nhlParlaySide(raw.astUnders,'UNDER')).concat(_nhlParlaySide(raw.astUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.goalUnders,'UNDER')).concat(_nhlParlaySide(raw.goalUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.savesUnders,'UNDER')).concat(_nhlParlaySide(raw.savesUndersRest,'UNDER'));
+  _renderNhlParlayGames();
+  _renderNhlParlayCoachCats();
 }
 
 function nhlToggle(n){
