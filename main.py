@@ -3848,6 +3848,10 @@ nav{position:fixed;top:0;width:100%;background:rgba(10,10,10,.95);backdrop-filte
 .nav-right{display:flex;align-items:center;gap:14px}
 .nav-sport{background:#15803d;color:#fff;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:3px 10px;border-radius:4px}
 .nav-app{font-size:13px;font-weight:600;color:#9ca3af;letter-spacing:.05em}
+.nhl-nav-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
+.nhl-nav-btn{border:0;border-radius:8px;padding:9px 14px;color:#fff;font-size:.76rem;font-weight:900;white-space:nowrap;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.24)}
+.nhl-nav-btn.gp{background:#0e7490}.nhl-nav-btn.track{background:#047857}.nhl-nav-btn.overflow{background:#b45309}.nhl-nav-btn.history{background:#1d4ed8}.nhl-nav-btn.bets{background:#0e7490}
+@media(max-width:900px){nav{padding:0 12px}.nhl-nav-actions{overflow-x:auto;justify-content:flex-start;padding:8px 0}.nhl-nav-btn{padding:8px 11px;font-size:.7rem}.logo{flex:0 0 auto;margin-right:10px}}
 .page{position:relative;z-index:1;max-width:1300px;margin:0 auto;padding:104px 24px 40px}
 .app-hdr{text-align:center;margin-bottom:36px}
 .app-hdr h1{font-family:'Playfair Display',serif;font-size:2.6rem;font-weight:900;color:#fff;margin-bottom:6px}
@@ -4083,6 +4087,13 @@ body.is-admin #parlayCard{display:block}
 
 <nav>
   <div class="logo">Money <span>Picks</span> Arena</div>
+  <div class="nhl-nav-actions" aria-label="NHL records and account tools">
+    <button type="button" class="nhl-nav-btn gp" onclick="openNhlGPRecord()">🔮 GP Record</button>
+    <button type="button" class="nhl-nav-btn track" onclick="openNhlTrackRecord()">📊 Track Record</button>
+    <button type="button" class="nhl-nav-btn overflow" onclick="openNhlOverflowRecord()">⭐ NHL Overflow</button>
+    <button type="button" class="nhl-nav-btn history" onclick="toggleNhlHistoricalAnalysis()">📚 Historical Analysis</button>
+    <button type="button" class="nhl-nav-btn bets" onclick="openNhlMyBets()">💰 My Bets</button>
+  </div>
 </nav>
 
 <style>
@@ -4214,7 +4225,6 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <input type="date" id="datePicker"/>
     </div>
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
-    <button class="btn-run" onclick="toggleNhlHistoricalAnalysis()" style="margin-left:8px;background:#1d4ed8">📚 Historical Analysis</button>
     <button class="btn-run" id="nhlRunAllBtn" onclick="runAllNhlSystems()" style="display:none;margin-left:8px;background:#4338ca">Run A+B+C+D &amp; Log</button>
     <div id="nhlRunAllStatus" style="display:none;color:#93c5fd;font-size:.74rem;font-weight:700;margin-top:10px"></div>
     <div id="nhlPositionFilters" style="display:flex;justify-content:center;align-items:center;gap:7px;flex-wrap:wrap;margin:14px auto 0">
@@ -6236,6 +6246,11 @@ function openNhlOverflowRecord(){
   if(_nhlTrkData)renderNhlOverflowDay();
   else loadNhlTrackRecord();
 }
+function openNhlTrackRecord(){
+  var section=document.getElementById('nhl-track-section');
+  if(section)section.scrollIntoView({behavior:'smooth',block:'start'});
+  if(!_nhlTrkData)loadNhlTrackRecord();
+}
 function _nhlTrackSystemLabel(system){
   return system==='B'?'B · OLD':system==='C'?'C · SELECTIVE':system==='D'?'D · TOP PLAYERS':'A · NEW';
 }
@@ -6470,7 +6485,7 @@ function renderNhlOverflowDay(){
 }
  function _nhlTrkCatHtml(allRows,stake){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
-  var cats={},catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks','Shot Plays','Point Plays','Assist Plays','Goal Plays','Save Plays'];
+  var cats={},catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
   allRows.forEach(function(r){
     var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase();
     var key=cat+'|'+side;
@@ -6548,8 +6563,8 @@ function renderNhlOverflowDay(){
  function _nhlTrkListHtml(allRows,showRank,showRankStats){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var stake=_nhlTrkStake();
-   var catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks','Shot Plays','Point Plays','Assist Plays','Goal Plays','Save Plays'];
-   var catColors={'Shots on Goal':'#fbbf24','Points':'#60a5fa','Power Play Points':'#c084fc','Assists':'#a78bfa','Goals':'#fb7185','Goalie Saves':'#34d399','NHL Overflow':'#f59e0b','80-100% Locks':'#facc15','Shot Plays':'#fde047','Point Plays':'#60a5fa','Assist Plays':'#a78bfa','Goal Plays':'#fb7185','Save Plays':'#34d399'};
+   var catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
+   var catColors={'Shots on Goal':'#fbbf24','Points':'#60a5fa','Power Play Points':'#c084fc','Assists':'#a78bfa','Goals':'#fb7185','Goalie Saves':'#34d399','NHL Overflow':'#f59e0b','80-100% Locks':'#facc15'};
    var groups={},order=[];
    allRows.forEach(function(r){
      var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase(),key=cat+'|'+side;
