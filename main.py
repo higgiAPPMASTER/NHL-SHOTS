@@ -4213,8 +4213,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
 
 <div class="page">
   <div class="app-hdr">
-    <h1>NHL <span>Money Shots</span></h1>
-    <p>Shots &nbsp;·&nbsp; Points &nbsp;·&nbsp; Power Play Points &nbsp;·&nbsp; Assists &nbsp;·&nbsp; Goalie Saves</p>
+    <h1>NHL <span>Money Props</span></h1>
+    <p>Coach Edge &nbsp;·&nbsp; All Player Props &nbsp;·&nbsp; Game Predictor &nbsp;·&nbsp; Parlay Builder &nbsp;·&nbsp; Track Record</p>
   </div>
 
   <div class="card" style="text-align:center">
@@ -4275,18 +4275,18 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')">Top 3 Plays</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge over plays')">Best Overs · Top 10</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge under plays')">Best Unders · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge shots over props')">Shots Overs</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge shots under props')">Shots Unders</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge points over props')">Points Overs</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge points under props')">Points Unders</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge power play points over props')">PP Points Overs</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge power play points under props')">PP Points Unders</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge assists over props')">Assists Overs</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge assists under props')">Assists Unders</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge goals over props')">Goals Overs</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge goals under props')">Goals Unders</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge goalie saves over props')">Saves Overs</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the best positive edge goalie saves under props')">Saves Unders</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge shots over props')">Shots Overs · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge shots under props')">Shots Unders · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge points over props')">Points Overs · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge points under props')">Points Unders · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge power play points over props')">PP Points Overs · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge power play points under props')">PP Points Unders · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge assists over props')">Assists Overs · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge assists under props')">Assists Unders · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goals over props')">Goals Overs · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goals under props')">Goals Unders · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goalie saves over props')">Saves Overs · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goalie saves under props')">Saves Unders · Top 5</button>
     </div>
     <div class="frank-ai-systems admin-only" id="frankAiSystems">
       <span style="color:#94a3b8;font-size:.65rem;font-weight:900;text-transform:uppercase;letter-spacing:.09em">Coach source</span>
@@ -4431,12 +4431,12 @@ var _NHL_PARLAY_COACH_CATS=[
   {key:'coach_edge',label:'Coach Edge — Top 10'},{key:'safest_bets',label:'Safest Bets — Top 10'},
   {key:'alt_line_edge',label:'Best Alt-Line Edge — Top 10'},{key:'top_3',label:'Top 3 Plays'},
   {key:'best_overs',label:'Best Overs — Top 10'},{key:'best_unders',label:'Best Unders — Top 10'},
-  {key:'shots_over',label:'Best Shots Overs'},{key:'shots_under',label:'Best Shots Unders'},
-  {key:'points_over',label:'Best Points Overs'},{key:'points_under',label:'Best Points Unders'},
-  {key:'pp_over',label:'Best PP Points Overs'},{key:'pp_under',label:'Best PP Points Unders'},
-  {key:'assists_over',label:'Best Assists Overs'},{key:'assists_under',label:'Best Assists Unders'},
-  {key:'goals_over',label:'Best Goals Overs'},{key:'goals_under',label:'Best Goals Unders'},
-  {key:'saves_over',label:'Best Saves Overs'},{key:'saves_under',label:'Best Saves Unders'}
+  {key:'shots_over',label:'Best Shots Overs — Top 5'},{key:'shots_under',label:'Best Shots Unders — Top 5'},
+  {key:'points_over',label:'Best Points Overs — Top 5'},{key:'points_under',label:'Best Points Unders — Top 5'},
+  {key:'pp_over',label:'Best PP Points Overs — Top 5'},{key:'pp_under',label:'Best PP Points Unders — Top 5'},
+  {key:'assists_over',label:'Best Assists Overs — Top 5'},{key:'assists_under',label:'Best Assists Unders — Top 5'},
+  {key:'goals_over',label:'Best Goals Overs — Top 5'},{key:'goals_under',label:'Best Goals Unders — Top 5'},
+  {key:'saves_over',label:'Best Saves Overs — Top 5'},{key:'saves_under',label:'Best Saves Unders — Top 5'}
 ];
 window.NHL_PARLAY_COACH_CATS=window.NHL_PARLAY_COACH_CATS||{};
 _NHL_PARLAY_COACH_CATS.forEach(function(c){if(!(c.key in window.NHL_PARLAY_COACH_CATS))window.NHL_PARLAY_COACH_CATS[c.key]=true;});
@@ -4547,7 +4547,7 @@ function _nhlCoachParlayCandidates(){
   };
   ['shots','points','pp','assists','goals','saves'].forEach(function(market){
     ['OVER','UNDER'].forEach(function(side){
-      pools[market+'_'+side.toLowerCase()]=select(positive.filter(function(p){return p.marketKey===market&&p.side===side;}),byEdge,10);
+      pools[market+'_'+side.toLowerCase()]=select(positive.filter(function(p){return p.marketKey===market&&p.side===side;}),byEdge,5);
     });
   });
   pools.alt_line_edge=(window.__NHL_ALT_COACH_ROWS__||[]).filter(function(p){
