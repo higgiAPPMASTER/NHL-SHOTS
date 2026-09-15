@@ -3033,48 +3033,42 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
                 pick.get("realOdds") if side == "OVER"
                 else pick.get("realUnderOdds")
             )
+            line_source = str(pick.get("lineSource") or "")
             has_archived_line = (
-                pick.get("lineSource") == "Historical Odds API"
+                line_source.startswith("Historical Odds API")
                 and pick.get("realLine") is not None
-                and side_odds not in (None, "", "0")
             )
             book_line = pick.get("realLine") if has_archived_line else None
             model_line = pick.get("line")
             if model_line is None:
                 model_line = pick.get("dispLine")
             line = book_line if book_line is not None else model_line
-            odds = side_odds if has_archived_line else None
+            odds = (
+                side_odds if has_archived_line
+                and side_odds not in (None, "", "0") else None
+            )
             actual = pick.get("simActual")
             void_reason = ""
             outcome = None
-            if not has_archived_line:
-                # A simulated/model threshold is useful for research, but it
-                # is not an actual sportsbook line and must never become a
-                # historical W/L, ROI, or official-style record result.
-                outcome = "UNPRICED"
-                void_reason = (
-                    "No verified archived sportsbook line was available; "
-                    "model estimate shown for reference only."
-                )
-            else:
-                try:
-                    if actual is None or book_line is None:
-                        outcome = "VOID"
-                        void_reason = pick.get("simVoidReason") or (
-                            "No matching historical NHL appearance was available."
-                        )
-                    else:
-                        actual, book_line = float(actual), float(book_line)
-                        if actual == book_line:
-                            outcome = "PUSH"
-                        elif (side == "OVER" and actual > book_line) or (
-                                side == "UNDER" and actual < book_line):
-                            outcome = "WIN"
-                        else:
-                            outcome = "LOSS"
-                except (TypeError, ValueError):
+            try:
+                if actual is None or line is None:
                     outcome = "VOID"
-                    void_reason = "The historical stat or line could not be read."
+                    void_reason = pick.get("simVoidReason") or (
+                        "No matching historical NHL appearance or grading "
+                        "threshold was available."
+                    )
+                else:
+                    actual, line = float(actual), float(line)
+                    if actual == line:
+                        outcome = "PUSH"
+                    elif (side == "OVER" and actual > line) or (
+                            side == "UNDER" and actual < line):
+                        outcome = "WIN"
+                    else:
+                        outcome = "LOSS"
+            except (TypeError, ValueError):
+                outcome = "VOID"
+                void_reason = "The historical stat or line could not be read."
             if outcome == "VOID" and not void_reason:
                 if actual is None or book_line is None:
                     outcome = "VOID"
@@ -3086,12 +3080,16 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
                 "opponent": pick.get("opponent", ""),
                 "home_road": pick.get("homeRoad", ""),
                 "category": category, "stat_key": stat_key, "side": side,
-                "line": book_line, "model_line": model_line,
+                "line": line, "model_line": model_line,
                 "odds": odds, "rank": rank,
-                "is_overflow": bool(is_overflow), "line_source": pick.get("lineSource", ""),
+                "is_overflow": bool(is_overflow), "line_source": line_source,
                 "schedule_context": pick.get("scheduleContext") or {},
                 "player_workload": pick.get("playerWorkload") or {},
                 "schedule_factor": pick.get("scheduleFactor", 1.0),
+                "score": (
+                    pick.get("dispScore") or pick.get("ptsScore")
+                    or pick.get("score")
+                ),
                 "actual": actual,
                 "result": outcome, "actual": actual, "void_reason": void_reason,
                 "profit": round(_nhl_american_profit(odds, _NHL_TRK_STAKE, outcome), 2)
@@ -8476,12 +8474,26 @@ async def nhl_coach_track(date_str: str = "", source: str = "official"):
             row.update({"app_probability": model, "implied_probability": implied,
                         "coach_edge": edge * 100 if edge is not None else None,
                         "book": row.get("book") or frozen.get("book") or ""})
-            if edge is not None and edge > 0 and row.get("odds") is not None:
+            has_odds = row.get("odds") not in (None, "", "0")
+            # Official/live Coach remains positive-edge only. Historical
+            # replays also retain model-qualified picks when the archive has
+            # no price, because W/L is gradeable from the replay line even
+            # though edge and profit cannot be calculated.
+            if model is not None and (
+                    (has_odds and edge is not None and edge > 0)
+                    or (historical and not has_odds)):
+                row["pricing_status"] = (
+                    "priced_positive_edge" if has_odds else "unpriced_model"
+                )
                 candidates.append(row)
         groups = {}
         def add(label, values, limit=10, sort_key=None):
             ordered = sorted(values, key=sort_key or
-                (lambda x: x.get("coach_edge") or -999), reverse=True)
+                (lambda x: (
+                    x.get("coach_edge")
+                    if x.get("coach_edge") is not None
+                    else float(x.get("app_probability") or 0) * 100.0
+                )), reverse=True)
             groups[label] = [{**row, "preset": label} for row in ordered[:limit]]
         add("Coach Edge Top 10", candidates)
         add("Safest Bets Top 10", candidates,
@@ -8532,6 +8544,51 @@ def _nhl_save_historical_analysis(
         "mpa_track_ledger", rows, "app,date,category,side")
 
 
+def _nhl_finalize_saved_historical_row(row: dict) -> dict:
+    """Grade legacy unpriced replay rows without inventing sportsbook profit."""
+    fixed = dict(row or {})
+    if fixed.get("result") in ("WIN", "LOSS", "PUSH", "VOID"):
+        return fixed
+    actual = fixed.get("actual")
+    line = fixed.get("line")
+    if line is None:
+        line = fixed.get("model_line")
+    try:
+        if actual is None or line is None:
+            fixed["result"] = "VOID"
+            fixed["void_reason"] = fixed.get("void_reason") or (
+                "No matching historical NHL appearance or grading threshold "
+                "was available."
+            )
+            return fixed
+        actual, line = float(actual), float(line)
+        fixed["actual"] = actual
+        fixed["line"] = line
+        if actual == line:
+            fixed["result"] = "PUSH"
+        elif (
+            (str(fixed.get("side") or "OVER").upper() == "OVER" and actual > line)
+            or (str(fixed.get("side") or "OVER").upper() == "UNDER" and actual < line)
+        ):
+            fixed["result"] = "WIN"
+        else:
+            fixed["result"] = "LOSS"
+    except (TypeError, ValueError):
+        fixed["result"] = "VOID"
+        fixed["void_reason"] = (
+            fixed.get("void_reason")
+            or "The historical stat or line could not be read."
+        )
+    fixed["profit"] = (
+        round(_nhl_american_profit(
+            fixed.get("odds"), _NHL_TRK_STAKE, fixed.get("result")), 2)
+        if fixed.get("result") in ("WIN", "LOSS", "PUSH")
+        and fixed.get("odds") not in (None, "", "0")
+        else None
+    )
+    return fixed
+
+
 def _nhl_historical_analysis_payload(system: str = "A") -> dict:
     """Return saved replay dates in the regular Track Record day shape."""
     replay_system = str(system or "A").strip().upper()
@@ -8569,7 +8626,10 @@ def _nhl_historical_analysis_payload(system: str = "A") -> dict:
         d = saved.get("date")
         if not d:
             continue
-        detail = [dict(row or {}) for row in (saved.get("detail") or [])]
+        detail = [
+            _nhl_finalize_saved_historical_row(row)
+            for row in (saved.get("detail") or [])
+        ]
         main = [row for row in detail if not row.get("is_overflow")]
         overflow = [row for row in detail if row.get("is_overflow")]
         decided = [row for row in main if row.get("result") in ("WIN", "LOSS")]
