@@ -845,7 +845,13 @@ def _nhl_c_confidence_rate(hits: int, total: int, z: float = 1.28) -> float:
 
 def _nhl_d_eligible_rosters(rosters: dict, logs_map: dict,
                             target_date: str) -> dict:
-    """Limit D per team to top 6F by scoring and top 4D by deployment."""
+    """Limit D to forward lines 1-2 and defense pairs 1-2.
+
+    NHL roster responses used by this app do not provide line/pair numbers.
+    Until an authoritative deployment field is available, average recent
+    total deployment is the deterministic proxy: six forwards and
+    four defensemen per team, with points and sample size only as tie-breakers.
+    """
     eligible = {}
     for team, players in (rosters or {}).items():
         def rank(player):
@@ -857,12 +863,9 @@ def _nhl_d_eligible_rosters(rosters: dict, logs_map: dict,
                 sum(float(g.get("points") or 0) for g in logs) / len(logs)
                 if logs else 0.0
             )
-            # "Top six" means the team's strongest scoring forwards, not
-            # checking-line players whose penalty-kill minutes can inflate
-            # total TOI. Defense pairs are deployment-led.
-            if str(player.get("positionGroup") or "F").upper() == "D":
-                return avg_toi, avg_points, len(logs)
-            return avg_points, avg_toi, len(logs)
+            # Deployment is the primary signal for both groups.  This keeps
+            # high-scoring third-line forwards out of D's Lines 1-2 pool.
+            return avg_toi, avg_points, len(logs), str(player.get("id") or "")
 
         forwards = sorted(
             [
@@ -878,10 +881,24 @@ def _nhl_d_eligible_rosters(rosters: dict, logs_map: dict,
             ],
             key=rank, reverse=True,
         )[:4]
-        eligible[team] = forwards + defense
+        eligible[team] = [
+            {
+                **p,
+                "systemDUnit": "F Line 1/2",
+                "systemDDeploymentRank": index,
+            }
+            for index, p in enumerate(forwards, 1)
+        ] + [
+            {
+                **p,
+                "systemDUnit": "D Pair 1/2",
+                "systemDDeploymentRank": index,
+            }
+            for index, p in enumerate(defense, 1)
+        ]
         print(
-            f"[System D] {team}: {len(forwards)} top-six forwards + "
-            f"{len(defense)} top-four defensemen eligible"
+            f"[System D] {team}: {len(forwards)} F Lines 1-2 + "
+            f"{len(defense)} D Pairs 1-2 eligible"
         )
     return eligible
 
@@ -2657,13 +2674,29 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
         # listed goalies, which are not part of that skater-only rule.
         logs_for_d = await asyncio.gather(
             *[_nhl_player_logs(p["id"], sem) for p, _, _, _, kind in people if kind == "skater"])
-        d_ids = {
-            p["id"] for rows in _nhl_d_eligible_rosters(
-                skaters, {p["id"]: logs for (p, _, _, _, kind), logs in zip(
-                    [x for x in people if x[4] == "skater"], logs_for_d)}, date_str).values()
+        d_rosters = _nhl_d_eligible_rosters(
+            skaters,
+            {p["id"]: logs for (p, _, _, _, kind), logs in zip(
+                [x for x in people if x[4] == "skater"], logs_for_d)},
+            date_str,
+        )
+        d_players = {
+            p["id"]: p
+            for rows in d_rosters.values()
             for p in rows
         }
-        people = [x for x in people if x[4] != "skater" or x[0]["id"] in d_ids]
+        # Copy the selected roster row so D-only audit metadata cannot
+        # contaminate the A/B/C shared roster objects.
+        people = [
+            (
+                {**x[0], **d_players[x[0]["id"]]}
+                if x[4] == "skater" and x[0]["id"] in d_players
+                else x[0],
+                *x[1:],
+            )
+            for x in people
+            if x[4] != "skater" or x[0]["id"] in d_players
+        ]
 
     log_results = await asyncio.gather(
         *[_nhl_player_logs(p["id"], sem) for p, *_ in people], return_exceptions=True)
@@ -3661,7 +3694,8 @@ async def run_picks(
         "simulation": bool(simulate),
         "comparisonSystem": (
             "C Enhanced/selective" if c_mode
-            else ("D Top 6F/4D" if d_mode else "A New/current")),
+            else ("D Forward Lines 1-2 / Defense Pairs 1-2"
+                  if d_mode else "A New/current")),
         "system": system,
         "archivedShotLineCount": sum(
             1 for player in results_raw if player
@@ -9019,7 +9053,7 @@ async def nhl_historical_track_replay(request: Request, date_str: str,
         result["historicalTrackRecord"] = _nhl_historical_replay_payload(result)
         result["comparisonSystem"] = (
             "C Enhanced/selective" if replay_system == "C"
-            else "D Top 6 forwards/4 defensemen"
+            else "D Forward Lines 1-2 / Defense Pairs 1-2"
         )
         return JSONResponse(result)
     result["historicalTrackRecord"] = _nhl_historical_replay_payload(result)
@@ -9090,7 +9124,8 @@ async def nhl_historical_track_replay_all(
         )
         result["comparisonSystem"] = (
             "C Enhanced/selective"
-            if system == "C" else "D Top 6 forwards/4 defensemen"
+            if system == "C"
+            else "D Forward Lines 1-2 / Defense Pairs 1-2"
         )
         systems[system] = result
 
