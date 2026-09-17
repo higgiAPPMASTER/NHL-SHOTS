@@ -6178,7 +6178,7 @@ function nhlToggle(n){
   if(btn) btn.textContent=hidden?'Collapse':'Expand';
 }
 // ── My Bets ──────────────────────────────────────────────────────────────────
-function _nhlEsc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function _nhlEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function _nhlMoney(v){var n=Number(v)||0;return(n>=0?'$':'\u2212$')+Math.abs(n).toFixed(2);}
 function _nhlBetAuthQS(){
   var tok=localStorage.getItem('__mpa_token')||'';
