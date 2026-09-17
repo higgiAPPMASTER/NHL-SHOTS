@@ -7229,11 +7229,21 @@ function _nhlCompareCell(stats){
   return '<b>'+Number(stats.model_wins||0)+'-'+Number(stats.model_losses||0)+'</b> model · '+_nhlGoalComparePct(stats.model_hit_rate)
     +'<br><span style="color:#94a3b8">'+Number(stats.book_wins||0)+'-'+Number(stats.book_losses||0)+' book · '+_nhlGoalComparePct(stats.roi)+' ROI</span>';
 }
-var _nhlCoachTrackData=null;
+var _nhlCoachTrackData=null,_nhlCoachTrackSystem='A';
+function _nhlSetCoachTrackSystem(system){
+ _nhlCoachTrackSystem=['A','B','C','D'].indexOf(system)>=0?system:'A';
+ ['A','B','C','D'].forEach(function(s){
+  var b=document.getElementById('nhlCoachTrkSys'+s),active=s===_nhlCoachTrackSystem;
+  if(!b)return;
+  b.style.background=active?(s==='A'?'#1d4ed8':s==='B'?'#92400e':s==='C'?'#6d28d9':'#1e3a8a'):'#1e293b';
+  b.style.borderColor=active?(s==='B'?'#fbbf24':s==='C'?'#c4b5fd':'#60a5fa'):'#475569';
+  b.style.color=active?'#fff':'#94a3b8';
+ });
+}
 async function loadNhlCoachTrack(){
  var body=document.getElementById('nhlCoachTrackBody'),source=document.getElementById('nhlCoachTrkSource').value,date=document.getElementById('nhlCoachTrkDate').value;
  if(body)body.innerHTML='<p style="color:#94a3b8">Loading Coach results…</p>';
- try{var r=await fetch('/api/nhl/coach-track?source='+encodeURIComponent(source)+'&date_str='+encodeURIComponent(date));var d=await r.json();if(!r.ok)throw new Error(d.detail||'Coach record unavailable');_nhlCoachTrackData=d;renderNhlCoachTrack();}
+ try{var r=await fetch('/api/nhl/coach-track?source='+encodeURIComponent(source)+'&date_str='+encodeURIComponent(date)+'&system='+encodeURIComponent(_nhlCoachTrackSystem));var d=await r.json();if(!r.ok)throw new Error(d.detail||'Coach record unavailable');_nhlCoachTrackData=d;renderNhlCoachTrack();}
  catch(e){if(body)body.innerHTML='<p style="color:#f87171">'+(e.message||'Coach record unavailable')+'</p>';}
 }
 function renderNhlCoachTrack(){
@@ -7242,13 +7252,13 @@ function renderNhlCoachTrack(){
  (_nhlCoachTrackData.dates||[]).forEach(function(day){(day.detail||[]).forEach(function(x){x.date=day.date;all.push(x);var k=x.preset||x.category;(groups[k]||(groups[k]=[])).push(x);});});
  var tw=0,tl=0,tp=0,tv=0,tnet=0,tpriced=0,html='';
  Object.keys(groups).forEach(function(k){var rows=groups[k],w=0,l=0,p=0,v=0,pend=0,net=0,priced=0;
-  rows.forEach(function(x){var r=String(x.result||'PENDING').toUpperCase();if(r==='WIN'){w++;priced++;net+=_nhlCalcProfit(x.odds,stake,r)}else if(r==='LOSS'){l++;priced++;net-=stake}else if(r==='PUSH')p++;else if(r==='VOID')v++;else pend++;});
+  rows.forEach(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0';if(r==='WIN'){w++;if(hasPrice){priced++;net+=_nhlCalcProfit(x.odds,stake,r)}}else if(r==='LOSS'){l++;if(hasPrice){priced++;net-=stake}}else if(r==='PUSH')p++;else if(r==='VOID')v++;else pend++;});
   tw+=w;tl+=l;tp+=p;tv+=v;tnet+=net;tpriced+=priced;var rate=w+l?100*w/(w+l):null,roi=priced?100*net/(priced*stake):null;
-  var trs=rows.map(function(x){var r=String(x.result||'PENDING').toUpperCase(),pl=(r==='WIN'||r==='LOSS')?_nhlCalcProfit(x.odds,stake,r):null,ap=x.app_probability==null?'—':(Number(x.app_probability)*100).toFixed(1)+'%',ip=x.implied_probability==null?'—':(Number(x.implied_probability)*100).toFixed(1)+'%',ed=x.coach_edge==null?'—':Number(x.coach_edge).toFixed(1)+' pts';return '<tr><td>'+_trkEsc(x.date)+'</td><td><b>'+_trkEsc(x.name)+'</b><br><small>'+_trkEsc(x.team||'')+'</small></td><td>'+_trkEsc(x.category)+'<br><b>'+_trkEsc(x.side)+' '+_trkEsc(x.line)+'</b></td><td>'+_trkEsc(x.odds)+'<br><small>'+_trkEsc(x.book||'')+'</small></td><td>'+_trkEsc(x.actual)+'</td><td style="color:'+(r==='WIN'?'#4ade80':r==='LOSS'?'#f87171':'#fbbf24')+'">'+r+'<br><small>'+(pl==null?'—':_trkMoney(pl))+'</small></td><td><small>App '+ap+'<br>Implied '+ip+'<br>Edge '+ed+'</small></td></tr>';}).join('');
+  var trs=rows.map(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0',pl=(hasPrice&&(r==='WIN'||r==='LOSS'))?_nhlCalcProfit(x.odds,stake,r):null,ap=x.app_probability==null?'—':(Number(x.app_probability)*100).toFixed(1)+'%',ip=x.implied_probability==null?'—':(Number(x.implied_probability)*100).toFixed(1)+'%',ed=x.coach_edge==null?'—':Number(x.coach_edge).toFixed(1)+' pts';return '<tr><td>'+_trkEsc(x.date)+'</td><td><b>'+_trkEsc(x.name)+'</b><br><small>'+_trkEsc(x.team||'')+'</small></td><td>'+_trkEsc(x.category)+'<br><b>'+_trkEsc(x.side)+' '+_trkEsc(x.line)+'</b></td><td>'+(hasPrice?_trkEsc(x.odds):'—')+'<br><small>'+_trkEsc(x.book||'')+'</small></td><td>'+_trkEsc(x.actual)+'</td><td style="color:'+(r==='WIN'?'#4ade80':r==='LOSS'?'#f87171':'#fbbf24')+'">'+r+'<br><small>'+(pl==null?'—':_trkMoney(pl))+'</small></td><td><small>App '+ap+'<br>Implied '+ip+'<br>Edge '+ed+'</small></td></tr>';}).join('');
   html+='<details style="border:1px solid #26334a;border-radius:10px;margin:8px 0;background:#0f172a"><summary style="cursor:pointer;padding:13px;color:#fff"><b>'+_trkEsc(k)+'</b><span style="float:right;color:#94a3b8">'+w+'W · '+l+'L'+(p?' · '+p+'P':'')+(v?' · '+v+'V':'')+(pend?' · '+pend+' pending':'')+' · '+(rate==null?'—':rate.toFixed(1)+'%')+' · <b style="color:'+(net>=0?'#4ade80':'#f87171')+'">'+_trkMoney(net)+'</b> · '+(roi==null?'—':roi.toFixed(1)+'% ROI')+'</span></summary><div style="overflow-x:auto"><table class="trk-tbl"><thead><tr><th>Date</th><th>Player</th><th>Market</th><th>Odds/Book</th><th>Actual</th><th>Result/P&L</th><th>Probabilities</th></tr></thead><tbody>'+trs+'</tbody></table></div></details>';
  });
  var troi=tpriced?100*tnet/(tpriced*stake):null;if(sum)sum.innerHTML='<div class="trk-summary"><b>'+tw+'W · '+tl+'L'+(tp?' · '+tp+'P':'')+(tv?' · '+tv+' VOID':'')+'</b> · Net <b style="color:'+(tnet>=0?'#4ade80':'#f87171')+'">'+_trkMoney(tnet)+'</b> · '+(troi==null?'—':troi.toFixed(1)+'% ROI')+'</div>';
- body.innerHTML=html||'<p style="color:#94a3b8">No positive-edge Coach rows for this date. Historical dates require a saved Historical Analysis replay.</p>';
+ body.innerHTML=html||'<p style="color:#94a3b8">No saved Coach or historical W/L rows for System '+_trkEsc(_nhlCoachTrackSystem)+' on this date. Historical dates require a saved A/B/C/D Historical Analysis replay.</p>';
 }
 </script>
 <!-- Standalone NHL Game Predictor Record -->
@@ -7293,12 +7303,19 @@ function renderNhlCoachTrack(){
 <div id="nhl-coach-track-section" style="max-width:960px;margin:0 auto 0;padding:0 16px 40px">
   <div class="card" style="padding:20px 22px;border-color:rgba(139,92,246,.35)">
     <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;color:#fff;margin:0 0 6px">NHL Edge Coach Track Record</h2>
-    <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px">Detailed positive-edge Coach results. Historical replay results remain isolated from the official record.</p>
+    <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px">Detailed Coach results by System A/B/C/D. Historical W/L remains isolated from the official record and does not require odds.</p>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
       <label style="color:#94a3b8;font-size:.72rem;font-weight:800">RECORD <select id="nhlCoachTrkSource" style="background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:7px;color:#fff"><option value="official">Official Coach</option><option value="historical">Historical Edge Coach</option></select></label>
       <label style="color:#94a3b8;font-size:.72rem;font-weight:800">DATE <input type="date" id="nhlCoachTrkDate" style="background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:7px;color:#fff"></label>
       <label style="color:#94a3b8;font-size:.72rem;font-weight:800">BET $ <input type="number" id="nhlCoachTrkStake" value="100.00" min=".01" step="5" oninput="renderNhlCoachTrack()" style="width:92px;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:7px;color:#fff"></label>
       <button onclick="loadNhlCoachTrack()" style="background:#6d28d9;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer">Get Results</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:-2px 0 14px">
+      <span style="color:#94a3b8;font-size:.68rem;font-weight:900;letter-spacing:.06em">SYSTEM</span>
+      <button id="nhlCoachTrkSysA" onclick="_nhlSetCoachTrackSystem('A')" style="background:#1d4ed8;border:1px solid #60a5fa;color:#fff;border-radius:7px;padding:6px 12px;font-size:.68rem;font-weight:900;cursor:pointer">A · NEW</button>
+      <button id="nhlCoachTrkSysB" onclick="_nhlSetCoachTrackSystem('B')" style="background:#1e293b;border:1px solid #475569;color:#94a3b8;border-radius:7px;padding:6px 12px;font-size:.68rem;font-weight:900;cursor:pointer">B · OLD</button>
+      <button id="nhlCoachTrkSysC" onclick="_nhlSetCoachTrackSystem('C')" style="background:#1e293b;border:1px solid #475569;color:#94a3b8;border-radius:7px;padding:6px 12px;font-size:.68rem;font-weight:900;cursor:pointer">C · SELECTIVE</button>
+      <button id="nhlCoachTrkSysD" onclick="_nhlSetCoachTrackSystem('D')" style="background:#1e293b;border:1px solid #475569;color:#94a3b8;border-radius:7px;padding:6px 12px;font-size:.68rem;font-weight:900;cursor:pointer">D · TOP PLAYERS</button>
     </div>
     <div id="nhlCoachTrackSummary"></div>
     <div id="nhlCoachTrackBody"><p style="color:#94a3b8">Choose a date and get results.</p></div>
@@ -8440,11 +8457,15 @@ async def nhl_track_record(
     return JSONResponse(_nhl_track_record_payload(record_system))
 
 @app.get("/api/nhl/coach-track")
-async def nhl_coach_track(date_str: str = "", source: str = "official"):
+async def nhl_coach_track(
+        date_str: str = "", source: str = "official", system: str = "A"):
     """Detailed, read-only Edge Coach record isolated from other NHL records."""
     historical = str(source).lower() == "historical"
-    payload = (_nhl_historical_analysis_payload("A") if historical
-               else _nhl_track_record_payload("A"))
+    record_system = str(system or "A").strip().upper()
+    if record_system not in ("A", "B", "C", "D"):
+        raise HTTPException(status_code=400, detail="System must be A, B, C, or D")
+    payload = (_nhl_historical_analysis_payload(record_system) if historical
+               else _nhl_track_record_payload(record_system))
     days = []
     for day in payload.get("dates") or []:
         if date_str and day.get("date") != date_str:
@@ -8457,6 +8478,7 @@ async def nhl_coach_track(date_str: str = "", source: str = "official"):
                    str(p.get("side") or "OVER").upper(), str(p.get("line")))
             snap_map[key] = p
         candidates = []
+        legacy_wl = []
         for original in day.get("detail") or []:
             row = dict(original or {})
             key = (row.get("name"), row.get("stat_key"),
@@ -8486,6 +8508,14 @@ async def nhl_coach_track(date_str: str = "", source: str = "official"):
                     "priced_positive_edge" if has_odds else "unpriced_model"
                 )
                 candidates.append(row)
+            elif historical and model is None and row.get("result") in (
+                    "WIN", "LOSS", "PUSH", "VOID"):
+                # Legacy replays predate saved model scores. Their final W/L is
+                # valid, but the original Coach qualification/ranking cannot be
+                # reconstructed. Show the result once without inventing edge.
+                row["pricing_status"] = "legacy_wl_only"
+                row["legacy_wl_only"] = True
+                legacy_wl.append(row)
         groups = {}
         def add(label, values, limit=10, sort_key=None):
             ordered = sorted(values, key=sort_key or
@@ -8507,10 +8537,17 @@ async def nhl_coach_track(date_str: str = "", source: str = "official"):
                 add(f"{market} {side}",
                     [x for x in candidates if x.get("category") == market
                      and x.get("side") == side])
+        if legacy_wl:
+            groups[f"Historical W/L · System {record_system} · Legacy Replay"] = (
+                sorted(legacy_wl, key=lambda x: (
+                    x.get("rank") if x.get("rank") is not None else 9999,
+                    x.get("category") or "", x.get("name") or ""
+                ))
+            )
         detail = [row for values in groups.values() for row in values]
         days.append({"date": day.get("date"), "detail": detail})
     return JSONResponse({"source": "historical" if historical else "official",
-                         "dates": days, "stake": 100.0})
+                         "system": record_system, "dates": days, "stake": 100.0})
 
 
 def _nhl_save_historical_analysis(
