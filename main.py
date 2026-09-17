@@ -6180,6 +6180,13 @@ function nhlToggle(n){
 // ── My Bets ──────────────────────────────────────────────────────────────────
 function _nhlEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function _nhlMoney(v){var n=Number(v)||0;return(n>=0?'$':'\u2212$')+Math.abs(n).toFixed(2);}
+function _nhlCalcProfit(odds,stake,result){
+ var r=String(result||'').toUpperCase(),s=Number(stake),o=Number(odds);
+ if(r==='LOSS')return -s;
+ if(r==='PUSH'||r==='VOID')return 0;
+ if(r!=='WIN'||!isFinite(s)||s<0||!isFinite(o)||o===0)return 0;
+ return o>0?s*o/100:s*100/Math.abs(o);
+}
 function _nhlBetAuthQS(){
   var tok=localStorage.getItem('__mpa_token')||'';
   var adm=new URLSearchParams(location.search).get('admin')||'';
