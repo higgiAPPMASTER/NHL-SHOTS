@@ -3075,6 +3075,11 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
                     void_reason = pick.get("simVoidReason") or (
                         "No matching historical NHL appearance was available."
                     )
+            model_score = pick.get("dispScore")
+            if model_score is None:
+                model_score = pick.get("ptsScore")
+            if model_score is None:
+                model_score = pick.get("score")
             base_row = {
                 "name": pick.get("name", ""), "team": pick.get("team", ""),
                 "opponent": pick.get("opponent", ""),
@@ -3086,10 +3091,7 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
                 "schedule_context": pick.get("scheduleContext") or {},
                 "player_workload": pick.get("playerWorkload") or {},
                 "schedule_factor": pick.get("scheduleFactor", 1.0),
-                "score": (
-                    pick.get("dispScore") or pick.get("ptsScore")
-                    or pick.get("score")
-                ),
+                "score": model_score,
                 "actual": actual,
                 "result": outcome, "actual": actual, "void_reason": void_reason,
                 "profit": round(_nhl_american_profit(odds, _NHL_TRK_STAKE, outcome), 2)
@@ -3103,10 +3105,7 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
             # 80-100% pick is counted once in its native market and once in the
             # Locks category, while retaining its main/overflow source pool.
             try:
-                lock_score = float(
-                    pick.get("dispScore") or pick.get("ptsScore")
-                    or pick.get("score") or 0
-                )
+                lock_score = float(model_score if model_score is not None else 0)
             except (TypeError, ValueError):
                 lock_score = 0.0
             if lock_score >= 80:
@@ -7173,7 +7172,7 @@ async function loadNhlHistoricalAnalysis(){
 }
 async function preflightNhlOctober(){
   var out=document.getElementById('nhlHistBatchStatus');
-  if(out)out.textContent='Checking the free NHL schedule only…';
+  if(out)out.textContent='Checking the free NHL schedule and archived-odds coverage only…';
   try{
     var r=await fetch('/api/nhl/historical-batch/preflight?token='+_nhlHistAuth());
     if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
@@ -7182,16 +7181,16 @@ async function preflightNhlOctober(){
   }catch(e){if(out)out.textContent=e.message||'Preflight failed';}
 }
 async function startNhlOctoberReplay(){
-  if(!confirm('Start the October–December 2025 A/B/C/D historical replay now? This will use Odds API quota for uncached dates.'))return;
-  var phrase=prompt('Type RUN A B C D OCT NOV DEC 2025 to confirm the bounded replay.');
-  if(phrase!=='RUN A B C D OCT NOV DEC 2025')return;
+  if(!confirm('Start the January–June 2026 A/B/C/D historical replay now? It will use only the durable archived-odds cache.'))return;
+  var phrase=prompt('Type RUN A B C D JAN JUN 2026 to confirm the bounded replay.');
+  if(phrase!=='RUN A B C D JAN JUN 2026')return;
   var out=document.getElementById('nhlHistBatchStatus');
   try{
     var r=await fetch('/api/nhl/historical-batch/start?token='+_nhlHistAuth(),{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:phrase})
     });
     if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
-    if(out)out.textContent='A/B/C/D October–December replay started.';
+    if(out)out.textContent='A/B/C/D January–June replay started.';
     pollNhlOctoberReplay();
   }catch(e){if(out)out.textContent=e.message||'Could not start replay';}
 }
@@ -7684,8 +7683,8 @@ _NHL_HIST_C_DETAIL_CAT = "__historical_analysis_c_detail__"
 _NHL_HIST_D_DETAIL_CAT = "__historical_analysis_d_detail__"
 _NHL_HIST_GP_CAT = "__historical_analysis_gp__"
 _NHL_HIST_ODDS_CAT = "__historical_odds_cache_v3__"
-_NHL_HIST_BATCH_START = "2025-10-07"
-_NHL_HIST_BATCH_END = "2025-12-31"
+_NHL_HIST_BATCH_START = "2026-01-01"
+_NHL_HIST_BATCH_END = "2026-06-14"
 
 
 def _nhl_load_historical_odds_cache(date_str: str):
@@ -9572,7 +9571,7 @@ async def _nhl_run_historical_october_batch():
                 "status": "running", "completed": 0,
                 "total": len(remaining), "current_date": "",
                  "failed_dates": [],
-                 "message": "A/B/C/D October-December replay running",
+                 "message": "A/B/C/D January-June replay running",
                 "preflight": calendar,
             })
         for index, row in enumerate(remaining, 1):
@@ -9636,9 +9635,9 @@ async def _nhl_run_historical_october_batch():
                 "status": "completed_with_errors" if failures else "completed",
                 "current_date": "",
                 "message": (
-                    f"A/B/C/D October-December replay finished with "
+                    f"A/B/C/D January-June replay finished with "
                     f"{failures} failed date(s)"
-                    if failures else "A/B/C/D October-December replay finished"
+                    if failures else "A/B/C/D January-June replay finished"
                 ),
             })
     except Exception as exc:
@@ -9675,10 +9674,10 @@ async def nhl_historical_batch_start(request: Request, token: str = ""):
     if not _nhl_historical_batch_auth(request, token):
         raise HTTPException(status_code=403, detail="Admin only")
     body = await request.json()
-    if body.get("confirm") != "RUN A B C D OCT NOV DEC 2025":
+    if body.get("confirm") != "RUN A B C D JAN JUN 2026":
         raise HTTPException(
             status_code=400,
-            detail="Explicit A/B/C/D October-December confirmation is required")
+            detail="Explicit A/B/C/D January-June 2026 confirmation is required")
     with _NHL_HIST_BATCH_LOCK:
         if _NHL_HIST_BATCH.get("status") == "running":
             raise HTTPException(status_code=409, detail="Batch already running")
@@ -9686,7 +9685,7 @@ async def nhl_historical_batch_start(request: Request, token: str = ""):
             "status": "starting", "start": _NHL_HIST_BATCH_START,
             "end": _NHL_HIST_BATCH_END, "completed": 0, "total": 0,
             "current_date": "", "failed_dates": [],
-            "message": "Preparing A/B/C/D October-December schedule",
+            "message": "Preparing A/B/C/D January-June 2026 schedule",
         }
     _bt_th.Thread(
         target=_nhl_historical_batch_thread,
