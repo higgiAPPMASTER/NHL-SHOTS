@@ -4486,12 +4486,17 @@ body.is-admin .frank-ai-systems{display:flex!important}
 </footer>
 
 <script>
+function _nhlLocalDate(){
+  var now=new Date(),offset=now.getTimezoneOffset()*60000;
+  return new Date(now.getTime()-offset).toISOString().slice(0,10);
+}
+
 // Set date to today
 document.addEventListener('DOMContentLoaded', function(){
 
 
   var dp = document.getElementById('datePicker');
-  var today = new Date().toISOString().split('T')[0];
+  var today = _nhlLocalDate();
   dp.value = today;
 
   // Snapshot mode: hub serves this page with picks baked in as
@@ -5188,7 +5193,7 @@ async function getPicks(){
   var out=document.getElementById('out');
   var dt=document.getElementById('datePicker').value;
   var orig=btn.textContent;
-  var isHistorical=dt&&dt<new Date().toISOString().slice(0,10);
+  var isHistorical=dt&&dt<_nhlLocalDate();
   btn.disabled=true; btn.textContent='Loading...';
   if(st) st.textContent=isHistorical?'Building historical picks and Track Record for '+dt+'...':'Loading saved picks for '+dt+'...';
   var pollTimer=null;
@@ -5224,6 +5229,14 @@ async function getPicks(){
       data=allCache.systems[replaySystem];
     }else{
       var res=await fetch(url);
+      // Today may not have a scheduled cache yet (common in preseason). In
+      // that case, run the normal live pipeline instead of stopping at 404.
+      // Preseason persistence remains blocked by run_picks' capture guard.
+      if(res.status===404&&!isHistorical){
+        if(st)st.textContent='No saved board yet — generating today\\'s picks...';
+        url='/api/picks?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok);
+        res=await fetch(url);
+      }
       if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
       if(!res.ok){
         var errData=await res.json().catch(function(){return {};});
@@ -5268,7 +5281,7 @@ async function runAllNhlSystems(){
   var btn=document.getElementById('nhlRunAllBtn');
   var st=document.getElementById('nhlRunAllStatus');
   var dp=document.getElementById('datePicker');
-  var dt=(dp&&dp.value)||new Date().toISOString().slice(0,10);
+  var dt=(dp&&dp.value)||_nhlLocalDate();
   if(btn){btn.disabled=true;btn.textContent='Running all four systems…';}
   if(st){st.style.display='block';st.textContent='One trigger is running A+B together, then C and D. Sportsbook lines are reused from the same odds cache.';}
   try{
