@@ -132,7 +132,7 @@ def _cache_get(app: str, date_key: str):
     try:
         if p.exists() and (time.time() - p.stat().st_mtime) < _CACHE_TTL:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if app == "nhl" and data.get("_nhlCacheVersion") != 4:
+            if app == "nhl" and data.get("_nhlCacheVersion") != 5:
                 print(f"[Cache] STALE SCHEMA {app}/{date_key}")
                 return None
             print(f"[Cache] FILE HIT {app}/{date_key}")
@@ -196,11 +196,40 @@ async def _fetch(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
     return None
 
 
-def get_season_for_date(d: date) -> str:
-    """Return NHL season ID for a given date e.g. 20242025"""
-    if d.month >= 10:
-        return f"{d.year}{d.year + 1}"
-    return f"{d.year - 1}{d.year}"
+def get_season_for_date(d: date, game: Optional[Dict] = None) -> str:
+    """Return the NHL season ID, preferring the schedule's authoritative value.
+
+    NHL preseason starts in September, so the old October boundary assigned
+    those games to the ended season.  July is the safe NHL season boundary.
+    """
+    if game:
+        for key in ("season", "seasonId", "season_id"):
+            value = game.get(key)
+            if value is not None and re.fullmatch(r"\d{8}", str(value)):
+                return str(value)
+        # Game IDs are YYYY02xxxx in the NHL feed and encode the season start.
+        match = re.match(r"^(\d{4})02\d+$", str(game.get("gameId") or game.get("id") or ""))
+        if match:
+            year = int(match.group(1))
+            return f"{year}{year + 1}"
+    return f"{d.year}{d.year + 1}" if d.month >= 7 else f"{d.year - 1}{d.year}"
+
+
+_NHL_GAME_TYPE_LABELS = {1: "PRESEASON", 2: "REGULAR", 3: "PLAYOFFS"}
+
+
+def _nhl_slate_meta(games: List[Dict]) -> Dict:
+    """Describe the selected slate and whether official capture is allowed."""
+    types = sorted({int(g.get("gameType")) for g in games
+                    if str(g.get("gameType", "")).isdigit()})
+    has_preseason = 1 in types
+    return {
+        "gameTypes": types,
+        "gameTypeLabels": [_NHL_GAME_TYPE_LABELS.get(t, f"TYPE {t}") for t in types],
+        "preseason": has_preseason,
+        # A mixed slate is deliberately view-only too: never partially capture it.
+        "officialCaptureAllowed": not has_preseason,
+    }
 
 
 async def get_today_games(target_date: str = None) -> List[Dict]:
@@ -213,7 +242,11 @@ async def get_today_games(target_date: str = None) -> List[Dict]:
     for day in data.get("gameWeek", []):
         if day.get("date") == target_date:
             for g in day.get("games", []):
-                if g.get("gameState", "") in ("FUT", "PRE", "LIVE", "CRIT", "OFF", "FINAL"):
+                game_type = g.get("gameType")
+                # The NHL schedule endpoint can contain international events
+                # (notably type 9).  They are never NHL live-board games.
+                if (g.get("gameState", "") in ("FUT", "PRE", "LIVE", "CRIT", "OFF", "FINAL")
+                        and game_type in (1, 2, 3)):
                     games.append({
                         "gameId":    g["id"],
                         "homeTeam":  g["homeTeam"]["abbrev"],
@@ -222,6 +255,10 @@ async def get_today_games(target_date: str = None) -> List[Dict]:
                         "awayFull":  g["awayTeam"].get("commonName", {}).get("default", ""),
                         "startTime": g.get("startTimeUTC", ""),
                         "gameState": g.get("gameState", ""),
+                        "gameType":    int(game_type),
+                        "gameTypeLabel": _NHL_GAME_TYPE_LABELS[int(game_type)],
+                        "season":      get_season_for_date(
+                            date.fromisoformat(target_date), g),
                     })
     await _attach_confirmed_game_lineups(games)
     return games
@@ -706,6 +743,9 @@ def _nhl_gp_predict(games: list, gp_data: dict) -> list:
             "homeTeam": home, "awayTeam": away,
             "homeFull": g.get("homeFull", ""), "awayFull": g.get("awayFull", ""),
             "startTime": g.get("startTime", ""),
+            "gameType": g.get("gameType"),
+            "gameTypeLabel": g.get("gameTypeLabel", ""),
+            "season": g.get("season", ""),
             "projHome": proj_h, "projAway": proj_a, "projTotal": proj_total,
             "winProbHome": win_prob, "pickTeam": pick_team, "pickProb": pick_prob,
             "hGfPG": ht["gfPG"], "hGaPG": ht["gaPG"],
@@ -3217,6 +3257,20 @@ async def run_picks(
         return {"no_games": True,
                 "message": f"No NHL games scheduled for {target_date}.",
                 "picks": [], "games": []}
+    slate_meta = _nhl_slate_meta(games)
+    # Schedule-derived season wins over the date fallback (important for
+    # September preseason and for any mixed slate).
+    seasons = [g.get("season") for g in games if g.get("season")]
+    if seasons:
+        season = seasons[0]
+    # Historical replay is intentionally limited to regular season/playoffs.
+    # Live runs may include preseason, using the exact same board/model path.
+    if simulate and not all(g.get("gameType") in (2, 3) for g in games):
+        return {
+            "error": "Historical replays support regular-season and playoff NHL games only.",
+            "picks": [], "games": games, "season": season,
+            **slate_meta,
+        }
     # Historical replays reconstruct schedule pressure from the seven days
     # before the target slate. Live behavior remains unchanged.
     schedule_context = (
@@ -3652,7 +3706,7 @@ async def run_picks(
             player_profiles.append(profile)
 
     _result = {
-        "_nhlCacheVersion": 4,
+        "_nhlCacheVersion": 5,
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
@@ -3679,6 +3733,10 @@ async def run_picks(
         "savesUndersRest": saves_unders[TOP_N:TOP_N*2],
         "playerProfiles": player_profiles,
         "games":         games,
+        "gameTypes":     slate_meta["gameTypes"],
+        "gameTypeLabels": slate_meta["gameTypeLabels"],
+        "preseason":     slate_meta["preseason"],
+        "officialCaptureAllowed": slate_meta["officialCaptureAllowed"],
         "sa_ranks":      sa_ranks,
         "poolSize":      len(pool),
         "qualified":     len(picks),
@@ -3737,16 +3795,29 @@ async def run_picks(
     # pending rather than waiting for the first grading pass.  The all-system
     # runner disables this for its C/D passes and writes those passes into
     # their own durable namespaces after the shared A/B pass completes.
-    if persist_live_snapshot:
+    # Preseason is a tuning/display slate only.  This guard is repeated here
+    # (rather than relying solely on callers) so no official mutation path can
+    # be reached by a future live-run entry point.
+    capture_official = bool(
+        persist_live_snapshot and slate_meta["officialCaptureAllowed"])
+    if capture_official:
         _nhl_save_gp_snapshot(target_date, _result)
         _nhl_save_picks_snapshot(target_date, _result)
+    if not capture_official:
+        _result["captureStatus"] = (
+            "PRESEASON view-only: official snapshots, system records, "
+            "Game Predictor records, and Track Records were not written.")
     try:
+        if not capture_official:
+            _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
+            return _result
         from replit_push import push_picks_to_replit
         # Bake the picks into the page HTML so the Replit hub can serve an
         # instant, no-cold-start snapshot at moneypicksarena.com/dashboard/nhl.
         import json as _json
         try:
-            _track_record = _nhl_track_record_payload()
+            _track_record = (
+                _nhl_track_record_payload() if capture_official else None)
         except Exception:
             # A picks snapshot is still useful if historical data is
             # temporarily unavailable.  The exception is retained in Render
@@ -3754,7 +3825,8 @@ async def run_picks(
             logger.exception("NHL snapshot Track Record payload failed")
             _track_record = None
         try:
-            _gp_record = _nhl_gp_record_payload()
+            _gp_record = (
+                _nhl_gp_record_payload() if capture_official else None)
         except Exception:
             logger.exception("NHL snapshot GP Record payload failed")
             _gp_record = None
@@ -3803,7 +3875,9 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
     b.update(a.get("legacySystem") or {})
     b["system"] = "B"
     b["comparisonSystem"] = "B Old/attached ZIP"
-    _nhl_save_picks_snapshot(target_date, b, snapshot_category="__picks_B__")
+    preseason_slate = bool(a.get("preseason"))
+    if not preseason_slate and a.get("officialCaptureAllowed", True):
+        _nhl_save_picks_snapshot(target_date, b, snapshot_category="__picks_B__")
 
     systems = {"A": a, "B": b}
     for system in ("C", "D"):
@@ -3825,7 +3899,9 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
 
     for system in ("C", "D"):
         result = systems[system]
-        if "error" not in result and not result.get("no_games"):
+        if (not preseason_slate and "error" not in result
+                and not result.get("no_games")
+                and result.get("officialCaptureAllowed", True)):
             _nhl_save_picks_snapshot(
                 target_date, result, snapshot_category=f"__picks_{system}__")
 
@@ -3833,6 +3909,9 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
     for system, result in systems.items():
         summary[system] = {
             "ok": "error" not in result and not result.get("no_games"),
+            "captureStatus": (
+                "PRESEASON_VIEW_ONLY" if result.get("preseason")
+                else "OFFICIAL_CAPTURE"),
             "picks": sum(len(result.get(key) or []) for key in (
                 "picks", "rest", "shotUnders", "shotUndersRest",
                 "ptsPicks", "ptsRest", "ptsUnders", "ptsUndersRest",
@@ -3848,7 +3927,12 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
         "games": len(a.get("games") or []),
         "systems": summary,
         "results": systems,
-        "message": "NHL systems A, B, C, and D completed",
+        "message": (
+            "NHL systems A, B, C, and D generated for PRESEASON "
+            "tuning; official records were not written."
+            if preseason_slate else "NHL systems A, B, C, and D completed"),
+        "preseason": preseason_slate,
+        "officialCaptureAllowed": not preseason_slate,
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4256,7 +4340,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <input type="date" id="datePicker"/>
     </div>
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
-    <button class="btn-run" id="nhlRunAllBtn" onclick="runAllNhlSystems()" style="display:none;margin-left:8px;background:#4338ca">Run A+B+C+D &amp; Log</button>
+    <button class="btn-run" id="nhlRunAllBtn" onclick="runAllNhlSystems()" style="display:none;margin-left:8px;background:#4338ca">Run A+B+C+D</button>
     <div id="nhlRunAllStatus" style="display:none;color:#93c5fd;font-size:.74rem;font-weight:700;margin-top:10px"></div>
     <div id="nhlPositionFilters" style="display:flex;justify-content:center;align-items:center;gap:7px;flex-wrap:wrap;margin:14px auto 0">
       <span style="color:#94a3b8;font-size:.7rem;font-weight:900;letter-spacing:.06em">SHOW</span>
@@ -5201,14 +5285,18 @@ async function runAllNhlSystems(){
     var parts=[];
     ['A','B','C','D'].forEach(function(system){
       var row=(data.systems||{})[system]||{};
-      parts.push(system+': '+(row.ok?(row.picks+' logged'):(row.error||'failed')));
+      parts.push(system+': '+(row.ok
+        ?(data.preseason?(row.picks+' generated · view-only'):(row.picks+' logged'))
+        :(row.error||'failed')));
     });
-    if(st)st.textContent='Complete for '+dt+' · '+parts.join(' · ');
+    if(st)st.textContent=(data.preseason
+      ?'PRESEASON tuning complete · official records not written · '
+      :'Complete for '+dt+' · ')+parts.join(' · ');
     await getPicks();
   }catch(e){
     if(st){st.style.color='#f87171';st.textContent=e.message||'The four-system run failed.';}
   }finally{
-    if(btn){btn.disabled=false;btn.textContent='Run A+B+C+D & Log';}
+    if(btn){btn.disabled=false;btn.textContent='Run A+B+C+D';}
   }
 }
 
@@ -5866,7 +5954,8 @@ function renderResults(d){
   window.__NHL_RAW__ = d;
   window.__NHL_SEASON__ = d.season || '20252026';
   window.__NHL_DATE__ = d.date || '';
-  document.getElementById('out').innerHTML = '<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
+  var _preseason=!!d.preseason;
+  document.getElementById('out').innerHTML = (_preseason?'<div style="margin:0 0 12px;padding:11px 14px;border:1px solid rgba(251,191,36,.55);background:rgba(120,53,15,.22);border-radius:10px;color:#fde68a;font-size:.75rem;font-weight:900;letter-spacing:.04em">PRESEASON · TUNING / VIEW-ONLY · OFFICIAL RECORDS NOT WRITTEN</div>':'')+'<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
   if(window.IS_ADMIN){
     var loadedSystem=String(d.system||window.NHL_HIST_SYSTEM||'A').toUpperCase();
     if(['A','B','C','D'].indexOf(loadedSystem)>=0)window.NHL_FRANK_SYSTEM=loadedSystem;
@@ -5950,6 +6039,7 @@ function nhlLookupPlayer(){
 // whose pick lists are name-filtered, leaving the original render code untouched.
 function _nhlPaint(q){
   var raw=window.__NHL_RAW__; if(!raw) return;
+  var _preseason=!!raw.preseason;
   var options=document.getElementById('nhlPlayerOptions');
   if(options){
     options.innerHTML=_nhlPlayerDirectory().map(function(p){
@@ -5987,12 +6077,12 @@ function _nhlPaint(q){
     '</div>';
 
   // Games
-  h += '<div id="nhl-section-games" class="sec">- Games -- ' + (d.targetDate || '') + '</div><div class="games">';
+  h += '<div id="nhl-section-games" class="sec">- Games -- ' + (d.targetDate || '') + (_preseason?' <span style="color:#fbbf24;font-size:.7em">PRESEASON</span>':'') + '</div><div class="games">';
   d.games.forEach(function(g){
     var t = g.startTime ? new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}) : '';
     var lu=g.lineupByTeam||{},a=lu[g.awayTeam]||g.lineupSource||'UNAVAILABLE',hm=lu[g.homeTeam]||g.lineupSource||'UNAVAILABLE';
     function _luText(v){return v==='CONFIRMED'?'confirmed':v==='BOOK_LISTED'?'book-listed': 'unavailable';}
-    h += '<div class="gcard nhl-game-jump" data-game-id="' + _nhlGameId(g.awayTeam,g.homeTeam) + '"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + '</div><div class="gt">' + t + '</div>'
+    h += '<div class="gcard nhl-game-jump" data-game-id="' + _nhlGameId(g.awayTeam,g.homeTeam) + '"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + (g.gameTypeLabel==='PRESEASON'?' <span style="color:#fbbf24;font-size:.65em">PRESEASON</span>':'') + '</div><div class="gt">' + t + '</div>'
       + '<div style="margin-top:4px;color:#94a3b8;font-size:.6rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em">Lineups: '
       + g.awayTeam + ' ' + _luText(a) + ' · ' + g.homeTeam + ' ' + _luText(hm) + '</div></div>';
   });
