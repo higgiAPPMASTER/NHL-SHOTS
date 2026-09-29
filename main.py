@@ -492,6 +492,56 @@ def _odds_event_matches_slate(event: Dict, games: List[Dict]) -> bool:
     )
 
 
+async def _nhl_gp_recent_meetings(target_date: str, home: str, away: str) -> dict:
+    """Completed NHL meetings before the selected game, for display only."""
+    season_start = (date.fromisoformat(target_date).year
+                    if date.fromisoformat(target_date).month >= 7
+                    else date.fromisoformat(target_date).year - 1)
+    meetings, seen = [], set()
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        for start_year in range(season_start, season_start - 8, -1):
+            season = f"{start_year}{start_year + 1}"
+            cached = _cache_get("nhl_gp_schedule", f"{home}_{season}")
+            if cached is None:
+                try:
+                    response = await client.get(
+                        f"{NHL_API}/club-schedule-season/{home}/{season}")
+                    response.raise_for_status()
+                    cached = response.json()
+                    if not isinstance(cached, dict) or not isinstance(cached.get("games"), list):
+                        raise ValueError("Invalid NHL club schedule")
+                    _cache_set("nhl_gp_schedule", f"{home}_{season}", cached)
+                except (httpx.HTTPError, ValueError) as exc:
+                    print(f"[GP] Head-to-head schedule unavailable for {home}/{season}: {exc}")
+                    return {"meetings": meetings[:10], "unavailable": True}
+            for game in cached.get("games", []):
+                if not isinstance(game, dict):
+                    continue
+                ds = str(game.get("gameDate") or "")
+                gh = (game.get("homeTeam") or {}).get("abbrev")
+                ga = (game.get("awayTeam") or {}).get("abbrev")
+                hs = (game.get("homeTeam") or {}).get("score")
+                a_s = (game.get("awayTeam") or {}).get("score")
+                game_id = game.get("id")
+                if (not ds or ds >= target_date or game_id in seen
+                        or {gh, ga} != {home, away}
+                        or game.get("gameState") not in ("OFF", "FINAL")
+                        or game.get("gameType") not in (1, 2, 3)
+                        or not isinstance(hs, int) or not isinstance(a_s, int)):
+                    continue
+                seen.add(game_id)
+                meetings.append({
+                    "date": ds, "home": gh, "away": ga,
+                    "homeGoals": hs, "awayGoals": a_s,
+                    "winner": gh if hs > a_s else ga if a_s > hs else "",
+                    "totalGoals": hs + a_s,
+                })
+            if len(meetings) >= 10:
+                break
+    meetings.sort(key=lambda row: row["date"], reverse=True)
+    return {"meetings": meetings[:10], "unavailable": False}
+
+
 async def _nhl_gp_fetch_all(target_date: str, season: str) -> dict:
     """Fetch standings, team summary, PP/PK, B2B schedule, and Odds API game lines."""
     import urllib.parse as _up
@@ -3343,7 +3393,26 @@ async def run_picks(
     _progress = {"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35}
 
     if not pool:
-        return {"error": "No players found for today's games.", "picks": [], "games": games}
+        # The team-level predictor does not depend on sportsbook player props.
+        # Keep it available while pregame lineup/prop markets are still empty.
+        game_preds = []
+        if games and not skip_game_predictor:
+            try:
+                gp_data = await _nhl_gp_fetch_all(target_date, season)
+                gp_data["schedule_context"] = await _nhl_schedule_context(target_date, games)
+                game_preds = _nhl_gp_predict(games, gp_data)
+            except Exception as exc:
+                print(f"[GP] independent no-props predictor unavailable: {exc}")
+        return {
+            "date": target_date, "targetDate": target_date, "season": season,
+            "system": system, "games": games, "picks": [], "sa_ranks": sa_ranks,
+            "game_predictions": game_preds, "qualified": 0, "poolSize": 0,
+            "preseason": slate_meta["preseason"],
+            "gameTypeLabels": slate_meta["gameTypeLabels"],
+            "officialCaptureAllowed": False,
+            "unpriced": bool(unpriced_mode and not simulate),
+            "data_note": "Player props are unavailable for this slate; Game Predictor is shown independently.",
+        }
 
     # Fetch NHL API game logs for all players concurrently
     log_tasks = {p["pid"]: _nhl_player_logs(p["pid"], sem_nhl) for p in pool}
@@ -4075,6 +4144,14 @@ details>summary::-webkit-details-marker{display:none}
 .gp-stk.win-stk{background:rgba(74,222,128,.1);color:#4ade80;border:1px solid rgba(74,222,128,.2)}
 .gp-stk.loss-stk{background:rgba(248,113,113,.1);color:#f87171;border:1px solid rgba(248,113,113,.2)}
 .gp-ml-row{font-size:.68rem;color:#6b7280;margin-top:6px;display:flex;justify-content:space-between}
+.gp-history{border-top:1px solid #2e2e2e;margin-top:12px;padding-top:10px}
+.gp-history summary{cursor:pointer;color:#fbbf24;font-size:.75rem;font-weight:800}
+.gp-history-note{color:#94a3b8;font-size:.68rem;margin:8px 0}
+.gp-history-table{width:100%;border-collapse:collapse;font-size:.68rem;white-space:nowrap}
+.gp-history-table th,.gp-history-table td{padding:6px 4px;text-align:left;border-bottom:1px solid #262626}
+.gp-history-table th{color:#9ca3af;font-weight:700}
+.gp-history-table tr.same-venue{background:rgba(245,158,11,.16);color:#fde68a}
+.gp-history-scroll{max-height:320px;overflow:auto}
 footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border-top:1px solid #1c1c1c;margin-top:24px;font-family:'Source Sans Pro',sans-serif}
 .ft-logo{font-family:'Playfair Display',serif;color:#f59e0b;font-weight:700;font-size:.95rem;margin-bottom:6px}
 .admin-only{display:none !important}
@@ -4416,6 +4493,31 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
     <div class="frank-ai-note">Requires a loaded NHL board and a real price. Safest Bets uses only the exact side that qualified for the loaded board, keeps only positive Coach Edge, then ranks by sportsbook-implied probability. Model-only PP Points and plays without odds are excluded.</div>
+    <div style="margin-top:14px;padding:14px;border:1px solid rgba(167,139,250,.35);border-radius:12px;background:#11121b">
+      <div style="font-size:.93rem;font-weight:900;color:#ddd6fe;margin-bottom:5px">Edge Coach Parlay Builder</div>
+      <div style="font-size:.7rem;color:#94a3b8;margin-bottom:10px">Choose a market and side. Legs use positive Coach Edge and genuine sportsbook lines only; no record is written.</div>
+      <div style="display:flex;align-items:end;gap:9px;flex-wrap:wrap">
+        <label style="color:#c4b5fd;font-size:.72rem;font-weight:800">Category
+          <select id="frankParlayCategory" style="display:block;max-width:100%;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:8px;color:#fff;margin-top:4px" onchange="_frankBuildParlay()">
+            <option value="all">All priced categories</option>
+            <option value="shots|OVER">Shots on Goal — Over</option><option value="shots|UNDER">Shots on Goal — Under</option>
+            <option value="points|OVER">Points — Over</option><option value="points|UNDER">Points — Under</option>
+            <option value="pp|OVER">Power Play Points — Over</option><option value="pp|UNDER">Power Play Points — Under</option>
+            <option value="assists|OVER">Assists — Over</option><option value="assists|UNDER">Assists — Under</option>
+            <option value="goals|OVER">Goals — Over</option><option value="goals|UNDER">Goals — Under</option>
+            <option value="saves|OVER">Goalie Saves — Over</option><option value="saves|UNDER">Goalie Saves — Under</option>
+          </select>
+        </label>
+        <label style="color:#c4b5fd;font-size:.72rem;font-weight:800">Legs
+          <select id="frankParlayLegs" style="display:block;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:8px;color:#fff;margin-top:4px" onchange="_frankBuildParlay()">
+            <option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
+          </select>
+        </label>
+        <button type="button" class="frank-ai-send" onclick="_frankBuildParlay()">Build Coach Parlay</button>
+      </div>
+      <div style="font-size:.67rem;color:#94a3b8;margin-top:8px">Power Play Points is normally model-only. Selecting it never invents a line or price; without a genuine priced play the builder shows no available legs.</div>
+      <div id="frankParlayResult" aria-live="polite" style="margin-top:10px"></div>
+    </div>
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
 
@@ -4429,7 +4531,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
         </select>
       </label>
       <div style="position:relative;display:inline-block">
-        <button class="btn-run" id="nhl-parlay-cats-btn" onclick="toggleNhlCatMenu(event)" style="background:#1f2937">&#9776; Categories (10/10) &#9662;</button>
+        <button class="btn-run" id="nhl-parlay-cats-btn" onclick="toggleNhlCatMenu(event)" style="background:#1f2937">&#9776; Categories (12/12) &#9662;</button>
         <div id="nhl-parlay-cats-menu" style="display:none;position:absolute;z-index:60;top:calc(100% + 6px);left:0;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:10px;padding:10px 12px;min-width:220px;box-shadow:0 12px 34px rgba(0,0,0,.55);text-align:left">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
             <span style="font-size:.63rem;color:#888;font-weight:800;letter-spacing:.06em">PARLAY CATEGORIES</span>
@@ -4439,6 +4541,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="SHOTS_U" checked onchange="_nhlParlayCatChanged()"> Shots on Goal — UNDER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="POINTS_O" checked onchange="_nhlParlayCatChanged()"> Points (1+) — OVER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="POINTS_U" checked onchange="_nhlParlayCatChanged()"> Points (1+) — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="PP_O" checked onchange="_nhlParlayCatChanged()"> Power Play Points — OVER · MODEL</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="PP_U" checked onchange="_nhlParlayCatChanged()"> Power Play Points — UNDER · MODEL</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="ASSISTS_O" checked onchange="_nhlParlayCatChanged()"> Assists (1+) — OVER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="ASSISTS_U" checked onchange="_nhlParlayCatChanged()"> Assists (1+) — UNDER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="GOALS_O" checked onchange="_nhlParlayCatChanged()"> Goals (1+) — OVER</label>
@@ -4545,7 +4649,7 @@ function _decToAm(d){if(!d||d<=1)return null;return d>=2?'+'+Math.round((d-1)*10
 function _fmtOdds(o){if(o==null||o==='')return null;var s=String(o).trim();if(!s||s==='0')return null;return (s.charAt(0)==='-'||s.charAt(0)==='+')?s:'+'+s;}
 function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(odds);if(isNaN(a)||a===0)return true;return a>=-500;}
 function _legScore(c){return (c.hasOdds?1:0)*1e9+(c.rate||0)*1e4+(c.dec?Math.min(c.dec,11)*100:0);}
-window.NHL_PARLAY_CATS = {SHOTS_O:true,SHOTS_U:true,POINTS_O:true,POINTS_U:true,ASSISTS_O:true,ASSISTS_U:true,GOALS_O:true,GOALS_U:true,SAVES_O:true,SAVES_U:true};
+window.NHL_PARLAY_CATS = {SHOTS_O:true,SHOTS_U:true,POINTS_O:true,POINTS_U:true,PP_O:true,PP_U:true,ASSISTS_O:true,ASSISTS_U:true,GOALS_O:true,GOALS_U:true,SAVES_O:true,SAVES_U:true};
 window.NHL_PARLAY_GAMES=window.NHL_PARLAY_GAMES||{};
 var _NHL_PARLAY_COACH_CATS=[
   {key:'coach_edge',label:'Coach Edge — Top 10'},{key:'safest_bets',label:'Safest Bets — Top 10'},
@@ -4625,17 +4729,18 @@ function _renderNhlParlayCoachCats(){
 document.addEventListener('DOMContentLoaded',function(){_syncNhlParlayCats();_paintNhlParlayCatBtn();_renderNhlParlayGames();_renderNhlParlayCoachCats();});
 function _nhlLeg(p){
   var market=p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
-  var line=p.realLine;
+  var modelOnly=market==='Power Play Points (1+)'&&p.lineSource==='Model';
+  var line=modelOnly?p.dispLine:p.realLine;
   if(line==null) return null;
   var dir=p._parlaySide==='UNDER'?'UNDER':'OVER';
   var rate=dir==='UNDER'
     ?(p.underRate||p.underRateAny||p.underRateVo||0)
     :(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
-  var odds=dir==='UNDER'?(p.realUnderOdds||''):(p.realOdds||'');var dec=_amToDec(odds);
-  return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec,source:'normal'};
+  var odds=modelOnly?'':dir==='UNDER'?(p.realUnderOdds||''):(p.realOdds||'');var dec=_amToDec(odds);
+  return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec,source:'normal',modelOnly:modelOnly};
 }
 function _nhlParlayCatKey(c){
-  var base={'Shots on Goal':'SHOTS','Points (1+)':'POINTS','Assists (1+)':'ASSISTS','Goals (1+)':'GOALS','Goalie Saves':'SAVES'}[c.market]||'SHOTS';
+  var base={'Shots on Goal':'SHOTS','Points (1+)':'POINTS','Power Play Points (1+)':'PP','Assists (1+)':'ASSISTS','Goals (1+)':'GOALS','Goalie Saves':'SAVES'}[c.market]||'SHOTS';
   return base+(c.dir==='UNDER'?'_U':'_O');
 }
 function _nhlCoachParlayCandidates(){
@@ -4756,20 +4861,20 @@ function _paintNhlParlay(legs,n,randomize){
     +'<div style="display:flex;align-items:center;gap:8px;min-width:0">'
     +'<div style="min-width:0;flex:1">'
     +'<div style="font-weight:800;color:#fff;font-size:.85rem">'+(i+1)+'. '+l.player+' <span style="color:#777;font-size:.7rem">'+l.team+(l.opp?(' vs '+l.opp):'')+'</span></div>'
-    +'<div style="color:#999;font-size:.72rem;margin-top:2px">'+l.market+(l.line!=null?(' · line '+l.line):'')+(l.rate?(' · '+l.rate+'% hit'):'')+'</div>'
+     +'<div style="color:#999;font-size:.72rem;margin-top:2px">'+l.market+(l.line!=null?(' · '+(l.modelOnly?'model threshold ':'line ')+l.line):'')+(l.rate?(' · '+l.rate+'% hit'):'')+'</div>'
     +'</div>'
     +'<button type="button" onclick="replaceNhlParlayLeg('+i+')" title="Generate a new player prop" aria-label="Generate a new player prop" style="flex:0 0 auto;background:#7c3aed;color:#fff;border:0;border-radius:6px;width:25px;height:25px;padding:0;cursor:pointer;font-size:.95rem;font-weight:900;line-height:25px">↻</button>'
     +'</div>'
     +'<div style="text-align:right;white-space:nowrap">'
     +'<div style="color:'+dirColor(l.dir)+';font-weight:900;font-size:.8rem">'+l.dir+'</div>'
-    +'<div style="color:#f59e0b;font-size:.72rem;font-weight:800">'+(fo||'odds N/A')+'</div>'
+     +'<div style="color:#f59e0b;font-size:.72rem;font-weight:800">'+(fo||(l.modelOnly?'MODEL · unpriced':'odds N/A'))+'</div>'
     +'</div></div>';}).join('');
   var header='<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid #262626;background:#121212">'
     +'<span style="font-weight:800;color:#ccc;font-size:.74rem">'+(randomize?'RANDOM MIX':'TOP PLAYS')+'</span>'
     +'<span onclick="closeParlay()" title="Close" style="cursor:pointer;color:#888;font-weight:900;font-size:1.15rem;line-height:1;padding:0 6px">×</span></div>';
   var summary='<div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:linear-gradient(135deg,rgba(245,158,11,.12),rgba(245,158,11,.02));border-top:1px solid #262626">'
     +'<div style="font-weight:900;color:#f59e0b">'+n+'-LEG PARLAY</div>'
-    +'<div style="text-align:right">'+(am?('<div style="font-weight:900;color:#4ade80;font-size:1.05rem">'+am+'</div><div style="color:#999;font-size:.7rem">$100 → $'+payout.toFixed(2)+(missing?(' · '+priced+'/'+n+' legs priced'):'')+'</div>'):('<div style="color:#888;font-size:.78rem">No book odds available for these legs</div>'))+'</div>'
+     +'<div style="text-align:right">'+(missing?'<div style="color:#fbbf24;font-size:.72rem">MODEL / UNPRICED LEGS · not a bettable parlay</div>':am?('<div style="font-weight:900;color:#4ade80;font-size:1.05rem">'+am+'</div><div style="color:#999;font-size:.7rem">$100 → $'+payout.toFixed(2)+'</div>'):('<div style="color:#888;font-size:.78rem">No book odds available for these legs</div>'))+'</div>'
     +'</div>';
   out.innerHTML='<div style="background:#0e0e0e;border:1px solid #262626;border-radius:12px;overflow:hidden">'+header+rows+summary+'</div>';
 }
@@ -4913,6 +5018,43 @@ function _frankAllProps(){
     });
   });
   return out;
+}
+function _frankBuildParlay(){
+  var out=document.getElementById('frankParlayResult');
+  var cat=document.getElementById('frankParlayCategory');
+  var legs=document.getElementById('frankParlayLegs');
+  if(!out||!cat||!legs)return;
+  var choice=cat.value,n=Number(legs.value)||3,parts=choice.split('|');
+  var props=_frankAllProps().filter(function(p){
+    var odds=Number(p.odds);
+    return p.edge>0&&odds!==0&&isFinite(odds)&&odds>=-1000
+      &&_amToDec(odds)!=null
+      &&(choice==='all'||(p.marketKey===parts[0]&&p.side===parts[1]));
+  }).sort(function(a,b){return b.edge-a.edge||b.appProb-a.appProb;});
+  var seen={},unique=[];
+  props.forEach(function(p){
+    var id=String(p.source&&p.source.pid||p.player||'').toLowerCase();
+    if(!id||seen[id])return;
+    seen[id]=true;unique.push(p);
+  });
+  if(unique.length<n){
+    out.innerHTML='<div style="color:#fbbf24;font-size:.76rem;padding:8px 0">Only '+unique.length
+      +' priced, positive-edge player'+(unique.length===1?'':'s')+' available for this choice. '
+      +(parts[0]==='pp'?'Power Play Points remains model-only without a real book line and price.':'Choose fewer legs or another category.')+'</div>';
+    return;
+  }
+  var picked=unique.slice(0,n),decimal=1;
+  var rows=picked.map(function(p,i){
+    decimal*=_amToDec(p.odds);
+    var am=p.odds>0?'+'+p.odds:String(p.odds);
+    return '<div style="display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid #283043;font-size:.73rem">'
+      +'<span><b>'+String(i+1)+'. '+_nhlSafe(p.player)+'</b> · '+_nhlSafe(p.team)
+      +' · '+_nhlSafe(p.market)+' '+_nhlSafe(p.side)+' '+_nhlSafe(p.line)+'</span>'
+      +'<span style="white-space:nowrap;color:#86efac">'+_nhlSafe(am)+' · +'+p.edge.toFixed(1)+'% edge</span></div>';
+  }).join('');
+  out.innerHTML=rows+'<div style="text-align:right;color:#ddd6fe;font-size:.78rem;font-weight:900;margin-top:9px">'
+    +'Combined '+_nhlSafe(_decToAm(decimal))+' · $100 returns $'+(decimal*100).toFixed(2)
+    +'</div><div style="color:#94a3b8;font-size:.65rem;margin-top:5px">Display-only; one play per player. Prices may change before placement.</div>';
 }
 function _frankSafestProps(props){
   var seen={},out=[];
@@ -5739,6 +5881,41 @@ function fmtVsLine(p){
   return '<span class="'+rateClass(p.vsLineRate)+'">'+p.vsLineHits+'/'+p.vsLineTotal+' ('+p.vsLineRate+'%)</span>';
 }
 
+function _nhlGpLoadHistory(panel){
+  if(!panel.open||panel.dataset.loaded)return;
+  panel.dataset.loaded='1';
+  var body=panel.querySelector('.gp-history-body');
+  var home=panel.dataset.home,away=panel.dataset.away,date=window.__NHL_DATE__||'';
+  body.textContent='Loading completed meetings...';
+  if(!date){body.textContent='Game date unavailable for this saved board.';return;}
+  fetch('/api/nhl/gp-meetings?date_str='+encodeURIComponent(date)
+    +'&home='+encodeURIComponent(home)+'&away='+encodeURIComponent(away))
+    .then(function(response){if(!response.ok)throw new Error('HTTP '+response.status);return response.json();})
+    .then(function(data){
+      var rows=data.meetings||[],line=panel.dataset.line;
+      if(!rows.length){
+        body.textContent=data.unavailable?'Meeting history is temporarily unavailable.':'No earlier completed NHL meetings were found.';
+        return;
+      }
+      var bookLine=line===''?null:Number(line);
+      var note='<div class="gp-history-note">Highlighted: '+_nhlSafe(home)+' at home, matching today. '
+        +'W/L is for '+_nhlSafe(home)+'. Totals compare with today\\'s book line only, not past closing lines.</div>';
+      if(data.unavailable)note+='<div class="gp-history-note">Older meetings could not be loaded; showing available results only.</div>';
+      var heading='<tr><th>Date</th><th>Venue</th><th>Final</th><th>Winner</th><th>W/L</th><th>Goals</th><th>Vs today O/U</th></tr>';
+      var html=rows.map(function(m){
+        var same=m.home===home,homeWon=m.winner===home;
+        var ou=bookLine==null||!isFinite(bookLine)?'—':m.totalGoals>bookLine?'OVER':m.totalGoals<bookLine?'UNDER':'PUSH';
+        return '<tr'+(same?' class="same-venue"':'')+'><td>'+_nhlSafe(m.date)+'</td>'
+          +'<td>'+_nhlSafe(m.away)+' @ '+_nhlSafe(m.home)+(same?' · SAME':'')+'</td>'
+          +'<td>'+_nhlSafe(m.awayGoals)+'–'+_nhlSafe(m.homeGoals)+'</td>'
+          +'<td>'+_nhlSafe(m.winner||'—')+'</td><td>'+(homeWon?'W':'L')+'</td>'
+          +'<td>'+_nhlSafe(m.totalGoals)+'</td><td>'+ou+'</td></tr>';
+      }).join('');
+      body.innerHTML=note+'<div class="gp-history-scroll"><table class="gp-history-table"><thead>'
+        +heading+'</thead><tbody>'+html+'</tbody></table></div>';
+    })
+    .catch(function(){panel.dataset.loaded='';body.textContent='Meeting history unavailable. Close and reopen to retry.';});
+}
 function renderNhlGamePredictor(preds){
   if(!preds||!preds.length) return '<div class="no-picks">No game predictions available.</div>';
   var h='<div class="gp-grid">';
@@ -5804,6 +5981,10 @@ function renderNhlGamePredictor(preds){
         +'</div>'
       +'</div>'
       +mlRow
+      +'<details class="gp-history" data-home="'+_nhlSafe(g.homeTeam)+'" data-away="'+_nhlSafe(g.awayTeam)
+        +'" data-line="'+(g.bookTotal==null?'':_nhlSafe(g.bookTotal))+'" ontoggle="_nhlGpLoadHistory(this)">'
+        +'<summary>Last 10 meetings · final scores, W/L &amp; totals</summary>'
+        +'<div class="gp-history-body gp-history-note">Open to load head-to-head results.</div></details>'
       +'</div>';
   });
   h+='</div>';
@@ -6077,6 +6258,7 @@ function _nhlPaint(q){
   var h = '';
 
   if(d.simulation && d.simulationStats) h += renderNhlSimulationStats(d.simulationStats);
+  if(d.data_note) h += '<div style="padding:10px 14px;border:1px solid #475569;border-radius:9px;color:#cbd5e1;font-size:.76rem;margin-bottom:12px">'+_nhlSafe(d.data_note)+'</div>';
 
   // Chips
   h += '<div class="chips">' +
@@ -6294,11 +6476,13 @@ function _nhlPaint(q){
   function _nhlParlaySide(arr, side){return (arr||[]).map(function(p){return Object.assign({},p,{_parlaySide:side});});}
   window.__NHL_PLAYS__ = _nhlParlaySide(raw.picks,'OVER').concat(_nhlParlaySide(raw.rest,'OVER'))
     .concat(_nhlParlaySide(raw.ptsPicks,'OVER')).concat(_nhlParlaySide(raw.ptsRest,'OVER'))
+    .concat(_nhlParlaySide(raw.ppPicks,'OVER')).concat(_nhlParlaySide(raw.ppRest,'OVER'))
     .concat(_nhlParlaySide(raw.astPicks,'OVER')).concat(_nhlParlaySide(raw.astRest,'OVER'))
     .concat(_nhlParlaySide(raw.goalPicks,'OVER')).concat(_nhlParlaySide(raw.goalRest,'OVER'))
     .concat(_nhlParlaySide(raw.savesPicks,'OVER')).concat(_nhlParlaySide(raw.savesRest,'OVER'))
     .concat(_nhlParlaySide(raw.shotUnders,'UNDER')).concat(_nhlParlaySide(raw.shotUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.ptsUnders,'UNDER')).concat(_nhlParlaySide(raw.ptsUndersRest,'UNDER'))
+    .concat(_nhlParlaySide(raw.ppUnders,'UNDER')).concat(_nhlParlaySide(raw.ppUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.astUnders,'UNDER')).concat(_nhlParlaySide(raw.astUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.goalUnders,'UNDER')).concat(_nhlParlaySide(raw.goalUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.savesUnders,'UNDER')).concat(_nhlParlaySide(raw.savesUndersRest,'UNDER'));
@@ -8564,6 +8748,18 @@ async def verify_token_nhl(request: Request):
 async def whoami(request: Request, token: str = ""):
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     return {"is_admin": _is_admin_token(tok)}
+
+@app.get("/api/nhl/gp-meetings")
+async def nhl_gp_meetings(date_str: str, home: str, away: str):
+    try:
+        selected_date = date.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid game date")
+    home, away = home.upper(), away.upper()
+    if (home not in _NHL_TEAM_FULL or away not in _NHL_TEAM_FULL
+            or home == away or selected_date.year < 2000):
+        raise HTTPException(status_code=400, detail="Invalid matchup")
+    return await _nhl_gp_recent_meetings(date_str, home, away)
 
 @app.get("/api/gp-record")
 async def nhl_gp_record(grade: bool = False, date_str: str = ""):
