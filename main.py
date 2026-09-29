@@ -5370,6 +5370,15 @@ function askFrank(){
   rows.sort(f.mode==='safe'
     ?function(a,b){return b.implied-a.implied||b.appProb-a.appProb;}
     :function(a,b){return b.edge-a.edge||b.appProb-a.appProb;});
+  // Apply every requested filter and ranking before choosing one play per
+  // player, so a different qualified market can fill the next open rank.
+  var seenPlayers={};
+  rows=rows.filter(function(p){
+    var player=String(p.player||'').trim().toLowerCase();
+    if(!player||seenPlayers[player])return false;
+    seenPlayers[player]=true;
+    return true;
+  });
   _frankRender(question,rows.slice(0,window.__NHL_ALT_COACH_ACTIVE__?10:f.limit),candidates.length,f.mode);
 }
 
@@ -9091,6 +9100,18 @@ async def nhl_coach_track(
                     if x.get("coach_edge") is not None
                     else float(x.get("app_probability") or 0) * 100.0
                 )), reverse=True)
+            if label != "All Coach Edge Plays · uncapped":
+                seen_players = set()
+                unique = []
+                for row in ordered:
+                    player = str(row.get("name") or "").strip().casefold()
+                    if not player or player in seen_players:
+                        continue
+                    seen_players.add(player)
+                    unique.append(row)
+                ordered = unique
+            # The uncapped audit pool still keeps every qualifying market
+            # play. Ranked Coach categories show one strongest play per player.
             groups[label] = [{**row, "preset": label} for row in ordered[:limit]]
         # The headline presets keep their own ranking limits, but the record
         # must also expose every qualifying Coach play, including Overflow.
@@ -9142,6 +9163,20 @@ async def nhl_coach_track(
             if alt is None:
                 alt = [{**p, "result": "PENDING", "actual": None}
                        for p in (snap.get("detail") or [])]
+            # Separate scans can capture several alternate markets for the
+            # same player. Keep the raw snapshot, but show the strongest
+            # qualifying play once in this Coach record category per date.
+            best_alt = {}
+            for row in alt:
+                player = str(row.get("name") or "").strip().casefold()
+                if not player:
+                    continue
+                edge = row.get("coach_edge")
+                prob = row.get("app_probability")
+                strength = (float(edge or 0), float(prob or 0))
+                if player not in best_alt or strength > best_alt[player][0]:
+                    best_alt[player] = (strength, row)
+            alt = [value[1] for value in best_alt.values()]
             days_by_date.setdefault(ds, {"date": ds, "detail": []})[
                 "detail"].extend(alt)
         days = sorted(days_by_date.values(),
