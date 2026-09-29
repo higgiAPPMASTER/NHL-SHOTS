@@ -61,7 +61,6 @@ MIN_SPG       = 1.5   # retained historical threshold; no longer used as a book-
 MIN_GP        = 10    # minimum games played for valid average
 
 MIN_GAMES     = 2     # min games required for hit-rate calc
-RECENT_DAYS   = 14    # player must have a game within this many days to count as "playing today"
 LIVE_ALTERNATE_PROP_MARKETS = (
     "player_shots_alternate",
     "player_points_alternate",
@@ -132,7 +131,7 @@ def _cache_get(app: str, date_key: str):
     try:
         if p.exists() and (time.time() - p.stat().st_mtime) < _CACHE_TTL:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if app == "nhl" and data.get("_nhlCacheVersion") != 5:
+            if app == "nhl" and data.get("_nhlCacheVersion") != 6:
                 print(f"[Cache] STALE SCHEMA {app}/{date_key}")
                 return None
             print(f"[Cache] FILE HIT {app}/{date_key}")
@@ -837,32 +836,6 @@ def _nhl_pre_game_logs(logs: List[Dict], target_date: str) -> List[Dict]:
         g for g in (logs or [])
         if str(g.get("date") or "")[:10] < cutoff
     ]
-
-
-def _played_recently(logs: List[Dict], ref_date: str, days: int = RECENT_DAYS) -> bool:
-    """True if the player has at least one game within `days` of ref_date.
-    NHL doesn't post confirmed lineups pre-game, so this is our proxy for
-    "actually in today's playing group" — it drops healthy scratches, AHL
-    call-ups who got sent down, and long-term injured depth players."""
-    if not logs:
-        return False
-    try:
-        cutoff = date.fromisoformat(ref_date) - timedelta(days=days)
-    except Exception:
-        return True  # unparseable ref date -> don't over-filter
-    for g in logs:
-        d = (g.get("date") or "")[:10]
-        if not d:
-            continue
-        try:
-            # A historical replay cannot use the target game's appearance, or
-            # a later appearance, to decide whether the player was recently
-            # active before puck drop.
-            if cutoff <= date.fromisoformat(d) < date.fromisoformat(ref_date):
-                return True
-        except Exception:
-            continue
-    return False
 
 
 async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
@@ -1854,21 +1827,6 @@ def _match_odds_name(odds_name: str, roster: List[Dict]) -> Optional[Dict]:
     return None
 
 
-def _has_historical_lineup_listing(
-        player_name: str, line_maps: List[Dict]) -> bool:
-    """True when an archived pre-game book explicitly listed this player."""
-    probe = [{"name": player_name}]
-    for line_map in line_maps or []:
-        for odds_name, info in (line_map or {}).items():
-            if (
-                isinstance(info, dict)
-                and info.get("source") == "Historical Odds API"
-                and _match_odds_name(odds_name, probe)
-            ):
-                return True
-    return False
-
-
 async def get_shot_qualified_players(
     games: List[Dict],
     sa_map: Dict[str, float],
@@ -2149,14 +2107,6 @@ async def get_pts_picks(
     pts_unders, ast_unders, goal_unders, pp_unders = [], [], [], []
     for player, team, opp, hr in all_players:
         full_logs = logs_map.get(player["id"], [])
-        # Only players actually in today's rotation (drops scratches/AHL/injured depth)
-        archived_lineup = _has_historical_lineup_listing(
-            player["name"], [pts_lines_map, ast_lines_map, goal_lines_map])
-        if (
-            target_date and not _played_recently(full_logs, target_date)
-            and not archived_lineup
-        ):
-            continue
         logs = _nhl_pre_game_logs(full_logs, target_date)
 
         # Career H/A vs today's opponent — cap at last 10 for consistency w/ shots
@@ -2518,14 +2468,6 @@ async def get_saves_picks(
     unders = []
     for goalie, team, opp, hr in all_goalies:
         full_logs = logs_map.get(goalie["id"], [])
-        # Only goalies actively playing (drops third-string/AHL/injured goalies)
-        archived_lineup = _has_historical_lineup_listing(
-            goalie["name"], lineup_maps)
-        if (
-            target_date and not _played_recently(full_logs, target_date)
-            and not archived_lineup
-        ):
-            continue
         logs = _nhl_pre_game_logs(full_logs, target_date)
         c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
         r_logs = [g for g in logs if g["homeRoad"] == hr][:10]
@@ -2664,7 +2606,7 @@ async def get_saves_picks(
 
 
 def _nhl_alt_coach_cache_get(date_key: str, system: str):
-    path = _CACHE_DIR / f"nhl_alt_coach_v1_{system}_{date_key}.json"
+    path = _CACHE_DIR / f"nhl_alt_coach_v4_{system}_{date_key}.json"
     try:
         if path.exists() and time.time() - path.stat().st_mtime < _NHL_ALT_COACH_TTL:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -2675,7 +2617,7 @@ def _nhl_alt_coach_cache_get(date_key: str, system: str):
 
 def _nhl_alt_coach_cache_set(date_key: str, system: str, payload: dict) -> None:
     try:
-        (_CACHE_DIR / f"nhl_alt_coach_v1_{system}_{date_key}.json").write_text(
+        (_CACHE_DIR / f"nhl_alt_coach_v4_{system}_{date_key}.json").write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception as exc:
         print(f"[NHLAltCoach] cache write error: {exc}")
@@ -2795,7 +2737,7 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
     rows = []
     for player, team, opponent, home_road, kind in people:
         logs = _nhl_pre_game_logs(log_map.get(player["id"], []), date_str)
-        if not logs or not _played_recently(logs, date_str):
+        if not logs:
             continue
         for market, (stat_key, label) in skater_markets.items():
             if kind != "skater":
@@ -2818,7 +2760,8 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
         if key not in best or (row["edge"], row["appProb"]) > (best[key]["edge"], best[key]["appProb"]):
             best[key] = row
     picks = sorted(best.values(), key=lambda r: (r["edge"], r["appProb"]), reverse=True)[:10]
-    payload = {"date": date_str, "system": system, "picks": picks, "lines": len(rows)}
+    payload = {"date": date_str, "system": system, "picks": picks,
+               "candidates": rows, "lines": len(rows)}
     _nhl_alt_coach_cache_set(date_str, system, payload)
     return payload
 
@@ -2839,6 +2782,8 @@ def _nhl_alt_coach_exact_rows(player, team, opponent, home_road, logs, stat_key,
         odds = rec.get(odds_key)
         implied = _nhl_alt_implied(odds)
         if implied is None:  # never manufacture an absent side or price
+            continue
+        if float(str(odds).replace("+", "")) < -1000:
             continue
         hit = lambda g: float(g.get(stat_key) or 0) > line if side == "OVER" else float(g.get(stat_key) or 0) < line
         h3 = sum(hit(g) for g in recent)
@@ -3440,13 +3385,6 @@ async def run_picks(
     # ── Steps 2 & 3 - NHL Stats API hit-rate analysis ────────────────────────────
     async def analyze(p: Dict) -> Optional[Dict]:
         full_logs = logs_map.get(p["pid"], [])
-        # Only players actually in today's rotation (drops scratches/AHL/injured depth)
-        archived_lineup = _has_historical_lineup_listing(
-            p["name"],
-            [lines_map, pts_lines_map, ast_lines_map, goal_lines_map],
-        )
-        if not _played_recently(full_logs, target_date) and not archived_lineup:
-            return None
         logs = _nhl_pre_game_logs(full_logs, target_date)
         book_line = p.get("realLine")
         analysis_line = book_line if book_line is not None else p.get("line")
@@ -3775,7 +3713,7 @@ async def run_picks(
             player_profiles.append(profile)
 
     _result = {
-        "_nhlCacheVersion": 5,
+        "_nhlCacheVersion": 6,
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
@@ -4460,6 +4398,25 @@ body.is-admin .frank-ai-systems{display:flex!important}
       </div>
       <div class="frank-ai-badge">NO INVENTED PLAYS</div>
     </div>
+    <label style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:#fbbf24;font-size:.71rem;font-weight:900;margin:12px 0">
+      EDGE COACH CATEGORY
+      <select id="frankAiCategory" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;cursor:pointer">
+        <option value="">All categories</option>
+        <option value="shots">Shots on Goal</option>
+        <option value="points">Points</option>
+        <option value="pp">Power Play Points</option>
+        <option value="assists">Assists</option>
+        <option value="goals">Goals</option>
+        <option value="saves">Goalie Saves</option>
+      </select>
+      <span style="color:#9ca3af;font-size:.68rem;font-weight:600">Applies to presets, Analyze, and Best Alt-Line Edge Plays.</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:#fbbf24;font-size:.71rem;font-weight:900;margin:0 0 12px">
+      EDGE COACH GAME
+      <select id="frankAiGame" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;max-width:100%;cursor:pointer">
+        <option value="">All games · load a board to choose</option>
+      </select>
+    </label>
     <div class="frank-ai-presets">
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays from -200 to -1000')">Coach Edge · Top 10</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show me the top 10 safest bets')">Safest Bets · Top 10</button>
@@ -4602,6 +4559,11 @@ document.addEventListener('DOMContentLoaded', function(){
   var dp = document.getElementById('datePicker');
   var today = _nhlLocalDate();
   dp.value = today;
+  dp.addEventListener('change',function(){
+    var current=window.__NHL_RAW__||{};
+    _frankLoadGames(String(current.date||current.targetDate||'')===dp.value?(current.games||[]):[]);
+    _frankCategoryChanged();
+  });
 
   // Snapshot mode: hub serves this page with picks baked in as
   // window.__INITIAL_PICKS__ — skip the /api/picks fetch and render
@@ -4943,8 +4905,23 @@ function _frankSetSystem(system){
   if(!window.IS_ADMIN){window.NHL_FRANK_SYSTEM='A';return;}
   window.NHL_FRANK_SYSTEM=['A','B','C','D'].indexOf(system)>=0?system:'A';
   _frankPaintSystemButtons();
+  var raw=_frankRawForSystem(window.NHL_FRANK_SYSTEM)||window.__NHL_RAW__||{};
+  _frankLoadGames(raw.games||[]);
   var answer=document.getElementById('frankAiAnswer');
   if(answer){answer.innerHTML='';answer.style.display='none';}
+}
+function _frankLoadGames(games){
+  var sel=document.getElementById('frankAiGame');if(!sel)return;
+  var prior=sel.value,seen={},rows=[];
+  (games||[]).forEach(function(g){
+    if(!g.homeTeam||!g.awayTeam)return;
+    var key=_nhlParlayGameKey(g.homeTeam,g.awayTeam);
+    if(seen[key])return;
+    seen[key]=true;rows.push({key:key,label:g.awayTeam+' @ '+g.homeTeam});
+  });
+  sel.innerHTML='<option value="">All games'+(rows.length?'':' · load a board to choose')+'</option>'
+    +rows.map(function(g){return '<option value="'+_frankEsc(g.key)+'">'+_frankEsc(g.label)+'</option>';}).join('');
+  if(seen[prior])sel.value=prior;
 }
 function _frankNumber(v){
   if(v==null||v==='')return null;
@@ -5183,7 +5160,7 @@ function _frankAccordions(p){
 function _frankRender(question,rows,totalPriced,mode){
   var q='<div class="frank-ai-question">'+_frankEsc(question)+'</div>';
   if(!rows.length){
-    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">No loaded NHL prop matched that request with a real sportsbook price and a positive Coach Edge. Try removing the player, team, market, side, or odds restriction.</div></div></div>');
+    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">No loaded NHL prop matched that request and the selected category with a real sportsbook price and positive Coach Edge. Choose All categories or adjust the preset, market, side, or odds restriction. Model-only Power Play Points do not have a priced Coach Edge.</div></div></div>');
     return;
   }
   var table=rows.map(function(p,i){
@@ -5244,6 +5221,11 @@ function _frankRender(question,rows,totalPriced,mode){
 function askFrankPreset(question){
   var input=document.getElementById('frankAiInput');if(input)input.value=question;askFrank();
 }
+function _frankCategoryChanged(){
+  var answer=document.getElementById('frankAiAnswer');
+  if(answer){answer.innerHTML='';answer.style.display='none';}
+  window.__FRANK_LAST_ROWS__=[];
+}
 async function askNhlAltCoach(){
   var btn=document.getElementById('nhlAltCoachBtn'),answer=document.getElementById('frankAiAnswer');
   if(window.__NHL_ALT_COACH_ABORT__){
@@ -5253,8 +5235,15 @@ async function askNhlAltCoach(){
     if(answer){answer.style.display='block';answer.innerHTML='<div class="frank-ai-summary">Alternate-line scan cancelled. Click the button again to retry.</div>';}
     return;
   }
+  var categoryEl=document.getElementById('frankAiCategory');
+  var market=categoryEl?categoryEl.value:'';
+  var marketLabel=categoryEl&&categoryEl.selectedIndex>=0?categoryEl.options[categoryEl.selectedIndex].text:'All categories';
+  var gameEl=document.getElementById('frankAiGame'),game=gameEl?gameEl.value:'';
+  var gameLabel=gameEl&&gameEl.selectedIndex>=0?gameEl.options[gameEl.selectedIndex].text:'All games';
   var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},125000);
   window.__NHL_ALT_COACH_ABORT__=controller;
+  if(categoryEl)categoryEl.disabled=true;
+  if(gameEl)gameEl.disabled=true;
   if(btn){btn.disabled=false;btn.textContent='Cancel alternate-line scan';}
   if(answer){answer.style.display='block';answer.innerHTML='<div class="frank-ai-summary">Fetching genuine sportsbook NHL alternate-line ladders and recomputing each exact line from pregame game logs. This can take up to two minutes on a cold start. Click the button again to cancel.</div>';}
   try{
@@ -5262,17 +5251,17 @@ async function askNhlAltCoach(){
     var selected=(dateEl&&dateEl.value)||new Date().toISOString().slice(0,10);
     var system=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
     var admin=new URLSearchParams(location.search).get('admin')||'';
-    var res=await fetch('/api/nhl/coach-alternates?date_str='+encodeURIComponent(selected)+'&system='+encodeURIComponent(system)+'&token='+encodeURIComponent(token)+'&admin='+encodeURIComponent(admin),{signal:controller.signal});
+    var res=await fetch('/api/nhl/coach-alternates?date_str='+encodeURIComponent(selected)+'&system='+encodeURIComponent(system)+'&market='+encodeURIComponent(market)+'&game='+encodeURIComponent(game)+'&token='+encodeURIComponent(token)+'&admin='+encodeURIComponent(admin),{signal:controller.signal});
     var data=await res.json();
     if(!res.ok||data.error)throw new Error(data.detail||data.error||('HTTP '+res.status));
     window.__NHL_ALT_COACH_ROWS__=data.picks||[];
     if(!window.__NHL_ALT_COACH_ROWS__.length){
-      _frankCommit('<div><div class="frank-ai-question">Best Alt-Line Edge Plays · Top 10</div><div class="frank-ai-summary"><div class="frank-ai-empty">No genuine NHL alternate line currently meets all three safe-value gates: at least 85% app probability, at least 70% sportsbook-implied probability, and positive Coach Edge.</div></div></div>');
+      _frankCommit('<div><div class="frank-ai-question">Best Alt-Line Edge Plays · '+_frankEsc(marketLabel)+' · '+_frankEsc(gameLabel)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">No genuine NHL alternate line for this category and game meets all three safe-value gates: at least 85% app probability, at least 70% sportsbook-implied probability, and positive Coach Edge. Categories without a published alternate ladder have no priced plays.</div></div></div>');
       return;
     }
     window.__NHL_ALT_COACH_ACTIVE__=true;
     var input=document.getElementById('frankAiInput');
-    if(input)input.value='Show the top 10 safe-value alternate-line plays at 85% model probability and 70% book probability or better';
+    if(input)input.value='Show the top 10 safe-value alternate-line plays in '+marketLabel+' for '+gameLabel+' at 85% model probability and 70% book probability or better';
     askFrank();
   }catch(e){
     var msg=e&&e.name==='AbortError'
@@ -5281,6 +5270,8 @@ async function askNhlAltCoach(){
     if(answer)answer.innerHTML='<div class="frank-ai-summary"><div class="frank-ai-empty">'+_frankEsc(msg)+'</div></div>';
   }finally{
     clearTimeout(timer);
+    if(categoryEl)categoryEl.disabled=false;
+    if(gameEl)gameEl.disabled=false;
     if(window.__NHL_ALT_COACH_ABORT__===controller)delete window.__NHL_ALT_COACH_ABORT__;
     window.__NHL_ALT_COACH_ACTIVE__=false;
     if(btn){btn.disabled=false;btn.textContent='Best Alt-Line Edge Plays · Top 10';}
@@ -5290,6 +5281,8 @@ function askFrank(){
   var input=document.getElementById('frankAiInput');
   var question=String(input&&input.value||'').trim();
   if(!question){if(input)input.focus();return;}
+  var categoryEl=document.getElementById('frankAiCategory'),category=categoryEl?categoryEl.value:'';
+  var gameEl=document.getElementById('frankAiGame'),game=gameEl?gameEl.value:'';
   var props=window.__NHL_ALT_COACH_ACTIVE__
     ?(window.__NHL_ALT_COACH_ROWS__||[]):_frankAllProps();
   if(!props.length){
@@ -5311,6 +5304,8 @@ function askFrank(){
     // Every Coach recommendation must be a positive-edge side that actually
     // qualified for the loaded board. Never manufacture the opposite side.
     if(p.edge<=f.minEdge)return false;
+    if(category&&p.marketKey!==category)return false;
+    if(game&&_nhlParlayGameKey(p.team,p.opponent)!==game)return false;
     if(window.__NHL_ALT_COACH_ACTIVE__&&(p.appProb<85||p.implied<70||p.edge<=0))return false;
     if(f.side&&p.side!==f.side)return false;
     if(f.market&&p.marketKey!==f.market)return false;
@@ -6146,6 +6141,7 @@ function nhlScrollToGameId(id){
 
 function renderResults(d){
   window.__NHL_RAW__ = d;
+  _frankLoadGames(d.games||[]);
   window.__NHL_SEASON__ = d.season || '20252026';
   window.__NHL_DATE__ = d.date || '';
   var _preseason=!!d.preseason;
@@ -9262,7 +9258,7 @@ async def index(admin: str = "", token: str = ""):
 @app.get("/api/nhl/coach-alternates")
 async def api_nhl_coach_alternates(request: Request, date_str: str = "",
                                    token: str = "", system: str = "A",
-                                   admin: str = ""):
+                                   admin: str = "", market: str = "", game: str = ""):
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     direct_admin = bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__")
     if not (_verify_hub_token(tok) or direct_admin):
@@ -9278,9 +9274,35 @@ async def api_nhl_coach_alternates(request: Request, date_str: str = "",
         raise HTTPException(status_code=400, detail="Coach system must be A, B, C, or D")
     if selected_system != "A" and not (_is_admin_token(tok) or direct_admin):
         selected_system = "A"
+    market = str(market or "").lower()
+    if market not in ("", "shots", "points", "pp", "assists", "goals", "saves"):
+        raise HTTPException(status_code=400, detail="Invalid Edge Coach category")
+    game = str(game or "").upper()
+    if game and (len(game.split("|")) != 2
+                 or any(team not in _NHL_TEAM_FULL for team in game.split("|"))
+                 or game != "|".join(sorted(game.split("|")))):
+        raise HTTPException(status_code=400, detail="Invalid Edge Coach game")
     try:
-        return JSONResponse(await asyncio.wait_for(
-            _warm_nhl_alt_coach(selected_date.isoformat(), selected_system), timeout=120))
+        payload = await asyncio.wait_for(
+            _warm_nhl_alt_coach(selected_date.isoformat(), selected_system), timeout=120)
+        if (market or game) and not payload.get("error"):
+            best = {}
+            for row in payload.get("candidates", []):
+                if market and row.get("marketKey") != market:
+                    continue
+                row_game = "|".join(sorted((row.get("team", ""), row.get("opponent", ""))))
+                if game and row_game != game:
+                    continue
+                key = str(row["pid"])
+                if key not in best or (row["edge"], row["appProb"]) > (
+                        best[key]["edge"], best[key]["appProb"]):
+                    best[key] = row
+            chosen = sorted(best.values(),
+                            key=lambda row: (row["edge"], row["appProb"]),
+                            reverse=True)[:10]
+            payload = {**payload, "picks": chosen}
+        payload = {k: v for k, v in payload.items() if k != "candidates"}
+        return JSONResponse(payload)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="The alternate-line scan timed out after 2 minutes. Please try again; completed data will be reused from cache.")
 
