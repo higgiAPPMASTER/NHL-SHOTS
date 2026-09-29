@@ -4278,6 +4278,9 @@ body.is-admin #parlayCard{display:block}
 .frank-ai-presets{display:flex;gap:7px;flex-wrap:wrap;margin:15px 0 10px;position:relative}
 .frank-ai-preset{background:#171717;color:#d1d5db;border:1px solid #333;border-radius:999px;padding:7px 11px;font-size:.68rem;font-weight:800;cursor:pointer}
 .frank-ai-preset:hover{border-color:#fb923c;color:#fdba74}
+.frank-ai-side-btn{background:#18181b;color:#cbd5e1;border:1px solid #52525b;border-radius:7px;padding:9px 12px;font-size:.72rem;font-weight:900;cursor:pointer}
+.frank-ai-side-btn.active{background:#92400e;color:#fff;border-color:#fbbf24}
+.frank-ai-side-btn:disabled{opacity:.5;cursor:not-allowed}
 .frank-ai-systems{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:12px 0 3px}
 .frank-ai-system{background:#171717;color:#9ca3af;border:1px solid #3f3f46;border-radius:8px;padding:7px 12px;font-size:.68rem;font-weight:950;cursor:pointer}
 .frank-ai-system.active{color:#fff;border-color:#fb923c;background:rgba(234,88,12,.18);box-shadow:inset 0 0 0 1px rgba(251,146,60,.22)}
@@ -4398,8 +4401,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
       </div>
       <div class="frank-ai-badge">NO INVENTED PLAYS</div>
     </div>
-    <label style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:#fbbf24;font-size:.71rem;font-weight:900;margin:12px 0">
-      EDGE COACH CATEGORY
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:#fbbf24;font-size:.71rem;font-weight:900;margin:12px 0">
+      <label for="frankAiCategory">EDGE COACH CATEGORY</label>
       <select id="frankAiCategory" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;cursor:pointer">
         <option value="">All categories</option>
         <option value="shots">Shots on Goal</option>
@@ -4409,8 +4412,13 @@ body.is-admin .frank-ai-systems{display:flex!important}
         <option value="goals">Goals</option>
         <option value="saves">Goalie Saves</option>
       </select>
+      <div role="group" aria-label="Edge Coach side" style="display:inline-flex;gap:5px;flex-wrap:wrap">
+        <button type="button" id="frankSideAll" class="frank-ai-side-btn active" aria-pressed="true" onclick="_frankSetSide('')">All</button>
+        <button type="button" id="frankSideOver" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('OVER')">Over</button>
+        <button type="button" id="frankSideUnder" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('UNDER')">Under</button>
+      </div>
       <span style="color:#9ca3af;font-size:.68rem;font-weight:600">Applies to presets, Analyze, and Best Alt-Line Edge Plays.</span>
-    </label>
+    </div>
     <label style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:#fbbf24;font-size:.71rem;font-weight:900;margin:0 0 12px">
       EDGE COACH GAME
       <select id="frankAiGame" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;max-width:100%;cursor:pointer">
@@ -4864,6 +4872,17 @@ function replaceNhlParlayLeg(index){
 
 // ===== The Edge Coach · grounded positive-probability-edge analyst =========
 window.NHL_FRANK_SYSTEM='A';
+window.NHL_FRANK_SIDE='';
+function _frankSetSide(side){
+  window.NHL_FRANK_SIDE=(side==='OVER'||side==='UNDER')?side:'';
+  [['frankSideAll',''],['frankSideOver','OVER'],['frankSideUnder','UNDER']].forEach(function(item){
+    var btn=document.getElementById(item[0]);if(!btn)return;
+    var active=window.NHL_FRANK_SIDE===item[1];
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  _frankCategoryChanged();
+}
 function _frankSystemLabel(system){
   return system==='B'?'B · OLD':system==='C'?'C · SELECTIVE':system==='D'?'D · TOP PLAYERS':'A · NEW';
 }
@@ -5238,12 +5257,14 @@ async function askNhlAltCoach(){
   var categoryEl=document.getElementById('frankAiCategory');
   var market=categoryEl?categoryEl.value:'';
   var marketLabel=categoryEl&&categoryEl.selectedIndex>=0?categoryEl.options[categoryEl.selectedIndex].text:'All categories';
+  var side=window.NHL_FRANK_SIDE||'';
   var gameEl=document.getElementById('frankAiGame'),game=gameEl?gameEl.value:'';
   var gameLabel=gameEl&&gameEl.selectedIndex>=0?gameEl.options[gameEl.selectedIndex].text:'All games';
   var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},125000);
   window.__NHL_ALT_COACH_ABORT__=controller;
   if(categoryEl)categoryEl.disabled=true;
   if(gameEl)gameEl.disabled=true;
+  document.querySelectorAll('.frank-ai-side-btn').forEach(function(btn){btn.disabled=true;});
   if(btn){btn.disabled=false;btn.textContent='Cancel alternate-line scan';}
   if(answer){answer.style.display='block';answer.innerHTML='<div class="frank-ai-summary">Fetching genuine sportsbook NHL alternate-line ladders and recomputing each exact line from pregame game logs. This can take up to two minutes on a cold start. Click the button again to cancel.</div>';}
   try{
@@ -5251,17 +5272,17 @@ async function askNhlAltCoach(){
     var selected=(dateEl&&dateEl.value)||new Date().toISOString().slice(0,10);
     var system=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
     var admin=new URLSearchParams(location.search).get('admin')||'';
-    var res=await fetch('/api/nhl/coach-alternates?date_str='+encodeURIComponent(selected)+'&system='+encodeURIComponent(system)+'&market='+encodeURIComponent(market)+'&game='+encodeURIComponent(game)+'&token='+encodeURIComponent(token)+'&admin='+encodeURIComponent(admin),{signal:controller.signal});
+    var res=await fetch('/api/nhl/coach-alternates?date_str='+encodeURIComponent(selected)+'&system='+encodeURIComponent(system)+'&market='+encodeURIComponent(market)+'&game='+encodeURIComponent(game)+'&side='+encodeURIComponent(side)+'&token='+encodeURIComponent(token)+'&admin='+encodeURIComponent(admin),{signal:controller.signal});
     var data=await res.json();
     if(!res.ok||data.error)throw new Error(data.detail||data.error||('HTTP '+res.status));
     window.__NHL_ALT_COACH_ROWS__=data.picks||[];
     if(!window.__NHL_ALT_COACH_ROWS__.length){
-      _frankCommit('<div><div class="frank-ai-question">Best Alt-Line Edge Plays · '+_frankEsc(marketLabel)+' · '+_frankEsc(gameLabel)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">No genuine NHL alternate line for this category and game meets all three safe-value gates: at least 85% app probability, at least 70% sportsbook-implied probability, and positive Coach Edge. Categories without a published alternate ladder have no priced plays.</div></div></div>');
+      _frankCommit('<div><div class="frank-ai-question">Best Alt-Line Edge Plays · '+_frankEsc(marketLabel)+' · '+_frankEsc(side||'All sides')+' · '+_frankEsc(gameLabel)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">No genuine NHL alternate line for this category, side and game meets all three safe-value gates: at least 85% app probability, at least 70% sportsbook-implied probability, and positive Coach Edge. Categories without a published alternate ladder have no priced plays.</div></div></div>');
       return;
     }
     window.__NHL_ALT_COACH_ACTIVE__=true;
     var input=document.getElementById('frankAiInput');
-    if(input)input.value='Show the top 10 safe-value alternate-line plays in '+marketLabel+' for '+gameLabel+' at 85% model probability and 70% book probability or better';
+    if(input)input.value='Show the top 10 safe-value alternate-line '+(side?side.toLowerCase()+' ':'')+'plays in '+marketLabel+' for '+gameLabel+' at 85% model probability and 70% book probability or better';
     askFrank();
   }catch(e){
     var msg=e&&e.name==='AbortError'
@@ -5272,6 +5293,7 @@ async function askNhlAltCoach(){
     clearTimeout(timer);
     if(categoryEl)categoryEl.disabled=false;
     if(gameEl)gameEl.disabled=false;
+    document.querySelectorAll('.frank-ai-side-btn').forEach(function(btn){btn.disabled=false;});
     if(window.__NHL_ALT_COACH_ABORT__===controller)delete window.__NHL_ALT_COACH_ABORT__;
     window.__NHL_ALT_COACH_ACTIVE__=false;
     if(btn){btn.disabled=false;btn.textContent='Best Alt-Line Edge Plays · Top 10';}
@@ -5283,6 +5305,7 @@ function askFrank(){
   if(!question){if(input)input.focus();return;}
   var categoryEl=document.getElementById('frankAiCategory'),category=categoryEl?categoryEl.value:'';
   var gameEl=document.getElementById('frankAiGame'),game=gameEl?gameEl.value:'';
+  var selectedSide=window.NHL_FRANK_SIDE||'';
   var props=window.__NHL_ALT_COACH_ACTIVE__
     ?(window.__NHL_ALT_COACH_ROWS__||[]):_frankAllProps();
   if(!props.length){
@@ -5306,6 +5329,7 @@ function askFrank(){
     if(p.edge<=f.minEdge)return false;
     if(category&&p.marketKey!==category)return false;
     if(game&&_nhlParlayGameKey(p.team,p.opponent)!==game)return false;
+    if(selectedSide&&p.side!==selectedSide)return false;
     if(window.__NHL_ALT_COACH_ACTIVE__&&(p.appProb<85||p.implied<70||p.edge<=0))return false;
     if(f.side&&p.side!==f.side)return false;
     if(f.market&&p.marketKey!==f.market)return false;
@@ -9258,7 +9282,8 @@ async def index(admin: str = "", token: str = ""):
 @app.get("/api/nhl/coach-alternates")
 async def api_nhl_coach_alternates(request: Request, date_str: str = "",
                                    token: str = "", system: str = "A",
-                                   admin: str = "", market: str = "", game: str = ""):
+                                   admin: str = "", market: str = "", game: str = "",
+                                   side: str = ""):
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     direct_admin = bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__")
     if not (_verify_hub_token(tok) or direct_admin):
@@ -9282,16 +9307,21 @@ async def api_nhl_coach_alternates(request: Request, date_str: str = "",
                  or any(team not in _NHL_TEAM_FULL for team in game.split("|"))
                  or game != "|".join(sorted(game.split("|")))):
         raise HTTPException(status_code=400, detail="Invalid Edge Coach game")
+    side = str(side or "").upper()
+    if side not in ("", "OVER", "UNDER"):
+        raise HTTPException(status_code=400, detail="Invalid Edge Coach side")
     try:
         payload = await asyncio.wait_for(
             _warm_nhl_alt_coach(selected_date.isoformat(), selected_system), timeout=120)
-        if (market or game) and not payload.get("error"):
+        if (market or game or side) and not payload.get("error"):
             best = {}
             for row in payload.get("candidates", []):
                 if market and row.get("marketKey") != market:
                     continue
                 row_game = "|".join(sorted((row.get("team", ""), row.get("opponent", ""))))
                 if game and row_game != game:
+                    continue
+                if side and row.get("side") != side:
                     continue
                 key = str(row["pid"])
                 if key not in best or (row["edge"], row["appProb"]) > (
