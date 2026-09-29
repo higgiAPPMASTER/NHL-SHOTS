@@ -3809,7 +3809,9 @@ async def run_picks(
         persist_live_snapshot and slate_meta["officialCaptureAllowed"])
     if capture_official:
         _nhl_save_gp_snapshot(target_date, _result)
-        _nhl_save_picks_snapshot(target_date, _result)
+        _result["captureStatus"] = (
+            "OFFICIAL_CAPTURE" if _nhl_save_picks_snapshot(target_date, _result)
+            else "CAPTURE_FAILED")
     if not capture_official:
         _result["captureStatus"] = (
             "PRESEASON view-only: official snapshots, system records, "
@@ -3883,8 +3885,12 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
     b["system"] = "B"
     b["comparisonSystem"] = "B Old/attached ZIP"
     preseason_slate = bool(a.get("preseason"))
+    capture_ok = {"A": a.get("captureStatus") == "OFFICIAL_CAPTURE"}
     if not preseason_slate and a.get("officialCaptureAllowed", True):
-        _nhl_save_picks_snapshot(target_date, b, snapshot_category="__picks_B__")
+        capture_ok["B"] = _nhl_save_picks_snapshot(
+            target_date, b, snapshot_category="__picks_B__")
+        b["captureStatus"] = (
+            "OFFICIAL_CAPTURE" if capture_ok["B"] else "CAPTURE_FAILED")
 
     systems = {"A": a, "B": b}
     for system in ("C", "D"):
@@ -3909,16 +3915,20 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
         if (not preseason_slate and "error" not in result
                 and not result.get("no_games")
                 and result.get("officialCaptureAllowed", True)):
-            _nhl_save_picks_snapshot(
+            capture_ok[system] = _nhl_save_picks_snapshot(
                 target_date, result, snapshot_category=f"__picks_{system}__")
+            result["captureStatus"] = (
+                "OFFICIAL_CAPTURE" if capture_ok[system] else "CAPTURE_FAILED")
 
     summary = {}
     for system, result in systems.items():
         summary[system] = {
-            "ok": "error" not in result and not result.get("no_games"),
+            "ok": ("error" not in result and not result.get("no_games")
+                   and (preseason_slate or bool(capture_ok.get(system)))),
             "captureStatus": (
                 "PRESEASON_VIEW_ONLY" if result.get("preseason")
-                else "OFFICIAL_CAPTURE"),
+                else ("OFFICIAL_CAPTURE" if capture_ok.get(system)
+                      else "CAPTURE_FAILED")),
             "picks": sum(len(result.get(key) or []) for key in (
                 "picks", "rest", "shotUnders", "shotUndersRest",
                 "ptsPicks", "ptsRest", "ptsUnders", "ptsUndersRest",
@@ -3927,7 +3937,9 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 "goalPicks", "goalRest", "goalUnders", "goalUndersRest",
                 "savesPicks", "savesRest", "savesUnders", "savesUndersRest",
             )),
-            "error": result.get("error"),
+            "error": result.get("error") or (
+                "Pregame record could not be saved" if not preseason_slate
+                and not capture_ok.get(system) else None),
         }
     return {
         "date": target_date,
@@ -4360,6 +4372,16 @@ body.is-admin .frank-ai-systems{display:flex!important}
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
     <button class="btn-run" id="nhlRunAllBtn" onclick="runAllNhlSystems()" style="display:none;margin-left:8px;background:#4338ca">Run A+B+C+D</button>
     <div id="nhlRunAllStatus" style="display:none;color:#93c5fd;font-size:.74rem;font-weight:700;margin-top:10px"></div>
+    <div id="nhlLiveSystemChoices" style="display:none;margin:14px auto 0">
+      <div style="color:#fbbf24;font-size:.72rem;font-weight:900;margin-bottom:8px">LIVE BOARD · CHOOSE A SYSTEM</div>
+      <div role="group" aria-label="Choose live NHL system" style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
+        <button type="button" class="frank-ai-system" id="nhlLiveA" onclick="_nhlSelectLiveSystem('A')">A · NEW</button>
+        <button type="button" class="frank-ai-system" id="nhlLiveB" onclick="_nhlSelectLiveSystem('B')">B · OLD</button>
+        <button type="button" class="frank-ai-system" id="nhlLiveC" onclick="_nhlSelectLiveSystem('C')">C · SELECTIVE</button>
+        <button type="button" class="frank-ai-system" id="nhlLiveD" onclick="_nhlSelectLiveSystem('D')">D · TOP PLAYERS</button>
+      </div>
+      <div id="nhlLiveSystemStatus" role="status" style="color:#93c5fd;font-size:.7rem;margin-top:7px">A is the public default. Run A+B+C+D to load the other boards.</div>
+    </div>
     <div id="nhlPositionFilters" style="display:flex;justify-content:center;align-items:center;gap:7px;flex-wrap:wrap;margin:14px auto 0">
       <span style="color:#94a3b8;font-size:.7rem;font-weight:900;letter-spacing:.06em">SHOW</span>
       <button type="button" id="nhlPosAll" onclick="_nhlSetPositionFilter('ALL')" style="background:#1d4ed8;color:#fff;border:1px solid #60a5fa;border-radius:8px;padding:7px 12px;font-size:.74rem;font-weight:900;cursor:pointer">ALL</button>
@@ -4571,7 +4593,9 @@ document.addEventListener('DOMContentLoaded', function(){
     var current=window.__NHL_RAW__||{};
     _frankLoadGames(String(current.date||current.targetDate||'')===dp.value?(current.games||[]):[]);
     _frankCategoryChanged();
+    _nhlLiveSystemVisibility();
   });
+  _nhlLiveSystemVisibility();
 
   // Snapshot mode: hub serves this page with picks baked in as
   // window.__INITIAL_PICKS__ — skip the /api/picks fetch and render
@@ -4610,7 +4634,7 @@ document.addEventListener('DOMContentLoaded',checkStatus);
   if(t){localStorage.setItem(KEY,t);window.history.replaceState({},'',window.location.pathname);}
   if(!localStorage.getItem(KEY)){window.location.href='https://moneypicksarena.com';}
 })();
-function _applyAdmin(){function show(){document.body&&document.body.classList.add('is-admin');var h=document.getElementById('nhlReplayChoices');if(h)h.style.display='block';_nhlPaintReplayChoice();}if(window.IS_ADMIN){show();}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;show();}}).catch(function(){});}}}
+function _applyAdmin(){function show(){document.body&&document.body.classList.add('is-admin');var h=document.getElementById('nhlReplayChoices');if(h)h.style.display='block';var run=document.getElementById('nhlRunAllBtn');if(run)run.style.display='inline-block';_nhlPaintReplayChoice();_nhlLiveSystemVisibility();}if(window.IS_ADMIN){show();}else{var _wt=localStorage.getItem('__mpa_token')||'';if(_wt){fetch('/api/whoami?token='+encodeURIComponent(_wt)).then(function(r){return r.json();}).then(function(d){if(d&&d.is_admin){window.IS_ADMIN=true;show();}}).catch(function(){});}}}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_applyAdmin);}else{_applyAdmin();}
 
 // ===== Admin Auto Parlay Builder (NHL) =====
@@ -5284,6 +5308,8 @@ async function askNhlAltCoach(){
     var input=document.getElementById('frankAiInput');
     if(input)input.value='Show the top 10 safe-value alternate-line '+(side?side.toLowerCase()+' ':'')+'plays in '+marketLabel+' for '+gameLabel+' at 85% model probability and 70% book probability or better';
     askFrank();
+    if(data.captureStatus&&answer)answer.insertAdjacentHTML('beforeend',
+      '<div class="frank-ai-summary">'+_frankEsc(data.captureStatus)+'</div>');
   }catch(e){
     var msg=e&&e.name==='AbortError'
       ?'The alternate-line scan was cancelled or exceeded two minutes. Click the button to retry.'
@@ -5435,6 +5461,57 @@ async function getPicks(){
   finally{if(pollTimer)clearInterval(pollTimer);btn.disabled=false;btn.textContent=orig;}
 }
 
+function _nhlLiveSystemVisibility(){
+  var wrap=document.getElementById('nhlLiveSystemChoices');
+  var dp=document.getElementById('datePicker');
+  if(!wrap)return;
+  var dt=dp&&dp.value||'';
+  wrap.style.display=window.IS_ADMIN&&dt>=_nhlLocalDate()?'block':'none';
+  var current=window.__NHL_RAW__||{};
+  var active=String(current.date||'')===dt?String(current.system||'A').toUpperCase():'A';
+  ['A','B','C','D'].forEach(function(system){
+    var btn=document.getElementById('nhlLive'+system);if(!btn)return;
+    var selected=system===active;
+    btn.classList.toggle('active',selected);
+    btn.setAttribute('aria-pressed',selected?'true':'false');
+  });
+}
+async function _nhlSelectLiveSystem(system){
+  if(!window.IS_ADMIN||['A','B','C','D'].indexOf(system)<0)return;
+  var dp=document.getElementById('datePicker'),dt=dp&&dp.value||'';
+  if(!dt||dt<_nhlLocalDate())return;
+  var status=document.getElementById('nhlLiveSystemStatus');
+  var cached=window.__NHL_SYSTEM_RESULTS__||{};
+  var sameDate=window.__NHL_SYSTEM_RESULTS_DATE__===dt;
+  var current=window.__NHL_RAW__||{};
+  var board=String(current.date||'')===dt&&String(current.system||'A').toUpperCase()===system
+    ?current:(sameDate?cached[system]:null);
+  if(!board){
+    if(status)status.textContent='Loading system '+system+' board for '+dt+'...';
+    document.querySelectorAll('#nhlLiveSystemChoices button').forEach(function(btn){btn.disabled=true;});
+    try{
+      var tok=localStorage.getItem('__mpa_token')||'';
+      var admin=new URLSearchParams(location.search).get('admin')||'';
+      var r=await fetch('/api/nhl/system-board?date_str='+encodeURIComponent(dt)+'&system='+encodeURIComponent(system)+'&token='+encodeURIComponent(tok)+'&admin='+encodeURIComponent(admin));
+      var data=await r.json();
+      if(!r.ok)throw new Error(data.detail||data.error||('HTTP '+r.status));
+      board=data;
+      if(window.__NHL_SYSTEM_RESULTS_DATE__!==dt)window.__NHL_SYSTEM_RESULTS__={};
+      window.__NHL_SYSTEM_RESULTS_DATE__=dt;
+      window.__NHL_SYSTEM_RESULTS__[system]=board;
+    }catch(e){
+      if(status)status.textContent=e.message||'This system board is unavailable.';
+      return;
+    }finally{
+      document.querySelectorAll('#nhlLiveSystemChoices button').forEach(function(btn){btn.disabled=false;});
+    }
+  }
+  if(dp.value!==dt)return;
+  renderResults(board);
+  if(status)status.textContent='Viewing '+system+' for '+dt+' · switching boards does not change official records.';
+  var summary=document.getElementById('statusMsg');
+  if(summary)summary.textContent='LIVE SYSTEM '+system+' · '+dt+' · '+(board.qualified||0)+' players qualified';
+}
 async function runAllNhlSystems(){
   if(!window.IS_ADMIN){alert('Admin only');return;}
   var _nhlTok=localStorage.getItem('__mpa_token')||'';
@@ -5453,7 +5530,7 @@ async function runAllNhlSystems(){
       if(st)st.textContent=data.message||('No NHL games scheduled for '+dt+'.');
       return;
     }
-    window.__NHL_SYSTEM_RESULTS__=data.results||{};
+    window.__NHL_SYSTEM_RESULTS__={};
     window.__NHL_SYSTEM_RESULTS_DATE__=data.date||dt;
     _frankPaintSystemButtons();
     var parts=[];
@@ -6169,12 +6246,15 @@ function renderResults(d){
   window.__NHL_SEASON__ = d.season || '20252026';
   window.__NHL_DATE__ = d.date || '';
   var _preseason=!!d.preseason;
-  document.getElementById('out').innerHTML = (_preseason?'<div style="margin:0 0 12px;padding:11px 14px;border:1px solid rgba(251,191,36,.55);background:rgba(120,53,15,.22);border-radius:10px;color:#fde68a;font-size:.75rem;font-weight:900;letter-spacing:.04em">PRESEASON · TUNING / VIEW-ONLY · OFFICIAL RECORDS NOT WRITTEN</div>':'')+'<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
+  var _liveSystem=String(d.system||'A').toUpperCase();
+  var _liveLabel={A:'A · NEW',B:'B · OLD',C:'C · SELECTIVE',D:'D · TOP PLAYERS'}[_liveSystem]||'A · NEW';
+  document.getElementById('out').innerHTML = (_preseason?'<div style="margin:0 0 12px;padding:11px 14px;border:1px solid rgba(251,191,36,.55);background:rgba(120,53,15,.22);border-radius:10px;color:#fde68a;font-size:.75rem;font-weight:900;letter-spacing:.04em">PRESEASON · TUNING / VIEW-ONLY · OFFICIAL RECORDS NOT WRITTEN</div>':'')+(window.IS_ADMIN&&String(d.date||'')>=_nhlLocalDate()?'<div style="margin:0 0 12px;color:#93c5fd;font-size:.76rem;font-weight:900">VIEWING LIVE SYSTEM '+_liveLabel+' · switching boards does not change official records</div>':'')+'<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
   if(window.IS_ADMIN){
     var loadedSystem=String(d.system||window.NHL_HIST_SYSTEM||'A').toUpperCase();
     if(['A','B','C','D'].indexOf(loadedSystem)>=0)window.NHL_FRANK_SYSTEM=loadedSystem;
     _frankPaintSystemButtons();
   }
+  _nhlLiveSystemVisibility();
   _nhlPaint('');
 }
 var _nhlPositionFilter='ALL';
@@ -7598,9 +7678,11 @@ function renderNhlCoachTrack(){
  var stake=Number(document.getElementById('nhlCoachTrkStake').value)||100,groups={},all=[];
  (_nhlCoachTrackData.dates||[]).forEach(function(day){(day.detail||[]).forEach(function(x){x.date=day.date;all.push(x);var k=x.preset||x.category;(groups[k]||(groups[k]=[])).push(x);});});
  var tw=0,tl=0,tp=0,tv=0,tnet=0,tpriced=0,html='';
+ var canonical=_nhlCoachTrackData.source==='official'&&!!groups['All Coach Edge Plays · uncapped'];
  Object.keys(groups).forEach(function(k){var rows=groups[k],w=0,l=0,p=0,v=0,pend=0,net=0,priced=0;
   rows.forEach(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0';if(r==='WIN'){w++;if(hasPrice){priced++;net+=_nhlCalcProfit(x.odds,stake,r)}}else if(r==='LOSS'){l++;if(hasPrice){priced++;net-=stake}}else if(r==='PUSH')p++;else if(r==='VOID')v++;else pend++;});
-  tw+=w;tl+=l;tp+=p;tv+=v;tnet+=net;tpriced+=priced;var rate=w+l?100*w/(w+l):null,roi=priced?100*net/(priced*stake):null;
+  if(!canonical||k==='All Coach Edge Plays · uncapped'||k==='Alternate-Line Coach'){tw+=w;tl+=l;tp+=p;tv+=v;tnet+=net;tpriced+=priced;}
+  var rate=w+l?100*w/(w+l):null,roi=priced?100*net/(priced*stake):null;
   var trs=rows.map(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0',pl=(hasPrice&&(r==='WIN'||r==='LOSS'))?_nhlCalcProfit(x.odds,stake,r):null,ap=x.app_probability==null?'—':(Number(x.app_probability)*100).toFixed(1)+'%',ip=x.implied_probability==null?'—':(Number(x.implied_probability)*100).toFixed(1)+'%',ed=x.coach_edge==null?'—':Number(x.coach_edge).toFixed(1)+' pts';return '<tr><td>'+_nhlEsc(x.date)+'</td><td><b>'+_nhlEsc(x.name)+'</b><br><small>'+_nhlEsc(x.team||'')+'</small></td><td>'+_nhlEsc(x.category)+'<br><b>'+_nhlEsc(x.side)+' '+_nhlEsc(x.line)+'</b></td><td>'+(hasPrice?_nhlEsc(x.odds):'—')+'<br><small>'+_nhlEsc(x.book||'')+'</small></td><td>'+_nhlEsc(x.actual)+'</td><td style="color:'+(r==='WIN'?'#4ade80':r==='LOSS'?'#f87171':'#fbbf24')+'">'+r+'<br><small>'+(pl==null?'—':_nhlMoney(pl))+'</small></td><td><small>App '+ap+'<br>Implied '+ip+'<br>Edge '+ed+'</small></td></tr>';}).join('');
   html+='<details style="border:1px solid #26334a;border-radius:10px;margin:8px 0;background:#0f172a"><summary style="cursor:pointer;padding:13px;color:#fff"><b>'+_nhlEsc(k)+'</b><span style="float:right;color:#94a3b8">'+w+'W · '+l+'L'+(p?' · '+p+'P':'')+(v?' · '+v+'V':'')+(pend?' · '+pend+' pending':'')+' · '+(rate==null?'—':rate.toFixed(1)+'%')+' · <b style="color:'+(net>=0?'#4ade80':'#f87171')+'">'+_nhlMoney(net)+'</b> · '+(roi==null?'—':roi.toFixed(1)+'% ROI')+'</span></summary><div style="overflow-x:auto"><table class="trk-tbl"><thead><tr><th>Date</th><th>Player</th><th>Market</th><th>Odds/Book</th><th>Actual</th><th>Result/P&L</th><th>Probabilities</th></tr></thead><tbody>'+trs+'</tbody></table></div></details>';
  });
@@ -8024,6 +8106,17 @@ _NHL_SYSTEM_DETAIL_CATS = {
     "C": "__detail_C__",
     "D": "__detail_D__",
 }
+_NHL_COACH_ALT_SNAP_CATS = {
+    system: f"__coach_alt_{system}__" for system in ("A", "B", "C", "D")
+}
+_NHL_COACH_ALT_DETAIL_CATS = {
+    system: f"__coach_alt_detail_{system}__" for system in ("A", "B", "C", "D")
+}
+_NHL_COACH_ALT_LOCK = _bt_th.Lock()
+_NHL_COACH_STAT_KEYS = {
+    "shots": "SHOTS", "points": "POINTS", "pp": "PP_POINTS",
+    "assists": "ASSISTS", "goals": "GOALS", "saves": "SAVES",
+}
 _NHL_GP_CAT    = "__gp__"
 _NHL_HIST_DETAIL_CAT = "__historical_analysis_detail__"
 _NHL_HIST_B_DETAIL_CAT = "__historical_analysis_b_detail__"
@@ -8089,10 +8182,22 @@ _NHL_TRK_LISTS = [
 def _nhl_save_picks_snapshot(
         date_str: str, result: dict, snapshot_category: str = _NHL_SNAP_CAT):
     """Freeze all pick lists to Supabase so they survive redeploys and can be graded."""
+    games = result.get("games") or []
+    pregame_teams = {
+        team for game in games
+        if game.get("gameType") in (2, 3)
+        and _nhl_gp_is_pre_game({"startTime": game.get("startTime")})
+        for team in (game.get("homeTeam"), game.get("awayTeam"))
+        if team
+    }
+    existing = _nhl_load_picks_snapshot(date_str, snapshot_category)
+    frozen_teams = {p.get("team") for p in existing if p.get("team")}
     flat = []
     for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
         rank_start = _NHL_TRK_TOP + 1 if ovf else 1
         for rank, p in enumerate(result.get(rkey) or [], rank_start):
+            if p.get("team") not in pregame_teams or p.get("team") in frozen_teams:
+                continue
             odds = p.get("realOdds") if side == "OVER" else p.get("realUnderOdds")
             line = p.get("realLine") or p.get("line") or p.get("dispLine")
             flat.append({
@@ -8100,21 +8205,74 @@ def _nhl_save_picks_snapshot(
                 "team": p.get("team", ""), "category": cat,
                 "stat_key": sk, "side": side, "line": line,
                 "odds": odds,
+                "coach_line": p.get("realLine"),
+                "coach_probability": (
+                    p.get("underConfidence") or p.get("underRate")
+                    or p.get("underRateAny") or p.get("underRateVo") or 0
+                    if side == "UNDER" else
+                    p.get("dispScore") or p.get("ptsScore") or p.get("score") or 0
+                ),
                 # Every market uses dispScore for the live lock board. Keep
                 # that score in the frozen snapshot so grading can create the
                 # duplicate 80-100% Locks record alongside the base category.
                 "score": p.get("score") or p.get("dispScore") or p.get("ptsScore") or 0,
                 "rank": rank, "is_overflow": ovf,
             })
-    if flat:
+    if flat or (pregame_teams and not existing):
         ok = _nhl_sb_upsert(
             "mpa_track_ledger",
             [{"app": _NHL_TRK_APP, "date": date_str,
               "category": snapshot_category,
-              "side": "ALL", "wins": 0, "losses": 0, "locked": False, "detail": flat}],
+              "side": "ALL", "wins": 0, "losses": 0, "locked": False,
+              "detail": existing + flat}],
             "app,date,category,side")
         print(f"[nhl_track] snapshot {'saved' if ok else 'FAILED'}: "
               f"{len(flat)} picks -> {date_str}")
+        return ok
+    return bool(existing)
+
+
+def _nhl_save_alt_coach_snapshot(date_str: str, system: str,
+                                  picks: list, games: list) -> tuple:
+    """Append genuinely displayed alternate Coach plays before puck drop."""
+    category = _NHL_COACH_ALT_SNAP_CATS[system]
+    flat = []
+    for p in picks:
+        team = p.get("team")
+        game = next((g for g in games if team in (
+            g.get("homeTeam"), g.get("awayTeam"))), None)
+        if not game or game.get("gameType") not in (2, 3) or not _nhl_gp_is_pre_game(
+                {"startTime": game.get("startTime")}):
+            continue
+        key = _NHL_COACH_STAT_KEYS.get(p.get("marketKey"))
+        if not key or p.get("edge", 0) <= 0 or p.get("odds") is None:
+            continue
+        flat.append({
+            "name": p.get("player"), "pid": p.get("pid"), "team": team,
+            "category": p.get("market"), "stat_key": key,
+            "side": p.get("side"), "line": p.get("line"),
+            "odds": p.get("odds"), "book": p.get("book"),
+            "score": 0, "app_probability": p.get("appProb", 0) / 100,
+            "implied_probability": p.get("implied", 0) / 100,
+            "coach_edge": p.get("edge"), "preset": "Alternate-Line Coach",
+        })
+    if not flat:
+        return True, 0
+    with _NHL_COACH_ALT_LOCK:
+        existing = _nhl_load_picks_snapshot(date_str, category)
+        identity = lambda p: (
+            str(p.get("pid")), p.get("stat_key"), p.get("side"),
+            str(p.get("line")), str(p.get("odds")))
+        seen = {identity(p) for p in existing}
+        added = [p for p in flat if identity(p) not in seen]
+        if not added:
+            return True, len(flat)
+        ok = _nhl_sb_upsert("mpa_track_ledger", [{
+            "app": _NHL_TRK_APP, "date": date_str,
+            "category": category, "side": "ALL", "wins": 0, "losses": 0,
+            "locked": False, "detail": existing + added,
+        }], "app,date,category,side")
+        return ok, len(flat) if ok else 0
 
 def _nhl_save_gp_snapshot(date_str: str, result: dict):
     """Freeze the day's game-predictor calls in the shared ledger.
@@ -8559,10 +8717,54 @@ def _nhl_update_track_ledger(include_date: str = ""):
                      "category": detail_category, "side": "ALL",
                      "wins": 0, "losses": 0, "locked": True, "detail": det},
                 ]
+        # Alternate Coach recommendations are separate from the standard-line
+        # boards; grade each system's pregame captures without a Top 10 cutoff.
+        for system in ("A", "B", "C", "D"):
+            snap_category = _NHL_COACH_ALT_SNAP_CATS[system]
+            detail_category = _NHL_COACH_ALT_DETAIL_CATS[system]
+            already = set(_nhl_list_snap_dates(detail_category))
+            for d in _nhl_list_snap_dates(snap_category):
+                if d >= today or d in already:
+                    continue
+                snap = _nhl_load_picks_snapshot(d, snap_category)
+                if not snap:
+                    continue
+                try:
+                    graded = _nhl_grade_date(d, snap)
+                except Exception as exc:
+                    print(f"[nhl_coach_alt:{system}] grade failed {d}: {exc}")
+                    continue
+                if not graded.get("any_game"):
+                    continue
+                # Missing box scores are not a completed Coach record; retry
+                # on later daily runs rather than permanently locking gaps.
+                if not graded.get("all_final"):
+                    continue
+                lookup = {
+                    (p.get("name"), p.get("stat_key"), p.get("side"),
+                     str(p.get("line")), str(p.get("odds"))): p
+                    for p in snap
+                }
+                detail = []
+                for row in graded.get("main", []):
+                    key = (row.get("name"), row.get("stat_key"),
+                           row.get("side"), str(row.get("line")),
+                           str(row.get("odds")))
+                    original = lookup.get(key) or {}
+                    detail.append({**row, "book": original.get("book", ""),
+                                   "app_probability": original.get("app_probability"),
+                                   "implied_probability": original.get("implied_probability"),
+                                   "coach_edge": original.get("coach_edge"),
+                                   "preset": "Alternate-Line Coach"})
+                upserts.append({
+                    "app": _NHL_TRK_APP, "date": d,
+                    "category": detail_category, "side": "ALL",
+                    "wins": 0, "losses": 0, "locked": True, "detail": detail,
+                })
         if upserts:
             for i in range(0, len(upserts), 10):
                 _nhl_sb_upsert("mpa_track_ledger", upserts[i:i+10], "app,date,category,side")
-            print(f"[nhl_track] wrote {len(upserts)//2} regular date records")
+            print(f"[nhl_track] wrote {len(upserts)} record rows")
     # GP uses its own row and read-only summary; grade it independently from
     # player-pick stake accounting.
     try:
@@ -8829,8 +9031,8 @@ async def nhl_coach_track(
     for day in payload.get("dates") or []:
         if date_str and day.get("date") != date_str:
             continue
-        snapshot = ([] if historical else
-                    _nhl_load_picks_snapshot(day.get("date", "")))
+        snapshot = ([] if historical else _nhl_load_picks_snapshot(
+            day.get("date", ""), _NHL_SYSTEM_SNAP_CATS[record_system]))
         snap_map = {}
         for p in snapshot:
             key = (p.get("name"), p.get("stat_key"),
@@ -8843,10 +9045,16 @@ async def nhl_coach_track(
             key = (row.get("name"), row.get("stat_key"),
                    str(row.get("side") or "OVER").upper(), str(row.get("line")))
             frozen = snap_map.get(key) or {}
-            score = row.get("score")
-            if score is None:
-                score = frozen.get("score")
-            implied = _nhl_alt_implied(row.get("odds"))
+            if not historical and "coach_probability" in frozen:
+                if frozen.get("coach_line") is None:
+                    continue
+                score = frozen["coach_probability"]
+            else:
+                score = row.get("score")
+                if score is None:
+                    score = frozen.get("score")
+            implied_pct = _nhl_alt_implied(row.get("odds"))
+            implied = implied_pct / 100 if implied_pct is not None else None
             try:
                 model = float(score) / 100.0
             except (TypeError, ValueError):
@@ -8884,6 +9092,16 @@ async def nhl_coach_track(
                     else float(x.get("app_probability") or 0) * 100.0
                 )), reverse=True)
             groups[label] = [{**row, "preset": label} for row in ordered[:limit]]
+        # The headline presets keep their own ranking limits, but the record
+        # must also expose every qualifying Coach play, including Overflow.
+        all_unique = {}
+        for candidate in candidates:
+            identity = (candidate.get("name"), candidate.get("stat_key"),
+                        candidate.get("side"), str(candidate.get("line")),
+                        str(candidate.get("odds")))
+            all_unique.setdefault(identity, candidate)
+        add("All Coach Edge Plays · uncapped",
+            list(all_unique.values()), limit=len(all_unique))
         add("Coach Edge Top 10", candidates)
         add("Safest Bets Top 10", candidates,
             sort_key=lambda x: x.get("app_probability") or 0)
@@ -8905,6 +9123,29 @@ async def nhl_coach_track(
             )
         detail = [row for values in groups.values() for row in values]
         days.append({"date": day.get("date"), "detail": detail})
+    if not historical:
+        snap_cat = _NHL_COACH_ALT_SNAP_CATS[record_system]
+        detail_cat = _NHL_COACH_ALT_DETAIL_CATS[record_system]
+        snapshots = _nhl_sb_get_all("mpa_track_ledger", {
+            "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{snap_cat}",
+            "side": "eq.ALL", "select": "date,detail"})
+        graded_rows = _nhl_sb_get_all("mpa_track_ledger", {
+            "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{detail_cat}",
+            "side": "eq.ALL", "select": "date,detail"})
+        graded_by_date = {r.get("date"): r.get("detail") or [] for r in graded_rows}
+        days_by_date = {d.get("date"): d for d in days}
+        for snap in snapshots:
+            ds = snap.get("date")
+            if not ds or (date_str and ds != date_str):
+                continue
+            alt = graded_by_date.get(ds)
+            if alt is None:
+                alt = [{**p, "result": "PENDING", "actual": None}
+                       for p in (snap.get("detail") or [])]
+            days_by_date.setdefault(ds, {"date": ds, "detail": []})[
+                "detail"].extend(alt)
+        days = sorted(days_by_date.values(),
+                      key=lambda d: d.get("date") or "", reverse=True)
     return JSONResponse({"source": "historical" if historical else "official",
                          "system": record_system, "dates": days, "stake": 100.0})
 
@@ -9331,6 +9572,21 @@ async def api_nhl_coach_alternates(request: Request, date_str: str = "",
                             key=lambda row: (row["edge"], row["appProb"]),
                             reverse=True)[:10]
             payload = {**payload, "picks": chosen}
+        if payload.get("picks") and not payload.get("error"):
+            games = await get_today_games(selected_date.isoformat())
+            if not games:
+                raise HTTPException(status_code=503, detail="Cannot verify game starts for Coach tracking")
+            if any(g.get("gameType") == 1 for g in games):
+                payload["captureStatus"] = "View-only slate; no official Coach record."
+            else:
+                ok, tracked = await asyncio.get_running_loop().run_in_executor(
+                    None, _nhl_save_alt_coach_snapshot,
+                    selected_date.isoformat(), selected_system,
+                    payload["picks"], games)
+                if not ok:
+                    raise HTTPException(status_code=503, detail="Alternate Coach record could not be saved")
+                payload["captureStatus"] = (
+                    f"{tracked}/{len(payload['picks'])} alternate plays saved before puck drop")
         payload = {k: v for k, v in payload.items() if k != "candidates"}
         return JSONResponse(payload)
     except asyncio.TimeoutError:
@@ -10501,9 +10757,16 @@ _CRON_BUSY_NHL = False
 
 async def _nhl_run_all_and_cache(date_str: str) -> dict:
     batch = await run_all_nhl_systems(date_str)
-    a_result = (batch.get("results") or {}).get("A") or {}
+    results = batch.get("results") or {}
+    a_result = results.get("A") or {}
     if a_result and "error" not in a_result and not a_result.get("no_games"):
         _cache_set("nhl", date_str, a_result)
+    # Read-only live board switching, including preseason. These files are
+    # separate from official snapshots and never enter any record.
+    for system in ("B", "C", "D"):
+        board = results.get(system) or {}
+        if board and "error" not in board and not board.get("no_games"):
+            _cache_set(f"nhl_live_board_v1_{system}", date_str, board)
     # Grade prior player/GP slates after today's capture.  The current date
     # remains pending until its games finish.
     await asyncio.get_running_loop().run_in_executor(
@@ -10539,6 +10802,37 @@ async def api_run_all_nhl_systems(
     }
     return JSONResponse(response, headers={"Cache-Control": "no-store"})
 
+
+@app.get("/api/nhl/system-board")
+async def api_nhl_system_board(
+        request: Request, date_str: str = "", system: str = "A",
+        token: str = "", admin: str = ""):
+    tok = token or request.headers.get(
+        "Authorization", "").replace("Bearer ", "").strip()
+    if not _nhl_bet_admin_ok(tok, admin):
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        ds = date.fromisoformat(date_str).isoformat()
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="A valid date is required")
+    system = str(system or "A").upper()
+    if system not in ("A", "B", "C", "D"):
+        raise HTTPException(status_code=400, detail="Choose system A, B, C, or D")
+    if system == "A":
+        board = _cache_get("nhl", ds)
+    else:
+        path = _cache_path(f"nhl_live_board_v1_{system}", ds)
+        try:
+            board = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="Saved system board could not be read") from exc
+    if not isinstance(board, dict) or board.get("date") != ds:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No saved {system} board for {ds}. Run A+B+C+D for this date first.")
+    return JSONResponse(board, headers={"Cache-Control": "no-store"})
+
+
 @app.api_route("/api/cron-run", methods=["GET", "POST"])
 async def cron_run_nhl(request: Request, date_str: str = ""):
     # Cron-friendly trigger: authed by the static INTERNAL_API_TOKEN secret sent
@@ -10559,6 +10853,12 @@ async def cron_run_nhl(request: Request, date_str: str = ""):
         batch = await _nhl_run_all_and_cache(ds)
     finally:
         _CRON_BUSY_NHL = False
+    if not batch.get("no_games") and (
+            set(batch.get("systems", {})) != {"A", "B", "C", "D"}
+            or not all(row.get("ok") for row in batch["systems"].values())):
+        raise HTTPException(
+            status_code=503,
+            detail=f"All four NHL records were not captured for {ds}; retry the daily trigger")
     return {
         "ran": True,
         "cached": bool(_cache_get("nhl", ds)),
