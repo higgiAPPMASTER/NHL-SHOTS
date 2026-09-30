@@ -4419,7 +4419,8 @@ details>summary::-webkit-details-marker{display:none}
 .gp-history-table{width:100%;border-collapse:collapse;font-size:.68rem;white-space:nowrap}
 .gp-history-table th,.gp-history-table td{padding:6px 4px;text-align:left;border-bottom:1px solid #262626}
 .gp-history-table th{color:#9ca3af;font-weight:700}
-.gp-history-table tr.same-venue{background:rgba(245,158,11,.16);color:#fde68a}
+.gp-history-table tr.same-venue{color:#fde68a}
+.gp-history-table tr.same-venue td{background:rgba(245,158,11,.16)}
 .gp-history-scroll{max-height:320px;overflow:auto}
 footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border-top:1px solid #1c1c1c;margin-top:24px;font-family:'Source Sans Pro',sans-serif}
 .ft-logo{font-family:'Playfair Display',serif;color:#f59e0b;font-weight:700;font-size:.95rem;margin-bottom:6px}
