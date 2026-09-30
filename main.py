@@ -8760,7 +8760,8 @@ def _nhl_update_track_ledger(include_date: str = ""):
                     # entire snapshotted team. Older complete records and
                     # unrelated past results must remain untouched.
                     try:
-                        if (_d.fromisoformat(today) - _d.fromisoformat(d)).days > 7:
+                        if ((_d.fromisoformat(today) - _d.fromisoformat(d)).days > 7
+                                and d != include_date):
                             continue
                     except ValueError:
                         continue
@@ -8814,7 +8815,8 @@ def _nhl_update_track_ledger(include_date: str = ""):
                     continue
                 if d in already:
                     try:
-                        if (_d.fromisoformat(today) - _d.fromisoformat(d)).days > 7:
+                        if ((_d.fromisoformat(today) - _d.fromisoformat(d)).days > 7
+                                and d != include_date):
                             continue
                     except ValueError:
                         continue
