@@ -4419,7 +4419,7 @@ details>summary::-webkit-details-marker{display:none}
 .gp-history-table{width:100%;border-collapse:collapse;font-size:.68rem;white-space:nowrap}
 .gp-history-table th,.gp-history-table td{padding:6px 4px;text-align:left;border-bottom:1px solid #262626}
 .gp-history-table th{color:#9ca3af;font-weight:700}
-.gp-history-table tr.same-venue{background:rgba(245,158,11,.16);color:#fde68a}
+.gp-history-table tr.matchup-meeting{background:rgba(245,158,11,.16);color:#fde68a}
 .gp-history-scroll{max-height:320px;overflow:auto}
 footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border-top:1px solid #1c1c1c;margin-top:24px;font-family:'Source Sans Pro',sans-serif}
 .ft-logo{font-family:'Playfair Display',serif;color:#f59e0b;font-weight:700;font-size:.95rem;margin-bottom:6px}
@@ -6450,14 +6450,15 @@ function _nhlGpLoadHistory(panel){
         return;
       }
       var bookLine=line===''?null:Number(line);
-      var note='<div class="gp-history-note">Highlighted: '+_nhlSafe(home)+' at home, matching today. '
+      var note='<div class="gp-history-note">Highlighted: all past '+_nhlSafe(away)+' @ '+_nhlSafe(home)
+        +' matchup meetings. SAME marks games played at today\\'s venue. '
         +'W/L is for '+_nhlSafe(home)+'. Totals compare with today\\'s book line only, not past closing lines.</div>';
       if(data.unavailable)note+='<div class="gp-history-note">Older meetings could not be loaded; showing available results only.</div>';
       var heading='<tr><th>Date</th><th>Venue</th><th>Final</th><th>Winner</th><th>W/L</th><th>Goals</th><th>Vs today O/U</th></tr>';
       var html=rows.map(function(m){
         var same=m.home===home,homeWon=m.winner===home;
         var ou=bookLine==null||!isFinite(bookLine)?'—':m.totalGoals>bookLine?'OVER':m.totalGoals<bookLine?'UNDER':'PUSH';
-        return '<tr'+(same?' class="same-venue"':'')+'><td>'+_nhlSafe(m.date)+'</td>'
+        return '<tr class="matchup-meeting"><td>'+_nhlSafe(m.date)+'</td>'
           +'<td>'+_nhlSafe(m.away)+' @ '+_nhlSafe(m.home)+(same?' · SAME':'')+'</td>'
           +'<td>'+_nhlSafe(m.awayGoals)+'–'+_nhlSafe(m.homeGoals)+'</td>'
           +'<td>'+_nhlSafe(m.winner||'—')+'</td><td>'+(homeWon?'W':'L')+'</td>'
