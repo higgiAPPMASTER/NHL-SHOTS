@@ -8,7 +8,7 @@ Step 4 : Rank & top 10
 Deployed on Render (FastAPI + httpx)
 """
 
-import os, hmac, asyncio, re, unicodedata, time, json, logging
+import os, hmac, asyncio, re, unicodedata, time, json, logging, html
 from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -131,7 +131,7 @@ def _cache_get(app: str, date_key: str):
     try:
         if p.exists() and (time.time() - p.stat().st_mtime) < _CACHE_TTL:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if app == "nhl" and data.get("_nhlCacheVersion") != 8:
+            if app == "nhl" and data.get("_nhlCacheVersion") != 9:
                 print(f"[Cache] STALE SCHEMA {app}/{date_key}")
                 return None
             print(f"[Cache] FILE HIT {app}/{date_key}")
@@ -289,6 +289,8 @@ def _boxscore_lineup(boxscore: Dict, game: Dict) -> Dict:
                 "id": int(pid),
                 "name": (player.get("name") or {}).get("default", ""),
                 "positionGroup": "G",
+                # Dressed backups appear here too. Only the starter qualifies.
+                "starterConfirmed": player.get("starter") is True,
             })
         if team:
             lineup["skaters"][team] = skaters
@@ -327,6 +329,98 @@ async def _attach_confirmed_game_lineups(games: List[Dict]) -> None:
             game["lineupSource"] = "UNAVAILABLE"
 
 
+_NHL_STARTER_FEED_CACHE: Dict[str, tuple] = {}
+
+
+def _nhl_starter_name_key(name: str) -> str:
+    """Exact full-name identity across accents and punctuation, not surnames."""
+    plain = unicodedata.normalize("NFKD", str(name or ""))
+    plain = plain.encode("ascii", "ignore").decode("ascii").lower()
+    return " ".join(re.findall(r"[a-z0-9]+", plain))
+
+
+def _nhl_starter_team_matches(source_name: str, team: str, common_name: str) -> bool:
+    full = _nhl_starter_name_key(source_name)
+    aliases = (common_name, _NHL_TEAM_FULL.get(team, ""))
+    return bool(full) and any(
+        alias and (full == alias or full.endswith(" " + alias))
+        for alias in (_nhl_starter_name_key(name) for name in aliases)
+    )
+
+
+async def _attach_pregame_starting_goalies(games: List[Dict], target_date: str) -> None:
+    """Read only dated, explicitly Confirmed starters from Daily Faceoff.
+
+    Likely, Expected, and missing entries are not starters. A changed/unavailable
+    page fails closed; a sportsbook listing is never proof of a starting goalie.
+    Historical replays do not call this feed (it would leak later knowledge).
+    """
+    if not games:
+        return
+    now = time.monotonic()
+    cached = _NHL_STARTER_FEED_CACHE.get(target_date)
+    rows = cached[1] if cached and now - cached[0] < (300 if cached[1] else 60) else None
+    if rows is None:
+        rows = []
+        try:
+            date.fromisoformat(target_date)
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+                response = await client.get(
+                    f"https://www.dailyfaceoff.com/starting-goalies/{target_date}",
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; MoneyPicksArena/1.0)"})
+                response.raise_for_status()
+            if len(response.content) > 2_000_000:
+                raise ValueError("starting-goalie response too large")
+            match = re.search(
+                r'<script[^>]*\bid="__NEXT_DATA__"[^>]*>(.*?)</script>',
+                response.text, re.S)
+            if not match:
+                raise ValueError("starting-goalie page has no dated data")
+            payload = json.loads(html.unescape(match.group(1)))
+            page = payload["props"]["pageProps"]
+            if page.get("date") != target_date or not isinstance(page.get("data"), list):
+                raise ValueError("starting-goalie page date/data mismatch")
+            rows = page["data"]
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("NHL starting-goalie confirmations unavailable: %s", exc)
+        _NHL_STARTER_FEED_CACHE.clear()
+        _NHL_STARTER_FEED_CACHE[target_date] = (now, rows)
+
+    selected_date = date.fromisoformat(target_date)
+    for game in games:
+        for row in rows:
+            if not isinstance(row, dict) or row.get("date") != target_date:
+                continue
+            if not (
+                _nhl_starter_team_matches(
+                    row.get("homeTeamName", ""), game["homeTeam"],
+                    game.get("homeFull", ""))
+                and _nhl_starter_team_matches(
+                    row.get("awayTeamName", ""), game["awayTeam"],
+                    game.get("awayFull", ""))
+            ):
+                continue
+            for side in ("home", "away"):
+                if str(row.get(f"{side}NewsStrengthName") or "").lower() != "confirmed":
+                    continue
+                goalie_name = str(row.get(f"{side}GoalieName") or "").strip()
+                stamp = str(row.get(f"{side}NewsCreatedAt") or "")
+                try:
+                    confirmed_at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    if not (selected_date - timedelta(days=2) <= confirmed_at.date()
+                            <= selected_date + timedelta(days=1)):
+                        continue
+                except ValueError:
+                    continue
+                if goalie_name and _nhl_starter_name_key(goalie_name):
+                    team = game[f"{side}Team"]
+                    game.setdefault("startingGoalies", {})[team] = {
+                        "name": goalie_name, "source": "Daily Faceoff",
+                        "confirmedAt": stamp,
+                    }
+            break
+
+
 def _lineup_filtered_rosters(
     games: List[Dict],
     rosters: Dict[str, List[Dict]],
@@ -361,7 +455,13 @@ def _lineup_filtered_rosters(
                 current_by_id.get(int(p["id"]), p)
                 for p in official if p.get("id") is not None
             ]
-            filtered[team] = [{**p, "lineupStatus": "CONFIRMED"} for p in eligible]
+            confirmed_by_id = {int(p["id"]): p for p in official}
+            filtered[team] = [
+                {**p, "lineupStatus": "CONFIRMED",
+                 **({"starterConfirmed": confirmed_by_id[int(p["id"])].get(
+                     "starterConfirmed") is True} if player_group == "goalies" else {})}
+                for p in eligible
+            ]
             game.setdefault("lineupByTeam", {})[team] = "CONFIRMED"
             print(f"[Lineup] {team}: {len(eligible)} confirmed {player_group}")
             continue
@@ -2672,6 +2772,34 @@ async def get_saves_picks(
     rosters = _lineup_filtered_rosters(
         games, rosters, lineup_maps, "goalies",
         include_unconfirmed=include_unconfirmed)
+    if not simulate:
+        game_by_team = {
+            team: game for game in games
+            for team in (game["homeTeam"], game["awayTeam"])
+        }
+        starting_rosters = {}
+        for team, players in rosters.items():
+            game = game_by_team.get(team, {})
+            locked = game.get("gameState") in {"LIVE", "CRIT", "OFF", "FINAL"}
+            confirmed = (game.get("startingGoalies") or {}).get(team) or {}
+            selected = []
+            for player in players:
+                source = None
+                stamp = ""
+                if player.get("starterConfirmed") is True:
+                    source = "NHL boxscore"
+                elif (not locked and confirmed
+                      and _nhl_starter_name_key(player.get("name")) ==
+                          _nhl_starter_name_key(confirmed.get("name"))):
+                    source = confirmed.get("source")
+                    stamp = confirmed.get("confirmedAt", "")
+                if source:
+                    selected.append({
+                        **player, "lineupStatus": "STARTER_CONFIRMED",
+                        "starterSource": source, "starterConfirmedAt": stamp,
+                    })
+            starting_rosters[team] = selected
+        rosters = starting_rosters
 
     all_goalies = []
     roster_goalies = []
@@ -2727,7 +2855,8 @@ async def get_saves_picks(
                 "Goalie Saves", book_line=book_line)
             profile["gameDayEligible"] = (
                 eligible_by_id.get(goalie["id"], {}).get("lineupStatus")
-                in ("BOOK_LISTED", "CONFIRMED"))
+                in (("BOOK_LISTED", "CONFIRMED") if simulate
+                    else ("STARTER_CONFIRMED",)))
             profile["historyUnavailable"] = goalie["id"] not in logs_map
             lookup_profiles.append(profile)
 
@@ -2825,6 +2954,8 @@ async def get_saves_picks(
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
             "positionGroup": "G", "lineupStatus": goalie.get("lineupStatus"),
+            "starterSource": goalie.get("starterSource", ""),
+            "starterConfirmedAt": goalie.get("starterConfirmedAt", ""),
             "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
             "realLine": book_line, "realOdds": real_odds, "realUnderOdds": under_odds,
             "lineSource": line_source,
@@ -3540,6 +3671,8 @@ async def run_picks(
     schedule_context = (
         await _nhl_schedule_context(target_date, games) if simulate else {}
     )
+    if not simulate:
+        await _attach_pregame_starting_goalies(games, target_date)
 
     # Games exist — now fetch SA map, lines, and goalie SV% map in parallel.
     sa_map, _lines_tuple, goalie_map, opponent_sf_map = await asyncio.gather(
@@ -4019,7 +4152,7 @@ async def run_picks(
             profile_seen.add(key)
 
     _result = {
-        "_nhlCacheVersion": 8,
+        "_nhlCacheVersion": 9,
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
@@ -6128,6 +6261,8 @@ function _nhlLineSourceBadge(p){
   return '';
 }
 function _nhlLineupBadge(p){
+  if(p.lineupStatus==='STARTER_CONFIRMED')
+    return '<span style="color:#34d399;font-size:.64rem;font-weight:800"> · STARTER — CONFIRMED</span>';
   return p.lineupStatus==='ROSTER_UNCONFIRMED'
     ?'<span style="color:#fbbf24;font-size:.64rem;font-weight:800"> · ROSTER — UNCONFIRMED</span>':'';
 }
@@ -6965,6 +7100,9 @@ function _nhlPaint(q){
   }
   // SAVES cards
   h += '<div id="nhl-section-saves" class="nhl-scroll-anchor"></div>';
+  if(!d.simulation){
+    h += '<div style="font-size:.72rem;color:#94a3b8;padding:8px 12px">Goalie Saves: confirmed starters only. Unconfirmed and projected goalies are withheld; refresh after a starter is confirmed.</div>';
+  }
   if((d.savesPicks||[]).length){
     h += '<div class="sec">🧤 Top ' + d.savesPicks.length + ' Goalie Saves</div>';
     h += nhlCardGrid(d.savesPicks);
@@ -8660,11 +8798,23 @@ def _nhl_save_picks_snapshot(
     }
     existing = _nhl_load_picks_snapshot(date_str, snapshot_category)
     frozen_teams = {p.get("team") for p in existing if p.get("team")}
+    frozen_goalie_sides = {
+        (p.get("team"), p.get("side")) for p in existing
+        if p.get("category") == "Goalie Saves"
+    }
     flat = []
     for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
         rank_start = _NHL_TRK_TOP + 1 if ovf else 1
         for rank, p in enumerate(result.get(rkey) or [], rank_start):
-            if p.get("team") not in pregame_teams or p.get("team") in frozen_teams:
+            team = p.get("team")
+            if team not in pregame_teams:
+                continue
+            # Skater picks remain frozen at first capture. A starter confirmed
+            # later can still enter the official Saves record before puck drop,
+            # once per team/side; previously frozen goalie picks are untouched.
+            if team in frozen_teams and (
+                cat != "Goalie Saves" or (team, side) in frozen_goalie_sides
+            ):
                 continue
             raw_odds = p.get("realOdds") if side == "OVER" else p.get("realUnderOdds")
             odds = (raw_odds if p.get("realLine") is not None
@@ -8688,6 +8838,8 @@ def _nhl_save_picks_snapshot(
                 "score": p.get("score") or p.get("dispScore") or p.get("ptsScore") or 0,
                 "rank": rank, "is_overflow": ovf,
             })
+            if cat == "Goalie Saves":
+                frozen_goalie_sides.add((team, side))
     if flat or (pregame_teams and not existing):
         ok = _nhl_sb_upsert(
             "mpa_track_ledger",
@@ -11507,7 +11659,8 @@ async def api_nhl_system_board(
             board = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=503, detail="Saved system board could not be read") from exc
-    if not isinstance(board, dict) or board.get("date") != ds:
+    if (not isinstance(board, dict) or board.get("date") != ds
+            or board.get("_nhlCacheVersion") != 9):
         raise HTTPException(
             status_code=404,
             detail=f"No saved {system} board for {ds}. Run A+B+C+D for this date first.")
