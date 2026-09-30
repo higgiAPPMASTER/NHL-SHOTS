@@ -8515,11 +8515,11 @@ def _nhl_gp_record_payload() -> dict:
 
 def _nhl_update_gp_ledger(include_date: str = ""):
     """Grade unlocked historical GP snapshots and lock completed dates."""
-    today = date.today().isoformat()
+    today = _nhl_record_today()
     rows = _nhl_load_gp_snapshots()
     for saved in rows:
         d = saved.get("date")
-        if not d or d > today or (d == today and d != include_date) or saved.get("locked"):
+        if not d or d > today or saved.get("locked"):
             continue
         snapshot = saved.get("detail") or []
         if not isinstance(snapshot, list) or not snapshot:
@@ -8566,7 +8566,42 @@ def _nhl_grade_pick_stat(g: dict, stat_key: str):
         return float(v) if v is not None else None
     return _nhl_extract_stat(g, stat_key)
 
+def _nhl_record_today() -> str:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/Toronto")).date().isoformat()
+
+def _nhl_slate_finished(date_str: str, snap: list) -> bool:
+    """Fail closed until every NHL game on this date has ended.
+
+    Successful player game-log requests do not imply the other games on the
+    slate have finished. A short/empty schedule must not lock a partial record.
+    """
+    try:
+        r = httpx.get(f"{NHL_API}/schedule/{date_str}",
+                      follow_redirects=True, timeout=20)
+        r.raise_for_status()
+        games = [
+            g for day in r.json().get("gameWeek", [])
+            if day.get("date") == date_str
+            for g in day.get("games", [])
+            if g.get("gameType") in (2, 3)
+        ]
+        teams = {
+            side.get("abbrev")
+            for g in games
+            for side in (g.get("homeTeam") or {}, g.get("awayTeam") or {})
+        }
+        snap_teams = {p.get("team") for p in snap if p.get("team")}
+        return bool(games and snap_teams and snap_teams.issubset(teams)
+                    and all(g.get("gameState") in ("OFF", "FINAL") for g in games))
+    except Exception as e:
+        print(f"[nhl_track] slate status unavailable {date_str}: {e}")
+        return False
+
 def _nhl_grade_date(date_str: str, snap: list) -> dict:
+    if not _nhl_slate_finished(date_str, snap):
+        return {"any_game": bool(snap), "all_final": False,
+                "main": [], "overflow": [], "locks": []}
     from collections import defaultdict
     need: dict = {}
     for p in snap:
@@ -8643,7 +8678,24 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
             if lock_score >= 80:
                 lock_rows.append({**row, "category": "80-100% Locks",
                                   "is_overflow": bool(is_ovf)})
-    return {"any_game": any_game, "all_final": all_found,
+    # A final schedule can precede publication of some player game logs. Never
+    # lock if an entire snapshotted team still has no stat line on this date.
+    snap_teams = {p.get("team") for p in snap if p.get("team")}
+    seen_teams = {
+        p.get("team") for p in snap
+        if (pid_games.get(str(p.get("pid") or "")) or {}).get(date_str)
+    }
+    try:
+        mature_logs = (
+            date.fromisoformat(_nhl_record_today())
+            - date.fromisoformat(date_str)).days >= 2
+    except ValueError:
+        mature_logs = False
+    return {"any_game": any_game,
+            # Once the whole schedule is final and logs have had two days to
+            # settle, a team with only scratched picks need not block forever.
+            "all_final": all_found and
+                         (snap_teams.issubset(seen_teams) or mature_logs),
             "main": main_rows, "overflow": ovf_rows, "locks": lock_rows}
 
 def _nhl_aggregate_graded(graded: dict) -> dict:
@@ -8663,6 +8715,8 @@ def _nhl_aggregate_graded(graded: dict) -> dict:
     # are retained even without sportsbook odds; book W/L and profit remain
     # limited to rows that carry a real price.
     agg["__model_book_v2__"] = {"ALL": [0, 0]}
+    # A locked record with this marker passed the complete-slate check.
+    agg["__slate_final_v1__"] = {"ALL": [0, 0]}
     return agg
 
 def _nhl_detail_graded(graded: dict) -> list:
@@ -8678,7 +8732,7 @@ def _nhl_detail_graded(graded: dict) -> list:
 _NHL_TRK_LOCK = _bt_th.Lock()
 def _nhl_update_track_ledger(include_date: str = ""):
     from datetime import date as _d
-    today = _d.today().isoformat()
+    today = _nhl_record_today()
     with _NHL_TRK_LOCK:
         upserts = []
         for system in ("A", "B", "C", "D"):
@@ -8691,16 +8745,40 @@ def _nhl_update_track_ledger(include_date: str = ""):
                 "locked": "eq.true", "select": "date,detail",
                 "limit": "500"}) or []
             locked = {
-                row["date"] for row in locked_rows
+                row["date"]: row["detail"] for row in locked_rows
                 if row.get("date") and isinstance(row.get("detail"), dict)
                 and "__model_book_v2__" in row.get("detail", {})
             }
             for d in _nhl_list_snap_dates(snapshot_category):
-                if d >= today or d in locked:
+                if d > today:
                     continue
+                prior = locked.get(d)
+                if prior:
+                    if "__slate_final_v1__" in prior:
+                        continue
+                    # Repair only recently locked records that omitted an
+                    # entire snapshotted team. Older complete records and
+                    # unrelated past results must remain untouched.
+                    try:
+                        if (_d.fromisoformat(today) - _d.fromisoformat(d)).days > 7:
+                            continue
+                    except ValueError:
+                        continue
                 snap = _nhl_load_picks_snapshot(d, snapshot_category)
                 if not snap:
                     continue
+                if prior:
+                    old_rows = _nhl_sb_get("mpa_track_ledger", {
+                        "app": f"eq.{_NHL_TRK_APP}",
+                        "category": f"eq.{detail_category}",
+                        "date": f"eq.{d}", "select": "detail", "limit": "1"})
+                    saved_detail = ((old_rows[0].get("detail") or [])
+                                    if old_rows else [])
+                    expected = {p.get("team") for p in snap if p.get("team")}
+                    recorded = {p.get("team") for p in saved_detail
+                                if isinstance(p, dict) and p.get("team")}
+                    if not expected - recorded:
+                        continue
                 try:
                     graded = _nhl_grade_date(d, snap)
                 except Exception as e:
@@ -8708,13 +8786,7 @@ def _nhl_update_track_ledger(include_date: str = ""):
                     continue
                 if not graded.get("any_game"):
                     continue
-                try:
-                    from datetime import date as _dd
-                    old_enough = (
-                        _dd.today() - _dd.fromisoformat(d)).days >= 2
-                except Exception:
-                    old_enough = False
-                if not graded.get("all_final") and not old_enough:
+                if not graded.get("all_final"):
                     continue
                 agg = _nhl_aggregate_graded(graded)
                 det = _nhl_detail_graded(graded)
@@ -8731,10 +8803,25 @@ def _nhl_update_track_ledger(include_date: str = ""):
         for system in ("A", "B", "C", "D"):
             snap_category = _NHL_COACH_ALT_SNAP_CATS[system]
             detail_category = _NHL_COACH_ALT_DETAIL_CATS[system]
-            already = set(_nhl_list_snap_dates(detail_category))
+            existing_rows = _nhl_sb_get("mpa_track_ledger", {
+                "app": f"eq.{_NHL_TRK_APP}",
+                "category": f"eq.{detail_category}",
+                "select": "date,detail", "limit": "365"}) or []
+            already = {row["date"]: row.get("detail") or []
+                       for row in existing_rows if row.get("date")}
             for d in _nhl_list_snap_dates(snap_category):
-                if d >= today or d in already:
+                if d > today:
                     continue
+                if d in already:
+                    try:
+                        if (_d.fromisoformat(today) - _d.fromisoformat(d)).days > 7:
+                            continue
+                    except ValueError:
+                        continue
+                    if already[d] and all(
+                            r.get("result") in ("WIN", "LOSS", "PUSH", "VOID")
+                            for r in already[d]):
+                        continue
                 snap = _nhl_load_picks_snapshot(d, snap_category)
                 if not snap:
                     continue
@@ -8749,6 +8836,16 @@ def _nhl_update_track_ledger(include_date: str = ""):
                 # on later daily runs rather than permanently locking gaps.
                 if not graded.get("all_final"):
                     continue
+                unresolved = any(
+                    r.get("result") not in ("WIN", "LOSS", "PUSH")
+                    for r in graded.get("main", []))
+                try:
+                    old_enough = (
+                        _d.fromisoformat(today) - _d.fromisoformat(d)).days >= 2
+                except ValueError:
+                    old_enough = False
+                if unresolved and not old_enough:
+                    continue  # let freshly finished player logs catch up
                 lookup = {
                     (p.get("name"), p.get("stat_key"), p.get("side"),
                      str(p.get("line")), str(p.get("odds"))): p
@@ -8756,6 +8853,8 @@ def _nhl_update_track_ledger(include_date: str = ""):
                 }
                 detail = []
                 for row in graded.get("main", []):
+                    if row.get("result") not in ("WIN", "LOSS", "PUSH"):
+                        row = {**row, "result": "VOID", "profit": 0.0}
                     key = (row.get("name"), row.get("stat_key"),
                            row.get("side"), str(row.get("line")),
                            str(row.get("odds")))
@@ -9372,6 +9471,15 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
         record_system = "A"
     snapshot_category = _NHL_SYSTEM_SNAP_CATS[record_system]
     detail_category = _NHL_SYSTEM_DETAIL_CATS[record_system]
+    ledger_rows = _nhl_sb_get("mpa_track_ledger", {
+        "app": f"eq.{_NHL_TRK_APP}",
+        "category": f"eq.{_NHL_SYSTEM_LEDGER_CATS[record_system]}",
+        "locked": "eq.true", "select": "date,detail", "limit": "365"})
+    fully_graded_dates = {
+        row["date"] for row in (ledger_rows or [])
+        if row.get("date") and isinstance(row.get("detail"), dict)
+        and "__slate_final_v1__" in row["detail"]
+    }
     det_rows = _nhl_sb_get("mpa_track_ledger", {
         "app": f"eq.{_NHL_TRK_APP}",
         "category": f"eq.{detail_category}",
@@ -9447,11 +9555,20 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
     result = []
     for d in dates:
         det = _split_detail(detail_by_date.get(d, []), snapshot_by_date.get(d, []))
-        if not det and snapshot_by_date.get(d):
-            # A saved player snapshot is the source of truth for an ungraded
-            # slate. Keep its line and odds, mark the outcome pending, and
-            # mirror qualifying rows into Locks exactly as the grader will.
-            det = []
+        snapshot = snapshot_by_date.get(d) or []
+        recorded_teams = {r.get("team") for r in det if r.get("team")}
+        snapshot_teams = {p.get("team") for p in snapshot if p.get("team")}
+        if snapshot and (not det or (d not in fully_graded_dates
+                                     and snapshot_teams - recorded_teams)):
+            # Older, prematurely locked details can contain only the first
+            # finished game. Preserve those results and show the other saved
+            # picks as pending until the complete slate is safely regraded.
+            def _key(row):
+                return (row.get("name"), row.get("team"),
+                        row.get("category"), row.get("side"),
+                        row.get("stat_key"), str(row.get("line")),
+                        row.get("rank"), bool(row.get("is_overflow")))
+            existing = {_key(row) for row in det}
             for p in snapshot_by_date[d]:
                 pending_row = {
                     "name": p.get("name", ""), "team": p.get("team", ""),
@@ -9461,13 +9578,18 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
                     "is_overflow": bool(p.get("is_overflow")),
                     "result": None, "actual": None, "profit": None,
                 }
-                det.append(pending_row)
+                if _key(pending_row) not in existing:
+                    det.append(pending_row)
+                    existing.add(_key(pending_row))
                 try:
                     lock_score = float(p.get("score") or 0)
                 except (TypeError, ValueError):
                     lock_score = 0.0
                 if lock_score >= 80:
-                    det.append({**pending_row, "category": "80-100% Locks"})
+                    lock_row = {**pending_row, "category": "80-100% Locks"}
+                    if _key(lock_row) not in existing:
+                        det.append(lock_row)
+                        existing.add(_key(lock_row))
         main_det = [row for row in det if not row.get("is_overflow")]
         overflow_det = [row for row in det if row.get("is_overflow")]
         gp = _nhl_gp_summary(gp_by_date[d]) if d in gp_by_date else None
