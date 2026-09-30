@@ -1182,9 +1182,102 @@ def _nhl_c_confidence_rate(hits: int, total: int, z: float = 1.28) -> float:
     return round(max(0.0, (centre - margin) / denom) * 100, 1)
 
 
+_NHL_D_LINES_CACHE: Dict[Tuple[str, str], tuple] = {}
+
+
+async def _nhl_d_published_lines(games: List[Dict], target_date: str) -> Dict[str, Dict]:
+    """Today's published even-strength line assignments; no TOI guess for live D."""
+    teams = {team for game in games
+             for team in (game.get("homeTeam"), game.get("awayTeam")) if team}
+    selected_day = date.fromisoformat(target_date)
+    semaphore = asyncio.Semaphore(6)
+
+    async with httpx.AsyncClient(
+            follow_redirects=True, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MoneyPicksArena/1.0)"}
+    ) as client:
+        async def fetch(team: str) -> Tuple[str, Dict]:
+            key = (target_date, team)
+            cached = _NHL_D_LINES_CACHE.get(key)
+            now = time.monotonic()
+            if cached and now - cached[0] < (300 if cached[1] else 60):
+                return team, cached[1]
+            selected = {}
+            try:
+                slug = ("utah-mammoth" if team == "UTA" else
+                        re.sub(r"[^a-z0-9]+", "-",
+                               _NHL_TEAM_FULL[team].lower()).strip("-"))
+                async with semaphore:
+                    response = await client.get(
+                        f"https://www.dailyfaceoff.com/teams/{slug}/line-combinations")
+                    response.raise_for_status()
+                if len(response.content) > 2_000_000:
+                    raise ValueError("line-combinations page too large")
+                match = re.search(
+                    r'<script[^>]*\bid="__NEXT_DATA__"[^>]*>(.*?)</script>',
+                    response.text, re.S)
+                if not match:
+                    raise ValueError("line-combinations page has no structured data")
+                page = json.loads(html.unescape(match.group(1)))["props"]["pageProps"]
+                combination = page["combinations"]
+                if (page.get("slug") != slug
+                        or combination.get("teamSlug") != slug
+                        or combination.get("teamAbbreviation") != team):
+                    raise ValueError("line-combinations team mismatch")
+                source = str(combination.get("sourceName") or "")
+                if "offseason" in source.lower():
+                    raise ValueError("offseason projection is not a game-day lineup")
+                updated = datetime.fromisoformat(
+                    str(combination["updatedAt"]).replace("Z", "+00:00"))
+                age_days = (selected_day - updated.date()).days
+                if not -1 <= age_days <= 2:
+                    raise ValueError("line-combinations update is not current")
+                if not isinstance(combination.get("players"), list):
+                    raise ValueError("line-combinations players missing")
+                groups = {"f1": "F Line 1", "f2": "F Line 2",
+                          "d1": "D Pair 1", "d2": "D Pair 2"}
+                for row in combination["players"]:
+                    if not isinstance(row, dict) or row.get("categoryIdentifier") != "ev":
+                        continue
+                    group = row.get("groupIdentifier")
+                    name = _nhl_starter_name_key(row.get("name"))
+                    if group not in groups or not name:
+                        continue
+                    if name in selected and selected[name]["unit"] != groups[group]:
+                        raise ValueError("player assigned to multiple even-strength units")
+                    selected[name] = {"unit": groups[group], "source": "Daily Faceoff",
+                                      "updatedAt": combination["updatedAt"]}
+                if not selected:
+                    raise ValueError("top-two line assignments unavailable")
+            except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+                logger.warning("System D line assignments unavailable for %s: %s", team, exc)
+                selected = {}
+            _NHL_D_LINES_CACHE[key] = (now, selected)
+            return team, selected
+
+        return dict(await asyncio.gather(*(fetch(team) for team in sorted(teams))))
+
+
+def _nhl_d_published_rosters(rosters: dict, published: Dict[str, Dict]) -> dict:
+    """Use only the players actually listed on the first two lines/pairs."""
+    eligible = {}
+    for team, players in (rosters or {}).items():
+        assignments = published.get(team) or {}
+        eligible[team] = [
+            {**p, "systemDUnit": info["unit"], "systemDLineSource": info["source"],
+             "systemDLineUpdatedAt": info["updatedAt"]}
+            for p in players
+            if (info := assignments.get(_nhl_starter_name_key(p.get("name"))))
+            and (("F" if info["unit"].startswith("F") else "D")
+                 == str(p.get("positionGroup") or "").upper())
+        ]
+        print(f"[System D] {team}: {len(eligible[team])} published top-line/pair skaters")
+    return eligible
+
+
 def _nhl_d_eligible_rosters(rosters: dict, logs_map: dict,
                             target_date: str) -> dict:
-    """Limit D to forward lines 1-2 and defense pairs 1-2.
+    """Historical-replay-only pregame proxy for D (archived lines unavailable).
 
     NHL roster responses used by this app do not provide line/pair numbers.
     Until an authoritative deployment field is available, average recent
@@ -3004,7 +3097,8 @@ async def get_saves_picks(
 
 
 def _nhl_alt_coach_cache_get(date_key: str, system: str):
-    path = _CACHE_DIR / f"nhl_alt_coach_v4_{system}_{date_key}.json"
+    version = 5 if system == "D" else 4
+    path = _CACHE_DIR / f"nhl_alt_coach_v{version}_{system}_{date_key}.json"
     try:
         if path.exists() and time.time() - path.stat().st_mtime < _NHL_ALT_COACH_TTL:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -3015,7 +3109,8 @@ def _nhl_alt_coach_cache_get(date_key: str, system: str):
 
 def _nhl_alt_coach_cache_set(date_key: str, system: str, payload: dict) -> None:
     try:
-        (_CACHE_DIR / f"nhl_alt_coach_v4_{system}_{date_key}.json").write_text(
+        version = 5 if system == "D" else 4
+        (_CACHE_DIR / f"nhl_alt_coach_v{version}_{system}_{date_key}.json").write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception as exc:
         print(f"[NHLAltCoach] cache write error: {exc}")
@@ -3092,6 +3187,27 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
         games, {t: r if isinstance(r, list) else [] for t, r in zip(team_ctx, goalie_values)},
         [goalie_names], "goalies")
 
+    if system == "D":
+        await _attach_pregame_starting_goalies(games, date_str)
+        game_by_team = {
+            team: game for game in games
+            for team in (game["homeTeam"], game["awayTeam"])
+        }
+        goalies = {
+            team: [
+                {**goalie, "lineupStatus": "STARTER_CONFIRMED"} for goalie in rows
+                if goalie.get("starterConfirmed") is True or (
+                    game_by_team[team].get("gameState") not in
+                    {"LIVE", "CRIT", "OFF", "FINAL"}
+                    and _nhl_starter_name_key(goalie.get("name"))
+                    == _nhl_starter_name_key(
+                        ((game_by_team[team].get("startingGoalies") or {}).get(team)
+                         or {}).get("name"))
+                )
+            ]
+            for team, rows in goalies.items()
+        }
+
     people = []
     for team, players in skaters.items():
         for player in players:
@@ -3100,16 +3216,10 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
         for player in players:
             people.append((player, team, *team_ctx[team], "goalie"))
     if system == "D":
-        # D's published source is its top-player skater restriction; retain
-        # listed goalies, which are not part of that skater-only rule.
-        logs_for_d = await asyncio.gather(
-            *[_nhl_player_logs(p["id"], sem) for p, _, _, _, kind in people if kind == "skater"])
-        d_rosters = _nhl_d_eligible_rosters(
-            skaters,
-            {p["id"]: logs for (p, _, _, _, kind), logs in zip(
-                [x for x in people if x[4] == "skater"], logs_for_d)},
-            date_str,
-        )
+        # Alternate Coach stays alternate-only, but D shares the same actual
+        # published top-two line/pair pool as D's standard betting board.
+        d_rosters = _nhl_d_published_rosters(
+            skaters, await _nhl_d_published_lines(games, date_str))
         d_players = {
             p["id"]: p
             for rows in d_rosters.values()
@@ -3769,14 +3879,25 @@ async def run_picks(
                 for pid, r in zip(log_tasks.keys(), log_results)}
 
     if d_mode:
-        skater_rosters = _nhl_d_eligible_rosters(
-            skater_rosters, logs_map, target_date)
-        eligible_ids = {
-            player.get("id")
+        if simulate:
+            # Historical replays have no point-in-time published line chart.
+            skater_rosters = _nhl_d_eligible_rosters(
+                skater_rosters, logs_map, target_date)
+        else:
+            published = await _nhl_d_published_lines(games, target_date)
+            skater_rosters = _nhl_d_published_rosters(skater_rosters, published)
+        eligible_by_id = {
+            player.get("id"): player
             for players in skater_rosters.values()
             for player in players
         }
-        pool = [player for player in pool if player.get("pid") in eligible_ids]
+        pool = [
+            {**player,
+             **{key: eligible_by_id[player["pid"]][key]
+                for key in ("systemDUnit", "systemDLineSource", "systemDLineUpdatedAt")
+                if key in eligible_by_id[player["pid"]]}}
+            for player in pool if player.get("pid") in eligible_by_id
+        ]
         _progress["total"] = len(pool)
         print(
             f"[System D] {len(pool)} top-line/pair skaters eligible "
@@ -3963,6 +4084,34 @@ async def run_picks(
         lookup_profiles=goalie_lookup_profiles,
         include_unconfirmed=True,
     )
+    if d_mode and not simulate:
+        def quoted(pick: Dict, side: str) -> bool:
+            if (pick.get("realLine") is None
+                    or pick.get("lineSource") in ("Model", "Simulation", "No book line")):
+                return False
+            try:
+                line = float(pick["realLine"])
+                price = int(str(pick.get(
+                    "realOdds" if side == "OVER" else "realUnderOdds") or "").strip())
+            except (TypeError, ValueError):
+                return False
+            return line > 0 and (price >= 100 or -1000 <= price <= -100)
+
+        # D's live pilot has no model-only recommendations. Filter each side
+        # independently: a posted Over never supplies a missing Under price.
+        picks = [p for p in picks if quoted(p, "OVER")]
+        shot_unders = [p for p in shot_unders if quoted(p, "UNDER")]
+        pts_all = [p for p in pts_all if quoted(p, "OVER")]
+        pts_unders = [p for p in pts_unders if quoted(p, "UNDER")]
+        ast_all = [p for p in ast_all if quoted(p, "OVER")]
+        ast_unders = [p for p in ast_unders if quoted(p, "UNDER")]
+        goal_all = [p for p in goal_all if quoted(p, "OVER")]
+        goal_unders_all = [p for p in goal_unders_all if quoted(p, "UNDER")]
+        saves_all = [p for p in saves_all if quoted(p, "OVER")]
+        saves_unders = [p for p in saves_unders if quoted(p, "UNDER")]
+        # This market is intentionally model-only today; leave the category
+        # registered, but do not put unbettable PP picks on D's live board.
+        pp_all, pp_unders = [], []
     # Admin comparison only: reproduce the attached pre-change system from the
     # exact same corrected data/odds/lineup pool.  This changes selection and
     # ordering only; it never triggers another external-data fetch.
@@ -4152,7 +4301,7 @@ async def run_picks(
             profile_seen.add(key)
 
     _result = {
-        "_nhlCacheVersion": 9,
+        "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
@@ -4220,6 +4369,14 @@ async def run_picks(
             "MODEL-ONLY picks without a US/Canada book line use the shown "
             "threshold for accuracy, not a sportsbook wager or profit/ROI. "
             "ROSTER — UNCONFIRMED means the player may not dress today."
+        )
+    if d_mode and not simulate:
+        _result["data_note"] = (
+            "System D pilot: published Daily Faceoff forward lines 1–2 and "
+            "defense pairs 1–2 only. Each displayed pick requires an actual "
+            "standard sportsbook line and a price for its side. Missing or "
+            "outdated line charts and unpriced markets yield no D skater pick; "
+            "Goalie Saves still requires a confirmed starter."
         )
     if include_legacy_system:
         _result.update({
@@ -11660,7 +11817,7 @@ async def api_nhl_system_board(
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=503, detail="Saved system board could not be read") from exc
     if (not isinstance(board, dict) or board.get("date") != ds
-            or board.get("_nhlCacheVersion") != 9):
+            or board.get("_nhlCacheVersion") != (10 if system == "D" else 9)):
         raise HTTPException(
             status_code=404,
             detail=f"No saved {system} board for {ds}. Run A+B+C+D for this date first.")
