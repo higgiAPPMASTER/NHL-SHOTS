@@ -4600,6 +4600,7 @@ body.is-admin #parlayCard{display:block}
 .nhl-scroll-anchor{scroll-margin-top:18px;height:1px}
 .nhl-game-row{scroll-margin-top:18px}
 .frank-ai-card{position:relative;overflow:hidden;border:1px solid rgba(249,115,22,.42)!important;background:linear-gradient(145deg,rgba(18,18,18,.98),rgba(20,12,8,.98))!important}
+.frank-ai-card:has(#frankParlayCategories[open]){overflow:visible;z-index:5}
 .frank-ai-card:before{content:"";position:absolute;inset:-80px auto auto -80px;width:210px;height:210px;border-radius:50%;background:rgba(249,115,22,.09);filter:blur(18px);pointer-events:none}
 .frank-ai-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;position:relative}
 .frank-ai-kicker{font-size:.65rem;font-weight:900;letter-spacing:.13em;color:#fb923c;text-transform:uppercase;margin-bottom:5px}
@@ -4807,7 +4808,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
           Categories
           <details id="frankParlayCategories" style="position:relative;margin-top:4px">
             <summary id="frankParlayCategoryCount" style="list-style:none;cursor:pointer;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:8px;color:#fff;min-width:175px">Categories (12/12) ▾</summary>
-            <div style="position:absolute;z-index:60;top:calc(100% + 5px);left:0;max-height:300px;overflow-y:auto;width:max-content;max-width:min(310px,85vw);background:#11121b;border:1px solid #7c3aed;border-radius:9px;padding:10px;box-shadow:0 12px 30px rgba(0,0,0,.6)">
+            <div style="position:absolute;z-index:60;top:calc(100% + 5px);left:0;max-height:min(420px,65vh);overflow-y:auto;width:max-content;max-width:min(310px,85vw);background:#11121b;border:1px solid #7c3aed;border-radius:9px;padding:10px;box-shadow:0 12px 30px rgba(0,0,0,.6)">
               <div style="display:flex;gap:6px;margin-bottom:6px">
                 <button type="button" onclick="_frankParlaySetAll(true)" style="cursor:pointer;background:#312e81;color:#fff;border:0;border-radius:5px;padding:5px 9px">Select all</button>
                 <button type="button" onclick="_frankParlaySetAll(false)" style="cursor:pointer;background:#312e81;color:#fff;border:0;border-radius:5px;padding:5px 9px">Clear</button>
