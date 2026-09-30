@@ -131,7 +131,7 @@ def _cache_get(app: str, date_key: str):
     try:
         if p.exists() and (time.time() - p.stat().st_mtime) < _CACHE_TTL:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if app == "nhl" and data.get("_nhlCacheVersion") != 6:
+            if app == "nhl" and data.get("_nhlCacheVersion") != 8:
                 print(f"[Cache] STALE SCHEMA {app}/{date_key}")
                 return None
             print(f"[Cache] FILE HIT {app}/{date_key}")
@@ -332,13 +332,16 @@ def _lineup_filtered_rosters(
     rosters: Dict[str, List[Dict]],
     line_maps: List[Dict],
     player_group: str,
+    include_unconfirmed: bool = False,
 ) -> Dict[str, List[Dict]]:
     """Keep only players established for the game-day lineup.
 
     Official boxscore participants win whenever they exist (live/final games
     and historical replay).  Before puck drop the NHL feed has no projected
     lineup field, so a player must appear in a listed player-prop market.  A
-    missing lineup signal never broadens back to the full team roster.
+    An explicitly requested model-only board may also retain pregame roster
+    candidates, clearly marked unconfirmed. Live/final games still require
+    official participants.
     """
     game_by_team = {}
     for game in games:
@@ -358,7 +361,7 @@ def _lineup_filtered_rosters(
                 current_by_id.get(int(p["id"]), p)
                 for p in official if p.get("id") is not None
             ]
-            filtered[team] = eligible
+            filtered[team] = [{**p, "lineupStatus": "CONFIRMED"} for p in eligible]
             game.setdefault("lineupByTeam", {})[team] = "CONFIRMED"
             print(f"[Lineup] {team}: {len(eligible)} confirmed {player_group}")
             continue
@@ -377,9 +380,24 @@ def _lineup_filtered_rosters(
                 player = _match_odds_name(odds_name, roster)
                 if player and player.get("id") is not None:
                     eligible_ids.add(int(player["id"]))
-        filtered[team] = [p for p in roster if int(p.get("id", -1)) in eligible_ids]
-        status = "BOOK_LISTED" if filtered[team] else "UNAVAILABLE"
-        game.setdefault("lineupByTeam", {})[team] = status
+        filtered[team] = [
+            {**p, "lineupStatus": (
+                "BOOK_LISTED" if int(p.get("id", -1)) in eligible_ids
+                else "ROSTER_UNCONFIRMED")}
+            for p in roster
+            if include_unconfirmed or int(p.get("id", -1)) in eligible_ids
+        ]
+        status = ("ROSTER_UNCONFIRMED" if any(
+            p["lineupStatus"] == "ROSTER_UNCONFIRMED" for p in filtered[team])
+            else "BOOK_LISTED" if filtered[team] else "UNAVAILABLE")
+        team_status = game.setdefault("lineupByTeam", {})
+        # Skaters and goalies are processed separately; do not let the later
+        # group hide unconfirmed candidates from the team-level lineup badge.
+        team_status[team] = (
+            "ROSTER_UNCONFIRMED"
+            if "ROSTER_UNCONFIRMED" in (team_status.get(team), status)
+            else status
+        )
         print(f"[Lineup] {team}: {len(filtered[team])} {player_group} "
               f"from {status.lower().replace('_', ' ')} signal")
     return filtered
@@ -491,28 +509,36 @@ def _odds_event_matches_slate(event: Dict, games: List[Dict]) -> bool:
     )
 
 
-async def _nhl_gp_recent_meetings(target_date: str, home: str, away: str) -> dict:
-    """Completed NHL meetings before the selected game, for display only."""
+async def _nhl_gp_club_schedule(team: str, season: str, client: httpx.AsyncClient) -> dict:
+    """Share validated NHL club schedules across the total model and H2H display."""
+    cached = _cache_get("nhl_gp_schedule", f"{team}_{season}")
+    if cached is not None:
+        return cached
+    response = await client.get(f"{NHL_API}/club-schedule-season/{team}/{season}")
+    response.raise_for_status()
+    cached = response.json()
+    if not isinstance(cached, dict) or not isinstance(cached.get("games"), list):
+        raise ValueError("Invalid NHL club schedule")
+    _cache_set("nhl_gp_schedule", f"{team}_{season}", cached)
+    return cached
+
+
+async def _nhl_gp_recent_meetings(
+    target_date: str, home: str, away: str, max_seasons: int = 8,
+) -> dict:
+    """Completed NHL meetings strictly before the selected game."""
     season_start = (date.fromisoformat(target_date).year
                     if date.fromisoformat(target_date).month >= 7
                     else date.fromisoformat(target_date).year - 1)
     meetings, seen = [], set()
     async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-        for start_year in range(season_start, season_start - 8, -1):
+        for start_year in range(season_start, season_start - max_seasons, -1):
             season = f"{start_year}{start_year + 1}"
-            cached = _cache_get("nhl_gp_schedule", f"{home}_{season}")
-            if cached is None:
-                try:
-                    response = await client.get(
-                        f"{NHL_API}/club-schedule-season/{home}/{season}")
-                    response.raise_for_status()
-                    cached = response.json()
-                    if not isinstance(cached, dict) or not isinstance(cached.get("games"), list):
-                        raise ValueError("Invalid NHL club schedule")
-                    _cache_set("nhl_gp_schedule", f"{home}_{season}", cached)
-                except (httpx.HTTPError, ValueError) as exc:
-                    print(f"[GP] Head-to-head schedule unavailable for {home}/{season}: {exc}")
-                    return {"meetings": meetings[:10], "unavailable": True}
+            try:
+                cached = await _nhl_gp_club_schedule(home, season, client)
+            except (httpx.HTTPError, ValueError) as exc:
+                print(f"[GP] Head-to-head schedule unavailable for {home}/{season}: {exc}")
+                return {"meetings": meetings[:10], "unavailable": True}
             for game in cached.get("games", []):
                 if not isinstance(game, dict):
                     continue
@@ -534,6 +560,7 @@ async def _nhl_gp_recent_meetings(target_date: str, home: str, away: str) -> dic
                     "homeGoals": hs, "awayGoals": a_s,
                     "winner": gh if hs > a_s else ga if a_s > hs else "",
                     "totalGoals": hs + a_s,
+                    "gameType": game.get("gameType"),
                 })
             if len(meetings) >= 10:
                 break
@@ -541,7 +568,50 @@ async def _nhl_gp_recent_meetings(target_date: str, home: str, away: str) -> dic
     return {"meetings": meetings[:10], "unavailable": False}
 
 
-async def _nhl_gp_fetch_all(target_date: str, season: str) -> dict:
+def _nhl_gp_venue_rates(schedule: dict, team: str) -> dict:
+    """Prior regular-season GF/GA split by actual host, not current standings."""
+    rows = {"home": [], "away": []}
+    for game in schedule.get("games", []):
+        if not isinstance(game, dict) or game.get("gameType") != 2:
+            continue
+        if game.get("gameState") not in ("OFF", "FINAL"):
+            continue
+        home, away = game.get("homeTeam") or {}, game.get("awayTeam") or {}
+        hg, ag = home.get("score"), away.get("score")
+        if not isinstance(hg, int) or not isinstance(ag, int):
+            continue
+        if home.get("abbrev") == team:
+            rows["home"].append((hg, ag))
+        elif away.get("abbrev") == team:
+            rows["away"].append((ag, hg))
+    return {
+        venue: {"games": len(results),
+                "gf": round(sum(gf for gf, _ in results) / len(results), 2) if results else None,
+                "ga": round(sum(ga for _, ga in results) / len(results), 2) if results else None}
+        for venue, results in rows.items()
+    }
+
+
+def _nhl_gp_event_matches_game(event: dict, games: list) -> bool:
+    """Pair and kickoff must match; a late NHL game can start next UTC date."""
+    home = _nhl_match_team_name(event.get("home_team", ""))
+    away = _nhl_match_team_name(event.get("away_team", ""))
+    for game in games:
+        if (home, away) != (game.get("homeTeam"), game.get("awayTeam")):
+            continue
+        try:
+            event_start = datetime.fromisoformat(
+                event["commence_time"].replace("Z", "+00:00"))
+            slate_start = datetime.fromisoformat(
+                game["startTime"].replace("Z", "+00:00"))
+            if abs((event_start - slate_start).total_seconds()) <= 6 * 3600:
+                return True
+        except (KeyError, TypeError, ValueError):
+            continue
+    return False
+
+
+async def _nhl_gp_fetch_all(target_date: str, season: str, games: list = None) -> dict:
     """Fetch standings, team summary, PP/PK, B2B schedule, and Odds API game lines."""
     import urllib.parse as _up
     yesterday = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
@@ -629,6 +699,39 @@ async def _nhl_gp_fetch_all(target_date: str, season: str) -> dict:
         if abbr in team_data:
             team_data[abbr]["pkPct"] = round(float(t.get("penaltyKillPct", 0) or 0), 1)
 
+    # Last completed season is the total model's baseline; this also keeps
+    # historical replays point-in-time rather than using a later season.
+    games = games or []
+    prior_start = int(season[:4]) - 1
+    prior_season = f"{prior_start}{prior_start + 1}"
+    prior_venues, meeting_context = {}, {}
+    playing = {abbr for g in games for abbr in
+               (g.get("homeTeam"), g.get("awayTeam")) if abbr}
+    if playing:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as c:
+            schedules = await asyncio.gather(
+                *[_nhl_gp_club_schedule(team, prior_season, c)
+                  for team in sorted(playing)], return_exceptions=True)
+        for team, schedule in zip(sorted(playing), schedules):
+            if isinstance(schedule, dict):
+                prior_venues[team] = _nhl_gp_venue_rates(schedule, team)
+            else:
+                print(f"[GP] Prior-season schedule missing for {team}/{prior_season}: {schedule}")
+        meeting_rows = await asyncio.gather(
+            *[_nhl_gp_recent_meetings(
+                target_date, g["homeTeam"], g["awayTeam"], max_seasons=4)
+              for g in games],
+            return_exceptions=True,
+        )
+        for g, rows in zip(games, meeting_rows):
+            if isinstance(rows, dict):
+                meeting_context[(g["awayTeam"], g["homeTeam"])] = [
+                    row for row in rows.get("meetings", [])
+                    if row.get("gameType") == 2
+                ]
+            else:
+                print(f"[GP] H2H model context missing for {g['awayTeam']} @ {g['homeTeam']}: {rows}")
+
     # Odds API — h2h moneylines + totals
     game_lines: dict = {}
     if api_key:
@@ -638,12 +741,16 @@ async def _nhl_gp_fetch_all(target_date: str, season: str) -> dict:
                     f"{ODDS_API}/sports/icehockey_nhl/events",
                     params={"apiKey": api_key, "dateFormat": "iso"})
                 if evs_r.status_code == 200:
-                    today_evs = [e for e in evs_r.json()
-                                 if e.get("commence_time", "")[:10] == target_date]
+                    tomorrow = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
+                    today_evs = [
+                        e for e in evs_r.json()
+                        if e.get("commence_time", "")[:10] in (target_date, tomorrow)
+                        and _nhl_gp_event_matches_game(e, games)
+                    ]
                     if today_evs:
                         odd_tasks = [
                             c.get(f"{ODDS_API}/sports/icehockey_nhl/events/{ev['id']}/odds",
-                                  params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                                  params={"apiKey": api_key, "regions": "us,us2,ca",
                                           "markets": "h2h,totals", "oddsFormat": "american"})
                             for ev in today_evs
                         ]
@@ -656,34 +763,60 @@ async def _nhl_gp_fetch_all(target_date: str, season: str) -> dict:
                             if not h_abbr or not a_abbr:
                                 continue
                             entry: dict = {}
+                            def _allowed_price(value):
+                                try:
+                                    price = float(value)
+                                    return price != 0 and price >= -1000
+                                except (TypeError, ValueError):
+                                    return False
                             for book in r.json().get("bookmakers", []):
                                 for mkt in book.get("markets", []):
                                     mk = mkt.get("key")
+                                    if mk == "totals" and "total" not in entry:
+                                        outcomes = mkt.get("outcomes", [])
+                                        # A book may return Under first, or only
+                                        # one side; never pair different points.
+                                        for oc in outcomes:
+                                            if oc.get("name", "").upper() not in ("OVER", "UNDER"):
+                                                continue
+                                            point = oc.get("point")
+                                            if point is None or not _allowed_price(oc.get("price")):
+                                                continue
+                                            entry["total"] = point
+                                            entry["tot_book"] = book.get("key", "")
+                                            for side in ("OVER", "UNDER"):
+                                                paired = next(
+                                                    (row.get("price") for row in outcomes
+                                                     if row.get("name", "").upper() == side
+                                                     and row.get("point") == point
+                                                     and _allowed_price(row.get("price"))), None)
+                                                if paired is not None:
+                                                    entry["over_odds" if side == "OVER"
+                                                          else "under_odds"] = paired
+                                            break
+                                    if mk != "h2h":
+                                        continue
                                     for oc in mkt.get("outcomes", []):
                                         pr  = oc.get("price", 0)
-                                        pt  = oc.get("point")
                                         nm  = oc.get("name", "")
                                         na  = _nhl_match_team_name(nm)
-                                        if mk == "h2h":
-                                            if na == h_abbr and "home_ml" not in entry:
-                                                entry["home_ml"] = pr
-                                                entry["ml_book"] = book.get("key", "")
-                                            elif na == a_abbr and "away_ml" not in entry:
-                                                entry["away_ml"] = pr
-                                        elif mk == "totals":
-                                            side = nm.upper()
-                                            if side == "OVER" and "total" not in entry:
-                                                entry["total"]     = pt
-                                                entry["over_odds"] = pr
-                                                entry["tot_book"]  = book.get("key", "")
-                                            elif side == "UNDER" and "under_odds" not in entry:
-                                                entry["under_odds"] = pr
+                                        if not _allowed_price(pr):
+                                            continue
+                                        if na == h_abbr and "home_ml" not in entry:
+                                            entry["home_ml"] = pr
+                                            entry["ml_book"] = book.get("key", "")
+                                        elif na == a_abbr and "away_ml" not in entry:
+                                            entry["away_ml"] = pr
                             if entry:
                                 game_lines[(a_abbr, h_abbr)] = entry
         except Exception as _gp_oe:
             print(f"[GP] Odds API game lines error: {_gp_oe}")
 
-    return {"team_data": team_data, "game_lines": game_lines}
+    return {
+        "team_data": team_data, "game_lines": game_lines,
+        "prior_venues": prior_venues, "prior_season": prior_season,
+        "meeting_context": meeting_context,
+    }
 
 
 def _nhl_gp_predict(games: list, gp_data: dict) -> list:
@@ -691,6 +824,8 @@ def _nhl_gp_predict(games: list, gp_data: dict) -> list:
     team_data  = gp_data.get("team_data", {})
     game_lines = gp_data.get("game_lines", {})
     schedule_context = gp_data.get("schedule_context", {})
+    prior_venues = gp_data.get("prior_venues", {})
+    meeting_context = gp_data.get("meeting_context", {})
     if not team_data:
         return []
 
@@ -770,6 +905,38 @@ def _nhl_gp_predict(games: list, gp_data: dict) -> list:
         pick_team = home if win_prob >= 0.5 else away
         pick_prob = round((win_prob if win_prob >= 0.5 else 1 - win_prob) * 100, 1)
 
+        # Total projection uses last completed regular season's actual venue
+        # scoring rather than zero/few-game current-season standings. Keep the
+        # existing winner model separate; these inputs change totals only.
+        h_home = prior_venues.get(home, {}).get("home", {})
+        a_away = prior_venues.get(away, {}).get("away", {})
+        same = [m["totalGoals"] for m in meeting_context.get((away, home), [])
+                if m.get("home") == home]
+        reverse = [m["totalGoals"] for m in meeting_context.get((away, home), [])
+                   if m.get("home") == away]
+        same_avg = round(sum(same) / len(same), 2) if same else None
+        reverse_avg = round(sum(reverse) / len(reverse), 2) if reverse else None
+        if (h_home.get("games", 0) >= 5 and a_away.get("games", 0) >= 5
+                and h_home["gf"] + a_away["ga"] + a_away["gf"] + h_home["ga"] > 0):
+            base_h = (h_home["gf"] + a_away["ga"]) / 2
+            base_a = (a_away["gf"] + h_home["ga"]) / 2
+            base_total = base_h + base_a
+            venue_sample = len(same) + 0.5 * len(reverse)
+            adjustment = 0.0
+            if venue_sample:
+                h2h_avg = (sum(same) + 0.5 * sum(reverse)) / venue_sample
+                # Opponents and rosters change; H2H cannot overrule the
+                # full-season venue baseline by more than half a goal.
+                weight = min(0.15, 0.03 * len(same) + 0.015 * len(reverse))
+                adjustment = max(-0.5, min(0.5, (h2h_avg - base_total) * weight))
+            proj_h = round(base_h + adjustment * base_h / base_total, 2)
+            proj_a = round(base_a + adjustment * base_a / base_total, 2)
+            proj_total = round(proj_h + proj_a, 1)
+        else:
+            # Never display current-season zero-goal standings as a plausible
+            # model total when the prior-season venue data is unavailable.
+            proj_h = proj_a = proj_total = None
+
         gl = game_lines.get((away, home), {})
         book_total  = gl.get("total")
         over_odds   = gl.get("over_odds")
@@ -778,9 +945,14 @@ def _nhl_gp_predict(games: list, gp_data: dict) -> list:
         away_ml     = gl.get("away_ml")
 
         ou_rec = None
-        if book_total is not None:
+        if book_total is not None and proj_total is not None:
             diff = proj_total - book_total
-            ou_rec = "OVER" if diff > 0.25 else "UNDER" if diff < -0.25 else "PUSH"
+            if diff > 0.25 and over_odds is not None:
+                ou_rec = "OVER"
+            elif diff < -0.25 and under_odds is not None:
+                ou_rec = "UNDER"
+            elif -0.25 <= diff <= 0.25:
+                ou_rec = "PUSH"
 
         ml_impl_h = None
         if home_ml is not None:
@@ -796,6 +968,10 @@ def _nhl_gp_predict(games: list, gp_data: dict) -> list:
             "gameTypeLabel": g.get("gameTypeLabel", ""),
             "season": g.get("season", ""),
             "projHome": proj_h, "projAway": proj_a, "projTotal": proj_total,
+            "totalSeason": gp_data.get("prior_season", ""),
+            "priorHome": h_home, "priorAway": a_away,
+            "h2hSame": {"games": len(same), "avg": same_avg},
+            "h2hReverse": {"games": len(reverse), "avg": reverse_avg},
             "winProbHome": win_prob, "pickTeam": pick_team, "pickProb": pick_prob,
             "hGfPG": ht["gfPG"], "hGaPG": ht["gaPG"],
             "hSfPG": ht["sfPG"], "hSaPG": ht["saPG"],
@@ -1576,7 +1752,7 @@ async def get_shot_lines(
 
     # A separate cache namespace prevents older date+tomorrow mixed slates from
     # being reused after lineup eligibility became date/game specific.
-    _oc = _odds_cache_get("nhl_lineup_v4", target_date)
+    _oc = _odds_cache_get("nhl_lineup_v5_us_ca", target_date)
     if _oc is not None:
         cached_lines = _oc.get("lines", {})
         # A past simulation could previously cache an empty live-endpoint
@@ -1632,7 +1808,7 @@ async def get_shot_lines(
                     archived_cache = {
                         "lines": lines, "pts": pts_lines, "ast": ast_lines,
                         "sv": sv_lines, "goals": goal_lines}
-                    _odds_cache_set("nhl_lineup_v4", target_date, archived_cache)
+                    _odds_cache_set("nhl_lineup_v5_us_ca", target_date, archived_cache)
                     _nhl_save_historical_odds_cache(target_date, archived_cache)
                     return lines, pts_lines, ast_lines, sv_lines, goal_lines
                 print(f"[HistoricalLines] no archived shot lines available; "
@@ -1660,18 +1836,18 @@ async def get_shot_lines(
                     r2, ra, rg = await asyncio.gather(
                         c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                            params={"apiKey": api_key, "regions": "us,us2,ca",
                                     "markets": ("player_shots_on_goal,player_points,"
                                                 "player_assists,player_total_saves"),
                                     "oddsFormat": "american"}),
                         c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                            params={"apiKey": api_key, "regions": "us,us2,ca",
                                     "markets": ",".join(LIVE_ALTERNATE_PROP_MARKETS),
                                     "oddsFormat": "american"}),
                         c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                            params={"apiKey": api_key, "regions": "us,us2,ca",
                                     "markets": "player_goal_scorer_anytime",
                                     "oddsFormat": "american"}),
                         return_exceptions=True,
@@ -1772,7 +1948,7 @@ async def get_shot_lines(
               f"{len(ast_lines)} assist | {len(sv_lines)} saves | {len(goal_lines)} goals lines from The Odds API")
         if (lines or pts_lines or ast_lines or sv_lines or goal_lines
                 or any(alternate_lines.values())):
-            _odds_cache_set("nhl_lineup_v4", target_date, {
+            _odds_cache_set("nhl_lineup_v5_us_ca", target_date, {
                 "lines": lines, "pts": pts_lines,
                 "ast": ast_lines, "sv": sv_lines, "goals": goal_lines,
                 "alternates": alternate_lines})
@@ -1834,6 +2010,7 @@ async def get_shot_qualified_players(
     season: str = "20252026",
     lines_map: Dict = None,
     lineup_maps: List[Dict] = None,
+    include_unconfirmed: bool = False,
 ) -> List[Dict]:
     """Build the game-day skater pool and attach posted book lines."""
     if lines_map is None:
@@ -1850,7 +2027,9 @@ async def get_shot_qualified_players(
         *[get_roster(t, sem) for t in team_ctx], return_exceptions=True)
     rosters = {t: (r if isinstance(r, list) else [])
                for t, r in zip(team_ctx.keys(), roster_vals)}
-    rosters = _lineup_filtered_rosters(games, rosters, lineup_maps, "skaters")
+    rosters = _lineup_filtered_rosters(
+        games, rosters, lineup_maps, "skaters",
+        include_unconfirmed=include_unconfirmed)
 
     pool: List[Dict] = []
     seen: set = set()
@@ -1880,6 +2059,7 @@ async def get_shot_qualified_players(
                 "name":       p["name"],
                 "pid":        p["id"],
                 "positionGroup": p.get("positionGroup", "F"),
+                "lineupStatus": p.get("lineupStatus", "UNAVAILABLE"),
                 "team":       team,
                 "opponent":   opp,
                 "homeRoad":   hr,
@@ -2021,6 +2201,50 @@ async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> Li
                 "opponent": g.get("opponentAbbrev", ""),
             })
     return logs
+
+
+def _nhl_history_profile(player: Dict, full_logs: List[Dict],
+                         target_date: str, stat_key: str, market: str,
+                         history_line: Optional[float] = None,
+                         book_line: Optional[float] = None) -> Dict:
+    """Lookup-only history; never feeds a board, bet, parlay, or record."""
+    logs = _nhl_pre_game_logs(full_logs, target_date)
+    hr, opp = player.get("homeRoad", ""), player.get("opponent", "")
+    versus = [g for g in logs
+              if g.get("homeRoad") == hr and g.get("opponent") == opp][:10]
+    recent = [g for g in logs if g.get("homeRoad") == hr][:10]
+    display = versus or recent
+    try:
+        actual_book = float(book_line) if book_line is not None else None
+    except (TypeError, ValueError):
+        actual_book = None
+    line = actual_book if actual_book is not None else history_line
+
+    def summary(rows):
+        values = [float(g[stat_key]) for g in rows if g.get(stat_key) is not None]
+        hits = sum(v > line for v in values) if line is not None else 0
+        return hits, len(values), round(hits / len(values) * 100, 1) if values and line is not None else 0, (
+            round(sum(values) / len(values), 2) if values else 0)
+
+    h_a, t_a, r_a, avg_a = summary(versus)
+    h_b, t_b, r_b, avg_b = summary(recent)
+    return {
+        "name": player.get("name", ""), "pid": player.get("pid"),
+        "team": player.get("team", ""), "opponent": opp, "homeRoad": hr,
+        "positionGroup": player.get("positionGroup", "F"),
+        "lineupStatus": player.get("lineupStatus"), "mkt": market,
+        "historyOnly": True, "realLine": actual_book, "dispLine": line,
+        "lineSource": ("Book" if actual_book is not None else
+                       "Model" if market == "Power Play Points (1+)" else "History"),
+        "hitsA": h_a, "totA": t_a, "rateA": r_a, "avgA": avg_a,
+        "hitsB": h_b, "totB": t_b, "rateB": r_b, "avg": avg_b,
+        "underHits": t_b - h_b if line is not None else 0,
+        "underTotal": t_b if line is not None else 0,
+        "underRate": round((t_b - h_b) / t_b * 100, 1)
+                     if line is not None and t_b else 0,
+        "glog": [{"d": g.get("date"), "v": g.get(stat_key)}
+                 for g in display if g.get(stat_key) is not None],
+    }
 
 
 async def get_pts_picks(
@@ -2279,6 +2503,7 @@ async def get_pts_picks(
             return {
                 "name": player["name"], "pid": player["id"], "team": team,
                 "positionGroup": player.get("positionGroup", "F"),
+                "lineupStatus": player.get("lineupStatus", "UNAVAILABLE"),
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
                 "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
                 "lineSource": line_source,
@@ -2323,12 +2548,16 @@ async def get_pts_picks(
             if pp["overOk"]: pts_picks.append(pp)
             if pp["underOk"]: pts_unders.append(pp)
 
-        ap = build_pick("assists", AST_LINE, HIT_THRESH_AST, ast_lines_map, "Assists (1+)")
+        ap = build_pick(
+            "assists", AST_LINE, HIT_THRESH_AST, ast_lines_map,
+            "Assists (1+)", allow_model_fallback=True)
         if ap:
             if ap["overOk"]: ast_picks.append(ap)
             if ap["underOk"]: ast_unders.append(ap)
 
-        gp = build_pick("goals", 0.5, HIT_THRESH_GOALS, goal_lines_map, "Goals (1+)")
+        gp = build_pick(
+            "goals", 0.5, HIT_THRESH_GOALS, goal_lines_map,
+            "Goals (1+)", allow_model_fallback=True)
         if gp:
             if gp["overOk"]: goal_picks.append(gp)
             if gp["underOk"]: goal_unders.append(gp)
@@ -2416,6 +2645,8 @@ async def get_saves_picks(
     schedule_context: Dict[str, Dict] = None,
     opponent_sf_map: Dict[str, float] = None,
     system: str = "A",
+    lookup_profiles: Optional[List[Dict]] = None,
+    include_unconfirmed: bool = False,
 ) -> List[Dict]:
     """Goalie saves picks using only game-day eligible goalies."""
     sv_lines_map = sv_lines_map or {}
@@ -2435,10 +2666,23 @@ async def get_saves_picks(
         *[get_goalies(t, sem) for t in team_ctx], return_exceptions=True)
     rosters = {t: (r if isinstance(r, list) else [])
                for t, r in zip(team_ctx.keys(), roster_vals)}
-    rosters = _lineup_filtered_rosters(games, rosters, lineup_maps, "goalies")
+    # Keep the full roster for lookup only; board eligibility still uses the
+    # confirmed/book-listed game-day filter below.
+    lookup_rosters = rosters
+    rosters = _lineup_filtered_rosters(
+        games, rosters, lineup_maps, "goalies",
+        include_unconfirmed=include_unconfirmed)
 
     all_goalies = []
+    roster_goalies = []
     seen = set()
+    for team, players in lookup_rosters.items():
+        ctx = team_ctx[team]
+        for p in players:
+            if p["id"] not in seen:
+                seen.add(p["id"])
+                roster_goalies.append((p, team, ctx["opponent"], ctx["homeRoad"]))
+    seen.clear()
     for team, players in rosters.items():
         ctx = team_ctx[team]
         for p in players:
@@ -2459,10 +2703,33 @@ async def get_saves_picks(
         logs.sort(key=lambda x: x["date"], reverse=True)
         return logs
 
+    # Lookup-only roster goalies do not trigger extra full-season downloads
+    # during board generation. Their history loads only when a card is opened.
     log_tasks = {p["id"]: fetch_logs(p["id"]) for p, *_ in all_goalies}
     log_results = await asyncio.gather(*log_tasks.values(), return_exceptions=True)
     logs_map = {pid: (r if isinstance(r, list) else [])
                 for pid, r in zip(log_tasks.keys(), log_results)}
+
+    if lookup_profiles is not None:
+        eligible_by_id = {p["id"]: p for p, *_ in all_goalies}
+        for goalie, team, opp, hr in roster_goalies:
+            book_line = None
+            for odds_name, sb_info in sv_lines_map.items():
+                if _match_odds_name(odds_name, [goalie]):
+                    book_line = sb_info.get("line")
+                    break
+            profile = _nhl_history_profile(
+                 {"name": goalie["name"], "pid": goalie["id"], "team": team,
+                 "opponent": opp, "homeRoad": hr, "positionGroup": "G",
+                 "lineupStatus": eligible_by_id.get(
+                     goalie["id"], {}).get("lineupStatus", "ROSTER_UNCONFIRMED")},
+                logs_map.get(goalie["id"], []), target_date, "saves",
+                "Goalie Saves", book_line=book_line)
+            profile["gameDayEligible"] = (
+                eligible_by_id.get(goalie["id"], {}).get("lineupStatus")
+                in ("BOOK_LISTED", "CONFIRMED"))
+            profile["historyUnavailable"] = goalie["id"] not in logs_map
+            lookup_profiles.append(profile)
 
     picks = []
     unders = []
@@ -2557,7 +2824,7 @@ async def get_saves_picks(
 
         rec = {
             "name": goalie["name"], "pid": goalie["id"], "team": team,
-            "positionGroup": "G",
+            "positionGroup": "G", "lineupStatus": goalie.get("lineupStatus"),
             "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
             "realLine": book_line, "realOdds": real_odds, "realUnderOdds": under_odds,
             "lineSource": line_source,
@@ -2652,11 +2919,11 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
                 "error": "No NHL games found for this date."}
 
     # get_shot_lines owns the live alternate cache.  It safely refreshes an old
-    # nhl_lineup_v4 payload that predates the alternates field.
-    live_cache = _odds_cache_get("nhl_lineup_v4", date_str)
+    # An older cached payload may predate the alternates field.
+    live_cache = _odds_cache_get("nhl_lineup_v5_us_ca", date_str)
     if not isinstance(live_cache, dict) or "alternates" not in live_cache:
         await get_shot_lines(date_str, games)
-        live_cache = _odds_cache_get("nhl_lineup_v4", date_str)
+        live_cache = _odds_cache_get("nhl_lineup_v5_us_ca", date_str)
     alternates = (live_cache or {}).get("alternates") or {}
     if not any(alternates.get(k) for k in LIVE_ALTERNATE_PROP_MARKETS):
         return {"date": date_str, "system": system, "picks": [],
@@ -2896,11 +3163,12 @@ def _nhl_log_cache_set(pid: int, season: str, game_type: int, data: dict):
 
 
 async def _nhl_cached_log_payloads(
-        pid: int, sem: asyncio.Semaphore) -> Dict[Tuple[str, int], Dict]:
+        pid: int, sem: asyncio.Semaphore,
+        additional_season: str = "") -> Dict[Tuple[str, int], Dict]:
     """Load configured player log endpoints, reusing raw responses safely."""
     payloads: Dict[Tuple[str, int], Dict] = {}
     missing: List[Tuple[str, int]] = []
-    for season in SEASONS:
+    for season in list(dict.fromkeys([*SEASONS, additional_season] if additional_season else SEASONS)):
         for game_type in (2, 3):
             key = (season, game_type)
             cached = _nhl_log_cache_get(pid, season, game_type)
@@ -2927,10 +3195,11 @@ async def _nhl_cached_log_payloads(
     return payloads
 
 
-async def _nhl_player_logs(pid: int, sem: asyncio.Semaphore) -> List[Dict]:
+async def _nhl_player_logs(pid: int, sem: asyncio.Semaphore,
+                           additional_season: str = "") -> List[Dict]:
     """Load NHL game logs for a player across multiple seasons."""
     all_logs = []
-    payloads = await _nhl_cached_log_payloads(pid, sem)
+    payloads = await _nhl_cached_log_payloads(pid, sem, additional_season)
     for data in payloads.values():
         if not isinstance(data, dict): continue
         for g in data.get("gameLog", []):
@@ -3283,16 +3552,8 @@ async def run_picks(
     )
     lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map = _lines_tuple
     unpriced_mode = not any((lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map))
-    if simulate or unpriced_mode:
-        # Run Simulation always uses fallback lines.  A normal early-morning
-        # run also continues with them when books have not posted any player
-        # props yet; those live cards remain visibly unpriced and are not
-        # presented as sportsbook lines.
-        lines_map = lines_map or {}
-        pts_lines_map = pts_lines_map or {}
-        ast_lines_map = ast_lines_map or {}
-        sv_lines_map = sv_lines_map or {}
-        goal_lines_map = goal_lines_map or {}
+    # Missing book lines are handled independently in each market. A priced
+    # market must not suppress an unpriced model pick in a different market.
     _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
 
     # SA rankings for display
@@ -3310,6 +3571,7 @@ async def run_picks(
     pool, skater_rosters = await get_shot_qualified_players(
         games, sa_map, sem_nhl, season, lines_map,
         lineup_maps=[lines_map, pts_lines_map, ast_lines_map, goal_lines_map],
+        include_unconfirmed=True,
     )
     if simulate or unpriced_mode:
         fallback_source = "Simulation" if simulate else "No book line"
@@ -3320,6 +3582,14 @@ async def run_picks(
                     "realUnderOdds": "", "lineSource": fallback_source,
                     "estLine": 1.5,
                 })
+    else:
+        for player in pool:
+            if player.get("realLine") is None:
+                player.update({
+                    "line": 1.5, "realOdds": "", "realUnderOdds": "",
+                    "lineSource": "No book line", "estLine": 1.5,
+                })
+    if simulate:
         def _fill_sim_map(existing, default_line):
             for player in (skater_rosters or {}).values():
                 for roster_player in player:
@@ -3343,7 +3613,7 @@ async def run_picks(
         game_preds = []
         if games and not skip_game_predictor:
             try:
-                gp_data = await _nhl_gp_fetch_all(target_date, season)
+                gp_data = await _nhl_gp_fetch_all(target_date, season, games)
                 gp_data["schedule_context"] = await _nhl_schedule_context(target_date, games)
                 game_preds = _nhl_gp_predict(games, gp_data)
             except Exception as exc:
@@ -3551,11 +3821,14 @@ async def run_picks(
         goalie_map=goalie_map, shared_logs=logs_map, shared_rosters=skater_rosters,
         schedule_context=schedule_context, system=system)
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
+    goalie_lookup_profiles = []
     saves_all, saves_unders = await get_saves_picks(
         games, sa_map, sem_nhl, season, sv_lines_map, target_date,
-        simulate=simulate, allow_fallback=unpriced_mode and not simulate,
+        simulate=simulate, allow_fallback=not simulate,
         lineup_maps=[sv_lines_map], schedule_context=schedule_context,
         opponent_sf_map=opponent_sf_map, system=system,
+        lookup_profiles=goalie_lookup_profiles,
+        include_unconfirmed=True,
     )
     # Admin comparison only: reproduce the attached pre-change system from the
     # exact same corrected data/odds/lineup pool.  This changes selection and
@@ -3683,7 +3956,7 @@ async def run_picks(
         game_preds = []
     else:
         try:
-            _gp_data   = await _nhl_gp_fetch_all(target_date, season)
+            _gp_data   = await _nhl_gp_fetch_all(target_date, season, games)
             _gp_data["schedule_context"] = schedule_context
             game_preds = _nhl_gp_predict(games, _gp_data)
         except Exception as _gp_err:
@@ -3711,9 +3984,42 @@ async def run_picks(
                 continue
             profile_seen.add(profile_key)
             player_profiles.append(profile)
+    # Cards and player lookup use all available pregame logs, not just the
+    # players who met a market's pick gate. These rows never enter pick arrays.
+    def _lookup_book_line(player, line_map):
+        for odds_name, info in (line_map or {}).items():
+            if (_match_odds_name(odds_name, [{"name": player["name"]}])
+                    and info.get("source") not in ("Simulation", "Model", "No book line")):
+                return info.get("line")
+        return None
+
+    for p in pool:
+        pid = p["pid"]
+        markets = (
+            ("shots", "Shots on Goal", None,
+             p.get("realLine") if p.get("lineSource") not in
+             ("Simulation", "Model", "No book line") else None),
+            ("points", "Points (1+)", 0.5, _lookup_book_line(p, pts_lines_map)),
+            ("powerPlayPoints", "Power Play Points (1+)", 0.5, None),
+            ("assists", "Assists (1+)", 0.5, _lookup_book_line(p, ast_lines_map)),
+            ("goals", "Goals (1+)", 0.5, _lookup_book_line(p, goal_lines_map)),
+        )
+        for stat_key, market, history_line, book_line in markets:
+            key = (pid, market)
+            if key in profile_seen:
+                continue
+            player_profiles.append(_nhl_history_profile(
+                p, logs_map.get(pid, []), target_date, stat_key, market,
+                history_line=history_line, book_line=book_line))
+            profile_seen.add(key)
+    for profile in goalie_lookup_profiles:
+        key = (profile.get("pid"), profile.get("mkt"))
+        if key not in profile_seen:
+            player_profiles.append(profile)
+            profile_seen.add(key)
 
     _result = {
-        "_nhlCacheVersion": 6,
+        "_nhlCacheVersion": 8,
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
@@ -3769,6 +4075,19 @@ async def run_picks(
         "scheduleContext": schedule_context,
         "unpriced": bool(unpriced_mode and not simulate),
     }
+    if not simulate and any(
+        p.get("realLine") is None
+        for group in (
+            picks, shot_unders, pts_all, pts_unders, pp_all, pp_unders,
+            ast_all, ast_unders, goal_all, goal_unders_all,
+            saves_all, saves_unders)
+        for p in group
+    ):
+        _result["data_note"] = (
+            "MODEL-ONLY picks without a US/Canada book line use the shown "
+            "threshold for accuracy, not a sportsbook wager or profit/ROI. "
+            "ROSTER — UNCONFIRMED means the player may not dress today."
+        )
     if include_legacy_system:
         _result.update({
             "legacySystem": legacy_system,
@@ -4723,7 +5042,8 @@ function _renderNhlParlayCoachCats(){
 document.addEventListener('DOMContentLoaded',function(){_syncNhlParlayCats();_paintNhlParlayCatBtn();_renderNhlParlayGames();_renderNhlParlayCoachCats();});
 function _nhlLeg(p){
   var market=p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
-  var modelOnly=market==='Power Play Points (1+)'&&p.lineSource==='Model';
+  var modelOnly=p.realLine==null
+    &&(p.lineSource==='Model'||p.lineSource==='No book line');
   var line=modelOnly?p.dispLine:p.realLine;
   if(line==null) return null;
   var dir=p._parlaySide==='UNDER'?'UNDER':'OVER';
@@ -5725,10 +6045,14 @@ function _nhlLineSourceBadge(p){
   if(p.lineSource==='Historical Odds API'){
     return '<span style="margin-left:5px;padding:2px 5px;border-radius:4px;background:rgba(59,130,246,.18);color:#93c5fd;font-size:.55rem;font-weight:900;letter-spacing:.05em">ARCHIVED</span>';
   }
-  if(p.lineSource==='Simulation'||p.lineSource==='Model'){
-    return '<span style="margin-left:5px;color:#94a3b8;font-size:.6rem;font-weight:800">MODEL</span>';
+  if(p.lineSource==='Simulation'||p.lineSource==='Model'||p.lineSource==='No book line'){
+    return '<span style="margin-left:5px;color:#94a3b8;font-size:.6rem;font-weight:800">MODEL · UNPRICED</span>';
   }
   return '';
+}
+function _nhlLineupBadge(p){
+  return p.lineupStatus==='ROSTER_UNCONFIRMED'
+    ?'<span style="color:#fbbf24;font-size:.64rem;font-weight:800"> · ROSTER — UNCONFIRMED</span>':'';
 }
 function _nhlQualText(p){
   var m=String(p.mkt||'');
@@ -5767,7 +6091,7 @@ function nhlCard(p,i){
   var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
   var lineHtml=(p.realLine!=null)
     ? `<span class="ln">${p.dispLine}</span> <span class="od">${p.realOdds||''}</span>${_nhlLineSourceBadge(p)}`
-    : `<span class="est">~${p.dispLine}</span>`;
+    : `<span class="est">MODEL ${p.dispLine} · NO BOOK LINE</span>`;
   return `
    <div class="pick-card ${_accFor(p.mkt)}">
      <div class="pc-rank">${i}</div>
@@ -5778,7 +6102,7 @@ function nhlCard(p,i){
        </div>
        <div class="pc-id">
            <div class="pc-name"><span class="pc-name-text">${p.name}</span></div>
-         <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></div>
+         <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span>${_nhlLineupBadge(p)}</div>
          <div class="pc-mkt">${p.mkt||''}</div>
        </div>
      </div>
@@ -5818,7 +6142,7 @@ function nhlUnderCard(p,i){
   var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
   var lineHtml=(p.realLine!=null)
     ? `<span class="ln">U ${p.dispLine}</span> <span class="od">${p.realUnderOdds||''}</span>${_nhlLineSourceBadge(p)}`
-    : `<span class="est">U ~${p.dispLine}</span>`;
+    : `<span class="est">MODEL UNDER ${p.dispLine} · NO BOOK LINE</span>`;
   var voHtml=p.underTotVo?`<span class="${underClass(p.underRateVo)}">${p.underHitsVo}/${p.underTotVo} (${p.underRateVo}%)</span>`:'<span class="gray">—</span>';
   var anHtml=p.underTotAny?`<span class="${underClass(p.underRateAny)}">${p.underHitsAny}/${p.underTotAny} (${p.underRateAny}%)</span>`:'<span class="gray">—</span>';
   return `
@@ -5831,7 +6155,7 @@ function nhlUnderCard(p,i){
        </div>
        <div class="pc-id">
            <div class="pc-name"><span class="pc-name-text">${p.name}</span></div>
-         <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span></div>
+         <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span>${_nhlLineupBadge(p)}</div>
          <div class="pc-mkt">${p.mkt||''} · UNDER</div>
        </div>
      </div>
@@ -5920,42 +6244,90 @@ function _nhlGameDateLabel(raw){
 }
 function _nhlMarketCard(label,record,opponent){
   if(!record){
-    var missing=label==='Goalie Saves'?'No goalie-saves record available for this player.':'No qualifying '+label.toLowerCase()+' record available in this board snapshot.';
-    return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">'+missing+'</div></article>';
+    return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">Game-log history unavailable for this category.</div></article>';
   }
-  var line=record.realLine!=null?'Book line '+record.realLine:'Model line '+record.dispLine;
-  var vs=record.totA?_rateHtml(record.rateA,record.hitsA,record.totA):'<span class="gray">No history</span>';
-  var recent=record.totB?_rateHtml(record.rateB,record.hitsB,record.totB):'<span class="gray">No history</span>';
+  if(record.historyUnavailable)
+    return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">Not stored in the board snapshot. Full goalie logs load on request; see the history status above.</div></article>';
+  var hasLine=record.dispLine!=null;
+  var line=record.realLine!=null?'Book line '+record.realLine
+    :label==='Power Play Points (1+)'?'Model line 0.5'
+    :hasLine?'1+ history threshold · no book line':'No book line · raw history';
+  var vs=record.totA?(hasLine?_rateHtml(record.rateA,record.hitsA,record.totA):'<span class="gray">No line to compare</span>'):'<span class="gray">No history</span>';
+  var recent=record.totB?(hasLine?_rateHtml(record.rateB,record.hitsB,record.totB):'<span class="gray">No line to compare</span>'):'<span class="gray">No history</span>';
   var games=(record.glog||[]).map(function(g){
-    var hit=record.dispLine!=null&&Number(g.v)>Number(record.dispLine);
-    return '<div class="glchip '+(hit?'hit':'miss')+'"><div class="d">'+_nhlSafe(_nhlGameDateLabel(g.d))+'</div><div class="v">'+_nhlSafe(g.v)+'</div></div>';
+    var hit=hasLine&&Number(g.v)>Number(record.dispLine);
+    return '<div class="glchip '+(hasLine?(hit?'hit':'miss'):'')+'"><div class="d">'+_nhlSafe(_nhlGameDateLabel(g.d))+'</div><div class="v">'+_nhlSafe(g.v)+'</div></div>';
   }).join('');
   if(!games)games='<span class="gray">No recent game values available.</span>';
-  var under=(record.underTotal?record.underHits+'/'+record.underTotal+' ('+record.underRate+'%)':'—');
+  var under=(hasLine&&record.underTotal?record.underHits+'/'+record.underTotal+' ('+record.underRate+'%)':'—');
+  var note=record.historyOnly?'<div style="color:#94a3b8;font-size:.65rem;margin-bottom:7px">History only · not a qualifying pick'
+    +(record.positionGroup==='G'&&record.gameDayEligible===false?' · game-day goalie unconfirmed':'')+'</div>':'';
   return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-market-meta">'+_nhlSafe(line)+' · '+(record.totA||0)+' vs '+_nhlSafe(opponent)+' game'+(record.totA===1?'':'s')+'</div>'
+    +note
     +'<div class="lad-market-stats">'
     +_nhlMarketStat('Vs '+_nhlSafe(opponent),vs)
     +_nhlMarketStat('Vs avg',record.totA?record.avgA:'—')
     +_nhlMarketStat('L10 '+(record.homeRoad==='H'?'home':'away'),recent)
     +_nhlMarketStat('L10 avg',record.totB?record.avg:'—')
     +'</div><div class="lad-market-games">'+games+'</div>'
-    +'<div style="color:#6b7280;font-size:.62rem;margin-top:7px">Recent values · green = over line · under L10 '+under+'</div></article>';
+    +'<div style="color:#6b7280;font-size:.62rem;margin-top:7px">Recent values'+(hasLine?' · green = over line · under L10 '+under:' · no sportsbook line to grade against')+'</div></article>';
 }
-function openNhlPlayerSummary(p){
+function openNhlPlayerSummary(p, freshRecords, errorText){
   if(!p)return;
-  var records=_nhlRecordsForPlayer(p), opponent=p.opponent||'today\\'s opponent';
+  closeNhlLadder();
+  var records=freshRecords||_nhlRecordsForPlayer(p), opponent=p.opponent||'today\\'s opponent';
   var categories=['Shots on Goal','Points (1+)','Power Play Points (1+)','Assists (1+)','Goals (1+)','Goalie Saves'];
-  var cards=categories.map(function(label){return _nhlMarketCard(label,records[label],opponent);}).join('');
+  var isGoalie=_nhlPositionGroup(p)==='G';
+  var cards=categories.map(function(label){
+    if((label==='Goalie Saves')!==isGoalie)
+      return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">Not applicable to this position.</div></article>';
+    return _nhlMarketCard(label,records[label],opponent);
+  }).join('');
   var head='https://assets.nhle.com/mugs/nhl/'+(window.__NHL_SEASON__||'20252026')+'/'+(p.team||'')+'/'+(p.pid||'')+'.png';
   var html='<div class="lad-modal" onclick="event.stopPropagation()">'
     +'<button class="lad-close" onclick="closeNhlLadder()">✕</button>'
     +'<div class="lad-profile"><div class="hs-wrap"><span class="hs-ini">'+_nhlSafe(_initials(p.name))+'</span><img class="hs-img" src="'+_nhlSafe(head)+'" onerror="this.style.display=\\'none\\'"/></div><div><h3>'+_nhlSafe(p.name)+'</h3><div class="lad-profile-team">'+_nhlSafe(p.team||'')+' vs '+_nhlSafe(opponent)+' · '+(p.homeRoad==='H'?'HOME':'AWAY')+'</div></div></div>'
     +'<div style="font-size:.68rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin-bottom:8px">Category history vs '+_nhlSafe(opponent)+'</div>'
+    +'<div style="color:#94a3b8;font-size:.65rem;margin-bottom:8px">'+(freshRecords?'Full pregame game-log history':errorText?_nhlSafe(errorText):'Loading full game-log history…')+'</div>'
     +'<div class="lad-market-grid">'+cards+'</div></div>';
   var ov=document.createElement('div');
   ov.className='lad-ov'; ov.id='nhlLadOv'; ov.onclick=closeNhlLadder;
   ov.innerHTML=html;
   document.body.appendChild(ov);
+  if(freshRecords||errorText)return;
+  var raw=window.__NHL_RAW__||{}, dt=raw.targetDate||raw.date||window.__NHL_DATE__||'';
+  if(!p.pid||!dt||!p.homeRoad){
+    var msg=ov.querySelector('.lad-modal > div:nth-child(4)');
+    if(msg)msg.textContent='Full history unavailable: player or game details missing.';
+    return;
+  }
+  var lines={};
+  categories.forEach(function(label){
+    var rec=records[label];
+    if(rec&&rec.realLine!=null&&isFinite(Number(rec.realLine)))lines[label]=Number(rec.realLine);
+  });
+  var params=new URLSearchParams({
+    pid:String(p.pid),date_str:String(dt),team:String(p.team||''),
+    opponent:String(p.opponent||''),home_road:String(p.homeRoad),
+    position:_nhlPositionGroup(p),lines:JSON.stringify(lines)
+  });
+  fetch('/api/nhl/player-history?'+params.toString())
+    .then(function(response){if(!response.ok)throw new Error('HTTP '+response.status);return response.json();})
+    .then(function(data){
+      if(document.getElementById('nhlLadOv')!==ov)return;
+      var updated=data.records||{};
+      categories.forEach(function(label){
+        if(updated[label]&&records[label]&&!records[label].historyOnly)
+          updated[label].historyOnly=false;
+        if(updated[label]&&records[label]&&records[label].gameDayEligible===false)
+          updated[label].gameDayEligible=false;
+      });
+      openNhlPlayerSummary(p,updated);
+    })
+    .catch(function(err){
+      if(document.getElementById('nhlLadOv')===ov)
+        openNhlPlayerSummary(p,null,'Full history unavailable ('+err.message+'); showing saved board data.');
+    });
 }
 function openNhlLadder(key){
   var p=window.__NHLLAD__[key]; if(!p)return;
@@ -6036,6 +6408,10 @@ function renderNhlGamePredictor(preds){
     var b2bNote=(g.hB2b&&isHomePick?' \u00b7 HOME B2B':g.aB2b&&!isHomePick?' \u00b7 AWAY B2B':'');
     var ouClass=g.ouRec==='OVER'?'ou-over':g.ouRec==='UNDER'?'ou-under':g.ouRec==='PUSH'?'ou-push':'ou-book';
     var ouLbl=g.ouRec==='OVER'?'\u2b06 OVER':g.ouRec==='UNDER'?'\u2b07 UNDER':g.ouRec==='PUSH'?'\u2248 PUSH':'\u2014';
+    var prior=g.totalSeason||'',seasonLabel=prior?prior.slice(0,4)+'–'+prior.slice(-2):'Prior season';
+    var ph=g.priorHome||{},pa=g.priorAway||{},same=g.h2hSame||{},reverse=g.h2hReverse||{};
+    var priorRate=function(row){return row.games>=5?row.gf+' / '+row.ga+' ('+row.games+' GP)':'Unavailable';};
+    var h2hRate=function(row){return row.games?row.avg+' goals / '+row.games+' games':'No meetings';};
     function sBadge(s){
       if(!s) return '';
       return '<span class="gp-stk '+(s[0]==='W'?'win-stk':'loss-stk')+'">'+s+'</span>';
@@ -6059,16 +6435,18 @@ function renderNhlGamePredictor(preds){
         +'<div class="gp-bar-outer"><div class="gp-bar-home" style="width:'+hp+'%"></div><div class="gp-bar-away" style="width:'+ap+'%"></div></div>'
       +'</div>'
       +'<div class="gp-totals">'
-        +'<div class="gp-tbox"><div class="gk">Proj Total</div><div class="gv">'+g.projTotal+'</div></div>'
-        +(g.bookTotal!=null
-          ?'<div class="gp-tbox ou-book"><div class="gk">Book O/U</div><div class="gv" style="color:#9ca3af">'+g.bookTotal+'</div></div>'
-           +'<div class="gp-tbox '+ouClass+'"><div class="gk">O/U Pick</div><div class="gv">'+ouLbl+'</div></div>'
-          :'')
+        +'<div class="gp-tbox"><div class="gk">Proj Total</div><div class="gv">'+(g.projTotal==null?'—':g.projTotal)+'</div></div>'
+        +'<div class="gp-tbox ou-book"><div class="gk">Book O/U</div><div class="gv" style="color:#9ca3af">'+(g.bookTotal==null?'—':g.bookTotal)+'</div></div>'
+        +'<div class="gp-tbox '+ouClass+'"><div class="gk">O/U Pick</div><div class="gv">'+ouLbl+'</div></div>'
       +'</div>'
+      +'<div class="gp-history-note">'+(g.projTotal==null?'Prior-season venue scoring unavailable; no total projected.'
+        :'Total model: '+_nhlSafe(seasonLabel)+' venue scoring + a bounded regular-season H2H adjustment when available.')
+        +(g.bookTotal==null?' No US/Canada book total posted.':'')+'</div>'
       +'<div class="gp-teams">'
         +'<div class="gp-team">'
           +'<div class="gp-thdr"><img class="gp-tlogo" src="'+hLogo+'" onerror="this.style.display=\\'none\\'"/><span class="gp-tabbr">'+g.homeTeam+'</span><span class="gp-tha h-ha">HOME</span></div>'
-          +'<div class="gp-sr"><span class="sk">GF / GA /G</span><span class="sv">'+g.hGfPG+' / '+g.hGaPG+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">'+_nhlSafe(seasonLabel)+' home GF / GA /G</span><span class="sv">'+priorRate(ph)+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">Current GF / GA /G</span><span class="sv">'+g.hGfPG+' / '+g.hGaPG+'</span></div>'
           +'<div class="gp-sr"><span class="sk">PP / PK</span><span class="sv">'+g.hPpPct+'% / '+g.hPkPct+'%</span></div>'
           +'<div class="gp-sr"><span class="sk">Home W-L-OT</span><span class="sv">'+g.hHomeRec+'</span></div>'
           +'<div class="gp-sr"><span class="sk">L10</span><span class="sv">'+g.hL10+'</span></div>'
@@ -6077,7 +6455,8 @@ function renderNhlGamePredictor(preds){
         +'</div>'
         +'<div class="gp-team">'
           +'<div class="gp-thdr"><img class="gp-tlogo" src="'+aLogo+'" onerror="this.style.display=\\'none\\'"/><span class="gp-tabbr">'+g.awayTeam+'</span><span class="gp-tha a-ha">AWAY</span></div>'
-          +'<div class="gp-sr"><span class="sk">GF / GA /G</span><span class="sv">'+g.aGfPG+' / '+g.aGaPG+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">'+_nhlSafe(seasonLabel)+' away GF / GA /G</span><span class="sv">'+priorRate(pa)+'</span></div>'
+          +'<div class="gp-sr"><span class="sk">Current GF / GA /G</span><span class="sv">'+g.aGfPG+' / '+g.aGaPG+'</span></div>'
           +'<div class="gp-sr"><span class="sk">PP / PK</span><span class="sv">'+g.aPpPct+'% / '+g.aPkPct+'%</span></div>'
           +'<div class="gp-sr"><span class="sk">Road W-L-OT</span><span class="sv">'+g.aRoadRec+'</span></div>'
           +'<div class="gp-sr"><span class="sk">L10</span><span class="sv">'+g.aL10+'</span></div>'
@@ -6085,6 +6464,8 @@ function renderNhlGamePredictor(preds){
           +'<div class="gp-badges">'+(g.aB2b?'<span class="gp-b2b">B2B</span>':'')+sBadge(g.aStreak)+'</div>'
         +'</div>'
       +'</div>'
+      +'<div class="gp-history-note">Historical regular-season totals · same venue: '+h2hRate(same)
+        +' · reverse venue: '+h2hRate(reverse)+'</div>'
       +mlRow
       +'<details class="gp-history" data-home="'+_nhlSafe(g.homeTeam)+'" data-away="'+_nhlSafe(g.awayTeam)
         +'" data-line="'+(g.bookTotal==null?'':_nhlSafe(g.bookTotal))+'" ontoggle="_nhlGpLoadHistory(this)">'
@@ -6385,7 +6766,7 @@ function _nhlPaint(q){
   d.games.forEach(function(g){
     var t = g.startTime ? new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}) : '';
     var lu=g.lineupByTeam||{},a=lu[g.awayTeam]||g.lineupSource||'UNAVAILABLE',hm=lu[g.homeTeam]||g.lineupSource||'UNAVAILABLE';
-    function _luText(v){return v==='CONFIRMED'?'confirmed':v==='BOOK_LISTED'?'book-listed': 'unavailable';}
+    function _luText(v){return v==='CONFIRMED'?'confirmed':v==='BOOK_LISTED'?'book-listed':v==='ROSTER_UNCONFIRMED'?'roster unconfirmed':'unavailable';}
     h += '<div class="gcard nhl-game-jump" data-game-id="' + _nhlGameId(g.awayTeam,g.homeTeam) + '"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + (g.gameTypeLabel==='PRESEASON'?' <span style="color:#fbbf24;font-size:.65em">PRESEASON</span>':'') + '</div><div class="gt">' + t + '</div>'
       + '<div style="margin-top:4px;color:#94a3b8;font-size:.6rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em">Lineups: '
       + g.awayTeam + ' ' + _luText(a) + ' · ' + g.homeTeam + ' ' + _luText(hm) + '</div></div>';
@@ -8207,7 +8588,9 @@ def _nhl_save_picks_snapshot(
         for rank, p in enumerate(result.get(rkey) or [], rank_start):
             if p.get("team") not in pregame_teams or p.get("team") in frozen_teams:
                 continue
-            odds = p.get("realOdds") if side == "OVER" else p.get("realUnderOdds")
+            raw_odds = p.get("realOdds") if side == "OVER" else p.get("realUnderOdds")
+            odds = (raw_odds if p.get("realLine") is not None
+                    and str(raw_odds or "").strip() not in ("", "0") else None)
             line = p.get("realLine") or p.get("line") or p.get("dispLine")
             flat.append({
                 "name": p.get("name", ""), "pid": p.get("pid"),
@@ -8652,7 +9035,8 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
                             result_val = "WIN" if actual > fl else "LOSS"
                         else:
                             result_val = "WIN" if actual < fl else "LOSS"
-                        if result_val and odds is not None:
+                        if (result_val and odds is not None
+                                and str(odds).strip() not in ("", "0")):
                             profit = round(_nhl_american_profit(odds, _NHL_TRK_STAKE, result_val), 2)
                     except Exception:
                         pass
@@ -9102,6 +9486,66 @@ async def nhl_gp_record(grade: bool = False, date_str: str = ""):
     else:
         _bt_th.Thread(target=_nhl_update_gp_ledger, args=(date_str,), daemon=True).start()
     return JSONResponse(_nhl_gp_record_payload())
+
+@app.get("/api/nhl/player-history")
+async def nhl_player_history(pid: int, date_str: str, team: str = "",
+                             opponent: str = "", home_road: str = "",
+                             position: str = "F", lines: str = ""):
+    """Read-only, pregame player-card history; not a pick or grading source."""
+    if pid <= 0 or pid > 99999999 or len(lines) > 500:
+        raise HTTPException(status_code=400, detail="Invalid player history request")
+    try:
+        target = date.fromisoformat(date_str)
+        if not 2020 <= target.year <= date.today().year + 1:
+            raise ValueError("Date outside available history")
+        requested_lines = json.loads(lines) if lines else {}
+        if not isinstance(requested_lines, dict):
+            raise ValueError("Invalid lines")
+        requested_lines = {
+            str(k): float(v) for k, v in requested_lines.items()
+            if k in ("Shots on Goal", "Points (1+)", "Power Play Points (1+)",
+                     "Assists (1+)", "Goals (1+)", "Goalie Saves")
+            and isinstance(v, (int, float)) and not isinstance(v, bool)
+            and -1 < float(v) < 1000
+        }
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid history date or line")
+    team = team.strip().upper()[:4]
+    opponent = opponent.strip().upper()[:4]
+    home_road = home_road.strip().upper()
+    if home_road not in ("H", "R"):
+        raise HTTPException(status_code=400, detail="Invalid venue")
+    goalie = position.strip().upper() == "G"
+    season = get_season_for_date(target)
+    if goalie:
+        async with httpx.AsyncClient(timeout=30) as client:
+            groups = await asyncio.gather(*[
+                _goalie_season_logs(pid, s, client)
+                for s in dict.fromkeys([*SEASONS, season])
+            ])
+        logs = sorted((g for group in groups for g in group),
+                      key=lambda g: g.get("date", ""), reverse=True)
+    else:
+        logs = await _nhl_player_logs(pid, asyncio.Semaphore(1), season)
+    base = {"pid": pid, "name": "", "team": team, "opponent": opponent,
+            "homeRoad": home_road, "positionGroup": "G" if goalie else position[:1]}
+    specs = (
+        [("saves", "Goalie Saves", None)] if goalie else
+        [("shots", "Shots on Goal", None),
+         ("points", "Points (1+)", 0.5),
+         ("powerPlayPoints", "Power Play Points (1+)", 0.5),
+         ("assists", "Assists (1+)", 0.5),
+         ("goals", "Goals (1+)", 0.5)]
+    )
+    records = {
+        market: _nhl_history_profile(
+            base, logs, date_str, stat_key, market,
+            history_line=history_line,
+            book_line=requested_lines.get(market))
+        for stat_key, market, history_line in specs
+    }
+    return JSONResponse({"records": records, "date": date_str})
+
 
 @app.get("/api/track-record")
 async def nhl_track_record(
@@ -11109,7 +11553,7 @@ async def api_odds_debug(dt: str = None, admin: str = ""):
                     for ev in win[:3]:
                         r2 = await c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
-                            params={"apiKey": api_key, "regions": "us,us2,eu,ca",
+                            params={"apiKey": api_key, "regions": "us,us2,ca",
                                     "markets": MKTS, "oddsFormat": "american"})
                         info = {"event": f"{ev.get('away_team')} @ {ev.get('home_team')}",
                                 "odds_status": r2.status_code,
