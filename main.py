@@ -4801,19 +4801,32 @@ body.is-admin .frank-ai-systems{display:flex!important}
     <div class="frank-ai-note">Requires a loaded NHL board and a real price. Safest Bets uses only the exact side that qualified for the loaded board, keeps only positive Coach Edge, then ranks by sportsbook-implied probability. Model-only PP Points and plays without odds are excluded.</div>
     <div style="margin-top:14px;padding:14px;border:1px solid rgba(167,139,250,.35);border-radius:12px;background:#11121b">
       <div style="font-size:.93rem;font-weight:900;color:#ddd6fe;margin-bottom:5px">Edge Coach Parlay Builder</div>
-      <div style="font-size:.7rem;color:#94a3b8;margin-bottom:10px">Choose a market and side. Legs use positive Coach Edge and genuine sportsbook lines only; no record is written.</div>
+      <div style="font-size:.7rem;color:#94a3b8;margin-bottom:10px">Check the markets and sides you want to include. Legs use positive Coach Edge and genuine sportsbook lines only; no record is written.</div>
       <div style="display:flex;align-items:end;gap:9px;flex-wrap:wrap">
-        <label style="color:#c4b5fd;font-size:.72rem;font-weight:800">Category
-          <select id="frankParlayCategory" style="display:block;max-width:100%;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:8px;color:#fff;margin-top:4px" onchange="_frankBuildParlay()">
-            <option value="all">All priced categories</option>
-            <option value="shots|OVER">Shots on Goal — Over</option><option value="shots|UNDER">Shots on Goal — Under</option>
-            <option value="points|OVER">Points — Over</option><option value="points|UNDER">Points — Under</option>
-            <option value="pp|OVER">Power Play Points — Over</option><option value="pp|UNDER">Power Play Points — Under</option>
-            <option value="assists|OVER">Assists — Over</option><option value="assists|UNDER">Assists — Under</option>
-            <option value="goals|OVER">Goals — Over</option><option value="goals|UNDER">Goals — Under</option>
-            <option value="saves|OVER">Goalie Saves — Over</option><option value="saves|UNDER">Goalie Saves — Under</option>
-          </select>
-        </label>
+        <div role="group" aria-label="Coach parlay categories" style="color:#c4b5fd;font-size:.72rem;font-weight:800">
+          Categories
+          <details id="frankParlayCategories" style="position:relative;margin-top:4px">
+            <summary id="frankParlayCategoryCount" style="list-style:none;cursor:pointer;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:8px;color:#fff;min-width:175px">Categories (12/12) ▾</summary>
+            <div style="position:absolute;z-index:60;top:calc(100% + 5px);left:0;max-height:300px;overflow-y:auto;width:max-content;max-width:min(310px,85vw);background:#11121b;border:1px solid #7c3aed;border-radius:9px;padding:10px;box-shadow:0 12px 30px rgba(0,0,0,.6)">
+              <div style="display:flex;gap:6px;margin-bottom:6px">
+                <button type="button" onclick="_frankParlaySetAll(true)" style="cursor:pointer;background:#312e81;color:#fff;border:0;border-radius:5px;padding:5px 9px">Select all</button>
+                <button type="button" onclick="_frankParlaySetAll(false)" style="cursor:pointer;background:#312e81;color:#fff;border:0;border-radius:5px;padding:5px 9px">Clear</button>
+              </div>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="shots|OVER" checked onchange="_frankParlayCategoryChanged()"> Shots on Goal — Over</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="shots|UNDER" checked onchange="_frankParlayCategoryChanged()"> Shots on Goal — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="points|OVER" checked onchange="_frankParlayCategoryChanged()"> Points — Over</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="points|UNDER" checked onchange="_frankParlayCategoryChanged()"> Points — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="pp|OVER" checked onchange="_frankParlayCategoryChanged()"> Power Play Points — Over</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="pp|UNDER" checked onchange="_frankParlayCategoryChanged()"> Power Play Points — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="assists|OVER" checked onchange="_frankParlayCategoryChanged()"> Assists — Over</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="assists|UNDER" checked onchange="_frankParlayCategoryChanged()"> Assists — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="goals|OVER" checked onchange="_frankParlayCategoryChanged()"> Goals — Over</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="goals|UNDER" checked onchange="_frankParlayCategoryChanged()"> Goals — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="saves|OVER" checked onchange="_frankParlayCategoryChanged()"> Goalie Saves — Over</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="saves|UNDER" checked onchange="_frankParlayCategoryChanged()"> Goalie Saves — Under</label>
+            </div>
+          </details>
+        </div>
         <label style="color:#c4b5fd;font-size:.72rem;font-weight:800">Legs
           <select id="frankParlayLegs" style="display:block;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:8px;color:#fff;margin-top:4px" onchange="_frankBuildParlay()">
             <option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
@@ -5359,42 +5372,104 @@ function _frankAllProps(){
   });
   return out;
 }
+function _frankParlaySelections(){
+  return Array.from(document.querySelectorAll('.frank-parlay-cat-cb')).filter(function(cb){return cb.checked;})
+    .map(function(cb){return cb.value;});
+}
+function _frankParlayCategoryChanged(){
+  var count=document.getElementById('frankParlayCategoryCount');
+  if(count)count.textContent='Categories ('+_frankParlaySelections().length+'/12) ▾';
+  var out=document.getElementById('frankParlayResult');
+  if(out&&out.innerHTML.trim())_frankBuildParlay();
+}
+function _frankParlaySetAll(checked){
+  document.querySelectorAll('.frank-parlay-cat-cb').forEach(function(cb){cb.checked=checked;});
+  _frankParlayCategoryChanged();
+}
+function _frankParlayPlayerKey(p){
+  return String(p.source&&p.source.pid||p.player||'').trim().toLowerCase();
+}
 function _frankBuildParlay(){
   var out=document.getElementById('frankParlayResult');
-  var cat=document.getElementById('frankParlayCategory');
   var legs=document.getElementById('frankParlayLegs');
-  if(!out||!cat||!legs)return;
-  var choice=cat.value,n=Number(legs.value)||3,parts=choice.split('|');
+  if(!out||!legs)return;
+  var choices=_frankParlaySelections(),n=Number(legs.value)||3;
+  window.__NHL_FRANK_PARLAY_LEGS__=[];
+  window.__NHL_FRANK_PARLAY_POOL__=[];
+  window.__NHL_FRANK_PARLAY_TRIED__={};
+  if(!choices.length){
+    out.innerHTML='<div style="color:#fbbf24;font-size:.76rem;padding:8px 0">Select at least one category and side to build a Coach parlay.</div>';
+    return;
+  }
   var props=_frankAllProps().filter(function(p){
     var odds=Number(p.odds);
     return p.edge>0&&odds!==0&&isFinite(odds)&&odds>=-1000
       &&_amToDec(odds)!=null
-      &&(choice==='all'||(p.marketKey===parts[0]&&p.side===parts[1]));
+      &&choices.indexOf(p.marketKey+'|'+p.side)>=0;
   }).sort(function(a,b){return b.edge-a.edge||b.appProb-a.appProb;});
   var seen={},unique=[];
   props.forEach(function(p){
-    var id=String(p.source&&p.source.pid||p.player||'').toLowerCase();
+    var id=_frankParlayPlayerKey(p);
     if(!id||seen[id])return;
     seen[id]=true;unique.push(p);
   });
   if(unique.length<n){
     out.innerHTML='<div style="color:#fbbf24;font-size:.76rem;padding:8px 0">Only '+unique.length
-      +' priced, positive-edge player'+(unique.length===1?'':'s')+' available for this choice. '
-      +(parts[0]==='pp'?'Power Play Points remains model-only without a real book line and price.':'Choose fewer legs or another category.')+'</div>';
+      +' priced, positive-edge player'+(unique.length===1?'':'s')+' available for the selected categories. '
+      +(choices.every(function(choice){return choice.indexOf('pp|')===0;})
+        ?'Power Play Points remains model-only without a real book line and price.'
+        :'Choose fewer legs or select more categories.')+'</div>';
     return;
   }
-  var picked=unique.slice(0,n),decimal=1;
+  window.__NHL_FRANK_PARLAY_POOL__=unique;
+  window.__NHL_FRANK_PARLAY_LEGS__=unique.slice(0,n);
+  _frankPaintParlay();
+}
+function _frankPaintParlay(message){
+  var out=document.getElementById('frankParlayResult');
+  var picked=window.__NHL_FRANK_PARLAY_LEGS__||[],decimal=1;
+  if(!out||!picked.length)return;
   var rows=picked.map(function(p,i){
     decimal*=_amToDec(p.odds);
     var am=p.odds>0?'+'+p.odds:String(p.odds);
-    return '<div style="display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid #283043;font-size:.73rem">'
+    return '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 0;border-bottom:1px solid #283043;font-size:.73rem">'
       +'<span><b>'+String(i+1)+'. '+_nhlSafe(p.player)+'</b> · '+_nhlSafe(p.team)
       +' · '+_nhlSafe(p.market)+' '+_nhlSafe(p.side)+' '+_nhlSafe(p.line)+'</span>'
-      +'<span style="white-space:nowrap;color:#86efac">'+_nhlSafe(am)+' · +'+p.edge.toFixed(1)+'% edge</span></div>';
+      +'<span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="white-space:nowrap;color:#86efac">'+_nhlSafe(am)+' · +'+p.edge.toFixed(1)+'% edge</span>'
+      +'<button type="button" onclick="_frankReplaceParlayLeg('+i+')" aria-label="Generate new pick for '+_nhlSafe(p.player)+'" title="Generate a new pick for this leg" style="cursor:pointer;background:#312e81;color:#fff;border:1px solid #7c3aed;border-radius:6px;padding:5px 8px;font-size:.7rem;font-weight:800">↻ New pick</button></span></div>';
   }).join('');
-  out.innerHTML=rows+'<div style="text-align:right;color:#ddd6fe;font-size:.78rem;font-weight:900;margin-top:9px">'
+  out.innerHTML=(message?'<div role="status" style="color:#fbbf24;font-size:.72rem;margin-bottom:6px">'+_nhlSafe(message)+'</div>':'')
+    +rows+'<div style="text-align:right;color:#ddd6fe;font-size:.78rem;font-weight:900;margin-top:9px">'
     +'Combined '+_nhlSafe(_decToAm(decimal))+' · $100 returns $'+(decimal*100).toFixed(2)
     +'</div><div style="color:#94a3b8;font-size:.65rem;margin-top:5px">Display-only; one play per player. Prices may change before placement.</div>';
+}
+function _frankReplaceParlayLeg(index){
+  var legs=window.__NHL_FRANK_PARLAY_LEGS__||[],current=legs[index];
+  if(!current)return;
+  var used={};
+  legs.forEach(function(p,i){if(i!==index)used[_frankParlayPlayerKey(p)]=true;});
+  var currentKey=_frankParlayPlayerKey(current);
+  var tried=(window.__NHL_FRANK_PARLAY_TRIED__||{})[index]||{};
+  var options=(window.__NHL_FRANK_PARLAY_POOL__||[]).filter(function(p){
+    var key=_frankParlayPlayerKey(p);
+    return key&&key!==currentKey&&!used[key]&&!tried[key];
+  });
+  var sameProp=options.filter(function(p){
+    return p.marketKey===current.marketKey&&p.side===current.side;
+  });
+  if(sameProp.length)options=sameProp;
+  if(!options.length){
+    _frankPaintParlay('No further unused priced, positive-edge picks are available for this leg. Build again to reset the options.');
+    return;
+  }
+  // Walk the ranked pool without repeating a previously shown replacement.
+  var next=options[0];
+  if(!window.__NHL_FRANK_PARLAY_TRIED__)window.__NHL_FRANK_PARLAY_TRIED__={};
+  if(!window.__NHL_FRANK_PARLAY_TRIED__[index])window.__NHL_FRANK_PARLAY_TRIED__[index]={};
+  window.__NHL_FRANK_PARLAY_TRIED__[index][currentKey]=true;
+  window.__NHL_FRANK_PARLAY_TRIED__[index][_frankParlayPlayerKey(next)]=true;
+  legs[index]=next;
+  _frankPaintParlay();
 }
 function _frankSafestProps(props){
   var seen={},out=[];
