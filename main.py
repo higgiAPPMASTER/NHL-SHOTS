@@ -9,9 +9,7 @@ Deployed on Render (FastAPI + httpx)
 """
 
 import os, hmac, asyncio, re, unicodedata, time, json, logging, html
-from contextvars import ContextVar
 from datetime import date, datetime, timedelta
-from functools import wraps
 from typing import List, Dict, Optional, Tuple
 
 import httpx
@@ -88,26 +86,6 @@ UNDER_MIN_ANY      = 3     # min H/A games vs anyone for an any-opp under
 SEASONS       = ["20252026","20242025","20232024","20222023","20212022"]  # for points game logs
 TOP_N       = 10     # final picks count
 SEM_NHL     = 14     # concurrent NHL API calls
-_NHL_LOG_HTTP_CLIENT = ContextVar("nhl_log_http_client", default=None)
-
-
-def _nhl_shared_log_session(fn):
-    """Reuse connections for a whole run without sharing clients across loops."""
-    @wraps(fn)
-    async def wrapped(*args, **kwargs):
-        inherited = _NHL_LOG_HTTP_CLIENT.get()
-        if inherited is not None and not inherited.is_closed:
-            return await fn(*args, **kwargs)
-        async with httpx.AsyncClient(
-                follow_redirects=True, timeout=30,
-                limits=httpx.Limits(max_connections=SEM_NHL * 2,
-                                    max_keepalive_connections=SEM_NHL * 2)) as client:
-            token = _NHL_LOG_HTTP_CLIENT.set(client)
-            try:
-                return await fn(*args, **kwargs)
-            finally:
-                _NHL_LOG_HTTP_CLIENT.reset(token)
-    return wrapped
 
 # C is an isolated, more selective research system.  These values are used
 # only when run_picks(system="C" or "D"); the A path and its attached B comparison
@@ -2067,13 +2045,6 @@ async def get_shot_lines(
                                     "oddsFormat": "american"}),
                         return_exceptions=True,
                     )
-                    try:
-                        from lms_quotes import collect as _lms_collect
-                        for _lms_response in (r2, ra):
-                            if isinstance(_lms_response, httpx.Response) and _lms_response.status_code == 200:
-                                _lms_collect("nhl", target_date, _lms_response.json())
-                    except Exception as _lms_e:
-                        print(f"[lms] quote collection unavailable: {type(_lms_e).__name__}")
                     if isinstance(r2, httpx.Response) and r2.status_code == 200:
                         targets = {
                             "player_shots_on_goal": lines,
@@ -3448,25 +3419,14 @@ async def _nhl_cached_log_payloads(
                 payloads[key] = cached
 
     if missing:
-        async def load_endpoint(client, season, game_type):
-            # Bound actual HTTP calls, not players each issuing ten requests.
-            async with sem:
-                return await _fetch(
-                    f"{NHL_API}/player/{pid}/game-log/{season}/{game_type}",
-                    client,
-                )
-
-        client = _NHL_LOG_HTTP_CLIENT.get()
-        if client is not None and not client.is_closed:
-            results = await asyncio.gather(*[
-                load_endpoint(client, season, game_type)
-                for season, game_type in missing
-            ], return_exceptions=True)
-        else:
+        async with sem:
             async with httpx.AsyncClient(
                     follow_redirects=True, timeout=30) as c:
                 results = await asyncio.gather(*[
-                    load_endpoint(c, season, game_type)
+                    _fetch(
+                        f"{NHL_API}/player/{pid}/game-log/{season}/{game_type}",
+                        c,
+                    )
                     for season, game_type in missing
                 ], return_exceptions=True)
         for key, data in zip(missing, results):
@@ -3774,7 +3734,6 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
     }
 
 
-@_nhl_shared_log_session
 async def run_picks(
     target_date: str = None,
     simulate: bool = False,
@@ -3914,27 +3873,7 @@ async def run_picks(
         }
 
     # Fetch NHL API game logs for all players concurrently
-    completed_logs = 0
-    last_log_progress = time.monotonic()
-
-    async def load_player_logs(pid):
-        nonlocal completed_logs, last_log_progress
-        try:
-            return await _nhl_player_logs(pid, sem_nhl)
-        finally:
-            completed_logs += 1
-            _progress.update(
-                stage=f"Fetching game logs: {completed_logs}/{len(pool)} players",
-                done=completed_logs, total=len(pool),
-                pct=35 + int(30 * completed_logs / max(1, len(pool))),
-            )
-            now = time.monotonic()
-            if now - last_log_progress >= 15 or completed_logs == len(pool):
-                print(f"[NHL] Game logs: {completed_logs}/{len(pool)} players processed",
-                      flush=True)
-                last_log_progress = now
-
-    log_tasks = {p["pid"]: load_player_logs(p["pid"]) for p in pool}
+    log_tasks = {p["pid"]: _nhl_player_logs(p["pid"], sem_nhl) for p in pool}
     log_results = await asyncio.gather(*log_tasks.values(), return_exceptions=True)
     logs_map = {pid: (r if isinstance(r, list) else [])
                 for pid, r in zip(log_tasks.keys(), log_results)}
@@ -4477,8 +4416,6 @@ async def run_picks(
     # be reached by a future live-run entry point.
     capture_official = bool(
         persist_live_snapshot and slate_meta["officialCaptureAllowed"])
-    if capture_official:
-        await asyncio.to_thread(_LMS.attach, _result, locals())
     if capture_official:
         _nhl_save_gp_snapshot(target_date, _result)
         _result["captureStatus"] = (
@@ -6133,65 +6070,6 @@ function askFrank(){
 }
 
 // Get Picks loads today's saved board, or builds a view-only replay for any past date.
-async function _nhlJobJson(response){
-  var text=await response.text(),data=null;
-  try{data=text?JSON.parse(text):null;}catch(ignore){}
-  if(!response.ok||data===null){
-    var error=new Error((data&&(data.detail||data.error))||
-      ("NHL server returned HTTP "+response.status+" instead of results. The server may have restarted or become unavailable."));
-    error.httpStatus=response.status;
-    error.transient=response.status>=500||response.status===429||(response.ok&&data===null);
-    throw error;
-  }
-  return data;
-}
-async function _nhlJobFetch(url,opt){
-  var controller=new AbortController();
-  var timer=setTimeout(function(){controller.abort();},15000);
-  try{
-    var response=await fetch(url,Object.assign({},opt||{},{signal:controller.signal,cache:"no-store"}));
-    return await _nhlJobJson(response);
-  }catch(error){
-    if(error.name==="AbortError"){
-      var timeoutError=new Error((opt&&opt.method==="POST"?
-        "The NHL start request timed out before confirmation.":
-        "NHL progress did not respond within 15 seconds.")+
-        " The run may still be active; do not start a duplicate run.");
-      timeoutError.transient=true;
-      throw timeoutError;
-    }
-    if(error instanceof TypeError)error.transient=true;
-    throw error;
-  }finally{clearTimeout(timer);}
-}
-async function _nhlWaitForJob(job,st,tok,adm){
-  var connectionFailures=0;
-  while(true){
-    var state;
-    try{
-      state=await _nhlJobFetch("/api/nhl/run-status?job_id="+encodeURIComponent(job.job_id)+
-        "&token="+encodeURIComponent(tok)+"&admin="+encodeURIComponent(adm));
-      connectionFailures=0;
-    }catch(error){
-      if(error.httpStatus===404)throw new Error("The server restarted or the saved job expired before this run could be confirmed. Check the saved board before retrying.");
-      if(error.transient&&connectionFailures<3){
-        connectionFailures++;
-        if(st){st.style.color="#f59e0b";st.textContent="Progress connection delayed — reconnecting to the SAME run ("+connectionFailures+"/3).";}
-        await new Promise(function(resolve){setTimeout(resolve,3000);});
-        continue;
-      }
-      throw error;
-    }
-    if(state.status==="COMPLETED")return state.result;
-    if(state.status==="FAILED"||state.status==="INTERRUPTED")throw new Error(state.error||"NHL run did not finish.");
-    var p=state.progress||{};
-    if(st){st.style.color="#9ca3af";st.textContent=
-      (state.kind==="all"?"A/B/C/D: ":"")+(p.stage||"Running")+
-      " | "+state.elapsed_seconds+" seconds";}
-    await new Promise(function(resolve){setTimeout(resolve,2000);});
-  }
-}
-
 async function getPicks(){
   var btn=document.getElementById('getBtn');
   var st=document.getElementById('statusMsg');
@@ -6239,13 +6117,8 @@ async function getPicks(){
       // Preseason persistence remains blocked by run_picks' capture guard.
       if(res.status===404&&!isHistorical){
         if(st)st.textContent='No saved board yet — generating today\\'s picks...';
-        url='/api/picks?target_date='+encodeURIComponent(dt)+'&background=true&token='+encodeURIComponent(_nhlTok);
+        url='/api/picks?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok);
         res=await fetch(url);
-      }
-      if(res.status===202&&!isHistorical){
-        var liveJob=await _nhlJobJson(res);
-        await _nhlWaitForJob(liveJob,st,_nhlTok,_nhlAdmin);
-        res=await fetch('/api/cached?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok),{cache:"no-store"});
       }
       if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
       if(!res.ok){
@@ -6340,17 +6213,15 @@ async function runAllNhlSystems(){
   var _nhlTok=localStorage.getItem('__mpa_token')||'';
   var _nhlAdmin=new URLSearchParams(location.search).get('admin')||'';
   var btn=document.getElementById('nhlRunAllBtn');
-  var getBtn=document.getElementById('getBtn');
-  var getWasDisabled=getBtn&&getBtn.disabled;
   var st=document.getElementById('nhlRunAllStatus');
   var dp=document.getElementById('datePicker');
   var dt=(dp&&dp.value)||_nhlLocalDate();
   if(btn){btn.disabled=true;btn.textContent='Running all four systems…';}
-  if(getBtn)getBtn.disabled=true;
   if(st){st.style.display='block';st.textContent='One trigger is running A+B together, then C and D. Sportsbook lines are reused from the same odds cache.';}
   try{
-    var job=await _nhlJobFetch('/api/nhl/run-all-systems?date_str='+encodeURIComponent(dt)+'&background=true&token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin),{method:'POST'});
-    var data=job.job_id?await _nhlWaitForJob(job,st,_nhlTok,_nhlAdmin):job;
+    var r=await fetch('/api/nhl/run-all-systems?date_str='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin),{method:'POST'});
+    var data=await r.json();
+    if(!r.ok)throw new Error(data.detail||data.error||('HTTP '+r.status));
     if(data.no_games){
       if(st)st.textContent=data.message||('No NHL games scheduled for '+dt+'.');
       return;
@@ -6373,7 +6244,6 @@ async function runAllNhlSystems(){
     if(st){st.style.color='#f87171';st.textContent=e.message||'The four-system run failed.';}
   }finally{
     if(btn){btn.disabled=false;btn.textContent='Run A+B+C+D';}
-    if(getBtn)getBtn.disabled=!!getWasDisabled;
   }
 }
 
@@ -10714,7 +10584,7 @@ async def api_nhl_coach_alternates(request: Request, date_str: str = "",
 
 @app.get("/api/picks")
 async def api_picks(request: Request, target_date: str = None, token: str = "",
-                    simulate: bool = False, background: bool = False):
+                    simulate: bool = False):
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     if not _verify_hub_token(tok):
         raise HTTPException(status_code=401, detail="Subscription required — please log in via moneypicksarena.com")
@@ -10730,14 +10600,6 @@ async def api_picks(request: Request, target_date: str = None, token: str = "",
     cached = None if simulate else _cache_get("nhl", key)
     if cached:
         return JSONResponse(cached)
-    if not simulate and background:
-        try:
-            key = date.fromisoformat(key).isoformat()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="A valid date is required")
-        return _nhl_begin_job(key, "picks")
-    if not simulate and _CRON_BUSY_NHL:
-        raise HTTPException(status_code=409, detail="The NHL run is already active. Wait for its saved board.")
     result = await run_picks(target_date, simulate=simulate)
     if "error" not in result and not simulate:
         _cache_set("nhl", key, result)
@@ -11902,70 +11764,10 @@ async def _nhl_run_all_and_cache(date_str: str) -> dict:
     return batch
 
 
-async def _nhl_execute_web_job(ds: str, kind: str) -> dict:
-    global _CRON_BUSY_NHL
-    try:
-        if kind == "all":
-            batch = await _nhl_run_all_and_cache(ds)
-            # Status retains only summaries, never a second copy of four boards.
-            return {key: value for key, value in batch.items() if key != "results"}
-        result = await run_picks(ds)
-        if result.get("error"):
-            raise RuntimeError("The NHL picks pipeline did not complete")
-        _cache_set("nhl", ds, result)
-        if _cache_get("nhl", ds) is None:
-            raise RuntimeError("The NHL board could not be confirmed in the existing cache")
-        return {
-            "date": ds, "no_games": bool(result.get("no_games")),
-            "preseason": bool(result.get("preseason")),
-            "message": result.get("message") or "NHL board saved",
-        }
-    finally:
-        _CRON_BUSY_NHL = False
-
-
-from nhl_run_jobs import NHLRunJobs
-_NHL_WEB_JOBS = NHLRunJobs(_nhl_execute_web_job, lambda: _progress)
-
-
-def _nhl_begin_job(ds: str, kind: str):
-    global _CRON_BUSY_NHL
-    if _CRON_BUSY_NHL:
-        active = _NHL_WEB_JOBS.active(ds)
-        if active and (kind == "picks" or active["kind"] == kind):
-            return JSONResponse(_NHL_WEB_JOBS.status(active["job_id"]),
-                                status_code=202, headers={"Cache-Control": "no-store"})
-        raise HTTPException(status_code=409,
-                            detail="Another NHL run is active. Wait before starting a new run.")
-    _CRON_BUSY_NHL = True
-    try:
-        job = _NHL_WEB_JOBS.start(ds, kind)
-    except Exception:
-        _CRON_BUSY_NHL = False
-        raise
-    return JSONResponse(job, status_code=202, headers={"Cache-Control": "no-store"})
-
-
-@app.get("/api/nhl/run-status")
-async def api_nhl_run_status(
-        request: Request, job_id: str = "", token: str = "", admin: str = ""):
-    tok = token or request.headers.get(
-        "Authorization", "").replace("Bearer ", "").strip()
-    if not (_verify_hub_token(tok) or _nhl_bet_admin_ok(tok, admin)):
-        raise HTTPException(status_code=401, detail="Sign in to view NHL run progress")
-    job = _NHL_WEB_JOBS.status(job_id)
-    if job is None:
-        raise HTTPException(status_code=404,
-                            detail="Run unavailable: server restarted or the job expired")
-    if job["kind"] == "all" and not _nhl_bet_admin_ok(tok, admin):
-        raise HTTPException(status_code=403, detail="Admin only")
-    return JSONResponse(job, headers={"Cache-Control": "no-store"})
-
-
 @app.post("/api/nhl/run-all-systems")
 async def api_run_all_nhl_systems(
         request: Request, date_str: str = "", token: str = "",
-        admin: str = "", background: bool = False):
+        admin: str = ""):
     """Admin one-click trigger for the daily A/B/C/D capture."""
     global _CRON_BUSY_NHL
     tok = token or request.headers.get(
@@ -11977,8 +11779,6 @@ async def api_run_all_nhl_systems(
         date.fromisoformat(ds)
     except ValueError:
         raise HTTPException(status_code=400, detail="A valid date is required")
-    if background:
-        return _nhl_begin_job(ds, "all")
     if _CRON_BUSY_NHL:
         raise HTTPException(
             status_code=409, detail="The NHL daily batch is already running")
@@ -12173,6 +11973,3 @@ async def api_progress():
 @app.get("/health")
 async def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
-
-from lms import install as _install_lms
-_LMS = _install_lms("nhl", app, globals())
