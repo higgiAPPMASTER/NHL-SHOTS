@@ -6140,6 +6140,7 @@ async function _nhlJobJson(response){
     var error=new Error((data&&(data.detail||data.error))||
       ("NHL server returned HTTP "+response.status+" instead of results. The server may have restarted or become unavailable."));
     error.httpStatus=response.status;
+    error.transient=response.status>=500||response.status===429||(response.ok&&data===null);
     throw error;
   }
   return data;
@@ -6151,18 +6152,34 @@ async function _nhlJobFetch(url,opt){
     var response=await fetch(url,Object.assign({},opt||{},{signal:controller.signal,cache:"no-store"}));
     return await _nhlJobJson(response);
   }catch(error){
-    if(error.name==="AbortError")throw new Error("NHL progress did not respond within 15 seconds. The run may still be active; do not start a duplicate run.");
+    if(error.name==="AbortError"){
+      var timeoutError=new Error((opt&&opt.method==="POST"?
+        "The NHL start request timed out before confirmation.":
+        "NHL progress did not respond within 15 seconds.")+
+        " The run may still be active; do not start a duplicate run.");
+      timeoutError.transient=true;
+      throw timeoutError;
+    }
+    if(error instanceof TypeError)error.transient=true;
     throw error;
   }finally{clearTimeout(timer);}
 }
 async function _nhlWaitForJob(job,st,tok,adm){
+  var connectionFailures=0;
   while(true){
     var state;
     try{
       state=await _nhlJobFetch("/api/nhl/run-status?job_id="+encodeURIComponent(job.job_id)+
         "&token="+encodeURIComponent(tok)+"&admin="+encodeURIComponent(adm));
+      connectionFailures=0;
     }catch(error){
       if(error.httpStatus===404)throw new Error("The server restarted or the saved job expired before this run could be confirmed. Check the saved board before retrying.");
+      if(error.transient&&connectionFailures<3){
+        connectionFailures++;
+        if(st){st.style.color="#f59e0b";st.textContent="Progress connection delayed — reconnecting to the SAME run ("+connectionFailures+"/3).";}
+        await new Promise(function(resolve){setTimeout(resolve,3000);});
+        continue;
+      }
       throw error;
     }
     if(state.status==="COMPLETED")return state.result;
