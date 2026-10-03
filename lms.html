@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LMS Plays - Money Picks Arena</title>
+<style>
+:root{--bg:#0b1118;--p:#131c27;--p2:#192433;--ln:#26364a;--tx:#e6edf5;--mu:#8da0b6;--ac:#e8b84a;--ok:#3fbf8a;--bad:#e5586b;--wn:#e59a3e;--in:#5aa7e8}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(900px 400px at 85% -10%,#1b2a3d,transparent),var(--bg);color:var(--tx);font:14px/1.45 Bahnschrift,"Segoe UI Variable","Segoe UI",system-ui,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:14px}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
+h1{font-size:22px;margin:0;letter-spacing:.02em}h1 span{color:var(--ac)}
+h2{font-size:15px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.08em;color:var(--mu)}
+a{color:var(--in)}
+.btn{background:var(--p2);color:var(--tx);border:1px solid var(--ln);border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer;text-decoration:none;display:inline-block}
+.btn:hover{border-color:var(--ac)}.btn[disabled]{opacity:.5;cursor:default}
+.btn.on{background:var(--ac);color:#14100a;border-color:var(--ac);font-weight:700}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.panel{background:var(--p);border:1px solid var(--ln);border-radius:12px;padding:12px;margin-bottom:12px}
+.note{font-size:12.5px;color:var(--mu)}
+.banner{border-radius:10px;padding:10px 12px;margin-bottom:12px;border:1px solid}
+.banner.err{background:#3a1820;border-color:var(--bad)}.banner.warn{background:#3a2a14;border-color:var(--wn)}.banner.okb{background:#122c22;border-color:var(--ok)}
+input,select{background:#0e1620;color:var(--tx);border:1px solid var(--ln);border-radius:8px;padding:7px 9px;font:inherit;max-width:100%}
+.tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;border:1px solid var(--ln);color:var(--mu);margin-right:4px;text-transform:uppercase;letter-spacing:.05em}
+.tag.ad{color:var(--wn);border-color:var(--wn)}.tag.ctx{color:var(--in);border-color:var(--in)}.tag.ok{color:var(--ok);border-color:var(--ok)}.tag.bad{color:var(--bad);border-color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
+.card{background:var(--p2);border:1px solid var(--ln);border-radius:12px;padding:12px}
+.price{font-size:20px;font-weight:700;color:var(--ac);font-variant-numeric:tabular-nums}
+.kv{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:8px 0}
+.kv div{background:#0e1620;border-radius:8px;padding:6px 8px}.kv b{display:block;font-size:15px;font-variant-numeric:tabular-nums}.kv small{color:var(--mu);font-size:11px}
+ul{margin:4px 0;padding-left:18px}
+.sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px}
+.sum div{background:var(--p2);border:1px solid var(--ln);border-radius:10px;padding:8px}.sum b{font-size:20px;display:block;font-variant-numeric:tabular-nums}.sum small{color:var(--mu)}
+.pos{color:var(--ok)}.neg{color:var(--bad)}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;min-width:680px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--ln);vertical-align:top}th{color:var(--mu);font-size:11px;text-transform:uppercase}
+.skel{height:80px;border-radius:12px;background:linear-gradient(90deg,var(--p),var(--p2),var(--p));background-size:200% 100%;animation:sk 1.2s infinite}@keyframes sk{to{background-position:-200% 0}}
+details>summary{cursor:pointer;color:var(--in)}
+.field{display:flex;flex-direction:column;gap:3px;min-width:180px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}.mrow{display:block;border:1px solid var(--ln);border-radius:10px;margin-bottom:8px;padding:6px}table.rt{min-width:0}table.rt thead{display:none}table.rt,table.rt tbody{display:block}table.rt td{display:flex;justify-content:space-between;gap:10px;border:0;padding:3px 6px}table.rt td:before{content:attr(data-l);color:var(--mu);font-size:11px;text-transform:uppercase}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<div><h1>Money Picks Arena <span>LMS</span> <small id="sp" class="tag"></small></h1>
+<div class="note">Linemaker-inspired plays. Source labels show what the author claims, not guaranteed accuracy.</div></div>
+<div class="row"><a class="btn" id="back">Back to app</a></div>
+</header>
+<div class="panel">
+<div class="row">
+<button class="btn" id="prev">Prev</button><input type="date" id="dt"><button class="btn" id="next">Next</button>
+<button class="btn" id="today">Today</button>
+<span style="flex:1"></span>
+<button class="btn on" id="tB">Board</button><button class="btn" id="tR">Record</button>
+</div>
+<p class="note" style="margin:8px 0 0">Combination recipes produce adapted candidate singles only, never actual parlay predictions, and no joint probability is multiplied. Research and live methods are context, not automated picks. Verified inputs entered by an admin may unblock recipes; nothing here claims data is verified by the source video. Records are an isolated forward record, kept apart from official totals.</p>
+</div>
+<div id="adm"></div>
+<div id="msg"></div>
+<div id="main"></div>
+</div>
+<script>
+(function(){
+"use strict";
+var SPORT="__LMS_SPORT__",BASE=__LMS_BASE__,ADMIN=__LMS_ADMIN__===true;
+var $=function(i){return document.getElementById(i)};
+function h(t,a,k){var e=document.createElement(t);a=a||{};for(var n in a){if(n==="class")e.className=a[n];else if(n==="text")e.textContent=a[n];else if(n.slice(0,2)==="on")e.addEventListener(n.slice(2),a[n]);else if(a[n]!==false&&a[n]!=null)e.setAttribute(n,a[n])}
+(k||[]).forEach(function(c){if(c==null||c===false)return;e.appendChild(typeof c==="object"?c:document.createTextNode(String(c)))});return e}
+function clear(e){while(e.firstChild)e.removeChild(e.firstChild)}
+function safeUrl(u){try{var x=new URL(String(u));return(x.protocol==="http:"||x.protocol==="https:")?x.href:null}catch(e){return null}}
+function srcLink(u,l){var s=safeUrl(u);return s?h("a",{href:s,target:"_blank",rel:"noopener noreferrer nofollow",text:l||"Source (author claims)"}):h("span",{class:"note",text:"No valid source link"})}
+function num(v,d){return typeof v==="number"&&isFinite(v)?v.toFixed(d):"n/a"}
+function pct(v,d){return typeof v==="number"&&isFinite(v)?(v*100).toFixed(d==null?1:d)+"%":"n/a"}
+function odds(v){if(v==null||v==="")return "n/a";var n=Number(v);return isFinite(n)?(n>0?"+"+n:String(n)):String(v)}
+function money(v){return typeof v==="number"&&isFinite(v)?(v>0?"+":"")+v.toFixed(2):"n/a"}
+function when(s){if(!s)return "n/a";var d=new Date(s);return isNaN(d)?String(s):d.toLocaleString()}
+// params
+var qs=new URLSearchParams(location.search);
+try{var t=qs.get("token");if(t)localStorage.setItem("__mpa_token",t)}catch(e){}
+function token(){try{return localStorage.getItem("__mpa_token")||qs.get("token")||""}catch(e){return qs.get("token")||""}}
+function carry(){var p=new URLSearchParams(location.search);p.delete("date");var t=token();if(t&&!p.has("token"))p.set("token",t);return p}
+function api(path,date){var p=carry();if(date)p.set("date",date);var s=p.toString();return BASE+path+(s?"?"+s:"")}
+function req(path,opt,date){opt=opt||{};var hd={Accept:"application/json"};var t=token();if(t)hd.Authorization="Bearer "+t;if(opt.body)hd["Content-Type"]="application/json";
+return fetch(api(path,date),{method:opt.method||"GET",headers:hd,body:opt.body,credentials:"include"}).then(function(r){return r.text().then(function(x){var j=null;try{j=x?JSON.parse(x):null}catch(e){}
+if(!r.ok)throw new Error((j&&(j.error||j.message||j.detail))||("HTTP "+r.status));if(j===null)throw new Error("Unreadable server response");return j})})}
+function ymd(d){var z=function(n){return(n<10?"0":"")+n};return d.getFullYear()+"-"+z(d.getMonth()+1)+"-"+z(d.getDate())}
+var easternToday=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
+var date=/^\d{4}-\d\d-\d\d$/.test(qs.get("date")||"")?qs.get("date"):easternToday;
+var S={tab:"board",board:null,bErr:null,bLoad:true,rec:null,rErr:null,rLoad:false,scope:"day",rview:"method",filter:"all",busy:null,res:null,sel:null};
+$("sp").textContent=SPORT;
+function backHref(){var p=carry();var s=p.toString();return (BASE||"")+"/"+(s?"?"+s:"")}
+$("back").setAttribute("href",backHref());
+function setDate(d){date=d;$("dt").value=d;var u=new URL(location.href);u.searchParams.set("date",d);history.replaceState(null,"",u.pathname+u.search);loadBoard();loadRec()}
+function shift(n){var p=date.split("-");var d=new Date(+p[0],+p[1]-1,+p[2]+n);setDate(ymd(d))}
+$("dt").value=date;
+$("dt").onchange=function(){if(this.value)setDate(this.value)};
+$("prev").onclick=function(){shift(-1)};$("next").onclick=function(){shift(1)};$("today").onclick=function(){setDate(ymd(new Date()))};
+$("tB").onclick=function(){S.tab="board";render()};$("tR").onclick=function(){S.tab="record";render()};
+function loadBoard(){S.bLoad=true;S.bErr=null;render();return req("/api/lms/board",null,date).then(function(j){S.board=j;S.bLoad=false;render()}).catch(function(e){S.board=null;S.bErr=e.message;S.bLoad=false;render()})}
+function loadRec(){S.rLoad=true;S.rErr=null;render();var d=S.scope==="day"?date:null;return req("/api/lms/record",null,d).then(function(j){S.rec=j;S.rLoad=false;render()}).catch(function(e){S.rec=null;S.rErr=e.message;S.rLoad=false;render()})}
+// admin actions
+function act(name,path,body){if(S.busy)return;S.busy=name;S.res=null;render();
+var b=body?JSON.stringify(body):undefined;
+req(path,{method:"POST",body:b},name==="rebuild"?date:null).then(function(j){
+var bd=j&&(j.board||(j.methods?j:null));if(bd)S.board=bd;if(j&&j.record&&j.record.summary&&S.scope==="day")S.rec=j.record;
+S.busy=null;S.res={ok:true,text:name+" completed."};render();return loadRec()}).catch(function(e){S.busy=null;S.res={ok:false,text:name+" failed: "+e.message};render()})}
+// render
+function banner(c,t,retry){var d=h("div",{class:"banner "+c},[h("div",{text:t})]);if(retry)d.appendChild(h("button",{class:"btn",style:"margin-top:6px",onclick:retry,text:"Retry"}));return d}
+function render(){
+$("tB").className="btn"+(S.tab==="board"?" on":"");$("tR").className="btn"+(S.tab==="record"?" on":"");
+var m=$("msg");clear(m);
+if(S.res)m.appendChild(banner(S.res.ok?"okb":"err",S.res.text));
+if(S.board&&S.board.storage_warning)m.appendChild(banner("warn","Storage warning: "+S.board.storage_warning));
+renderAdmin();
+var M=$("main");clear(M);
+if(S.tab==="board")renderBoard(M);else renderRecord(M)}
+function renderAdmin(){var a=$("adm");clear(a);if(!ADMIN)return;
+var p=h("div",{class:"panel"},[h("h2",{text:"Admin"})]);
+var r=h("div",{class:"row"});
+r.appendChild(h("button",{class:"btn",disabled:S.busy?"disabled":false,onclick:function(){act("rebuild","/api/lms/rebuild")},text:S.busy==="rebuild"?"Rebuilding...":"Rebuild board for "+date}));
+r.appendChild(h("button",{class:"btn",disabled:S.busy?"disabled":false,onclick:function(){act("settle","/api/lms/settle",{date:date})},text:S.busy==="settle"?"Settling...":"Settle "+date}));
+r.appendChild(h("button",{class:"btn",disabled:S.busy?"disabled":false,onclick:function(){act("settle","/api/lms/settle",null)},text:"Settle all dates"}));
+p.appendChild(r);
+p.appendChild(h("p",{class:"note",text:"Actions run only when pressed. Rebuild and settle never accept client picks, odds or probabilities."}));
+// pending form
+var pend=[];if(S.board)(S.board.methods||[]).forEach(function(mm){(mm.pending||[]).forEach(function(e){pend.push({m:mm,e:e})})});
+if(pend.length){
+var d=h("details",{},[h("summary",{text:"Supply verified inputs for pending entities ("+pend.length+")"})]);
+if(S.sel==null||S.sel>=pend.length)S.sel=0;
+var sel=h("select",{onchange:function(){S.sel=+this.value;render();var dd=document.querySelector("#adm details");if(dd)dd.open=true}});
+pend.forEach(function(x,i){var o=h("option",{value:i,text:x.e.name+" ("+x.m.name+")"});if(i===S.sel)o.selected=true;sel.appendChild(o)});
+var cur=pend[S.sel];var form=h("form",{class:"row",style:"align-items:flex-end;margin-top:8px"});
+form.appendChild(h("div",{class:"field"},[h("label",{text:"Pending entity"}),sel]));
+var inputs={};
+(cur.e.missing||[]).forEach(function(k){var rule=(cur.m.rules||[]).filter(function(x){return x.field===k})[0]||{field:k,label:k,type:"text"};
+var ty=rule.type==="boolean"||rule.type==="number"?rule.type:"text";var el;
+if(ty==="boolean"){el=h("select",{},[h("option",{value:"",text:"Select"}),h("option",{value:"true",text:"Yes"}),h("option",{value:"false",text:"No"})])}
+else el=h("input",{type:ty==="number"?"number":"text",step:ty==="number"?"any":false});
+inputs[k]={el:el,ty:ty};form.appendChild(h("div",{class:"field"},[h("label",{text:(rule.label||k)+" ("+ty+")"}),el]))});
+var src=h("input",{type:"url",required:"required",placeholder:"https://..."});
+form.appendChild(h("div",{class:"field"},[h("label",{text:"Source URL (required)"}),src]));
+var btn=h("button",{class:"btn on",type:"submit",disabled:S.busy?"disabled":false,text:S.busy==="inputs"?"Saving...":"Save verified inputs"});form.appendChild(btn);
+form.addEventListener("submit",function(ev){ev.preventDefault();var vals={};var bad=null;
+Object.keys(inputs).forEach(function(k){var i=inputs[k],v=i.el.value;if(v===""){bad=k;return}
+vals[k]=i.ty==="boolean"?v==="true":i.ty==="number"?Number(v):v});
+if(bad){S.res={ok:false,text:"Provide a value for "+bad};render();return}
+if(!safeUrl(src.value)){S.res={ok:false,text:"Source URL must be http or https"};render();return}
+act("inputs","/api/lms/inputs",{date:date,entity_id:cur.e.entity_id,values:vals,source_url:safeUrl(src.value)})});
+d.appendChild(form);d.appendChild(h("p",{class:"note",text:"Only values you have checked yourself. Verified inputs may unblock recipes; they are not verified by the video."}));
+p.appendChild(d)}
+a.appendChild(p)}
+function skel(M){for(var i=0;i<3;i++){M.appendChild(h("div",{class:"skel",style:"margin-bottom:10px"}))}}
+function renderBoard(M){
+if(S.bLoad&&!S.board){skel(M);return}
+if(S.bErr){M.appendChild(banner("err","Board unavailable: "+S.bErr,loadBoard));return}
+var b=S.board;if(!b)return;
+var ms=b.methods||[],ps=b.picks||[];
+M.appendChild(h("div",{class:"note",style:"margin-bottom:8px",text:"Board for "+(b.date||date)+" - captured "+when(b.captured_at)+" - "+ps.length+" play"+(ps.length===1?"":"s")+" (no cap)"}));
+var f=h("div",{class:"row",style:"margin-bottom:10px"});
+function chip(id,l){f.appendChild(h("button",{class:"btn"+(S.filter===id?" on":""),onclick:function(){S.filter=id;render()},text:l}))}
+chip("all","All methods");ms.forEach(function(x){chip(x.id,x.name)});
+M.appendChild(f);
+if(S.filter!=="all"&&!ms.some(function(x){return x.id===S.filter}))S.filter="all";
+var shownM=ms.filter(function(x){return S.filter==="all"||x.id===S.filter});
+var shownP=ps.filter(function(x){return S.filter==="all"||x.method_id===S.filter});
+M.appendChild(h("h2",{text:"Plays"}));
+if(!shownP.length){M.appendChild(h("div",{class:"panel"},[h("b",{text:"No qualifying plays right now."}),h("p",{class:"note",text:"Methods below show what was examined, what is missing and which inputs are pending. A recipe with no price or incomplete inputs produces no play; nothing is invented."})]))}
+else{var g=h("div",{class:"grid"});shownP.forEach(function(p){g.appendChild(pickCard(p))});M.appendChild(g)}
+M.appendChild(h("h2",{style:"margin-top:16px",text:"Methods"}));
+shownM.forEach(function(x){M.appendChild(methodPanel(x))});
+if(!ms.length)M.appendChild(h("div",{class:"panel note",text:"No methods reported."}))}
+function adTags(a){var arr=Array.isArray(a)?a:(a?[a]:[]);return arr}
+function pickCard(p){
+var c=h("div",{class:"card"});
+c.appendChild(h("div",{class:"row",style:"justify-content:space-between"},[h("b",{text:p.name||"Unnamed"}),h("span",{class:"price",text:odds(p.odds)})]));
+c.appendChild(h("div",{class:"note",text:[p.team,p.opponent?"vs "+p.opponent:null,p.game_start?when(p.game_start):null].filter(Boolean).join(" - ")}));
+c.appendChild(h("div",{style:"margin:6px 0"},[h("b",{text:[p.market,p.side,p.line!=null?p.line:null].filter(function(x){return x!=null}).join(" ")}),h("span",{class:"note",text:"  @ "+(p.book||"book n/a")})]));
+var tg=h("div",{},[h("span",{class:"tag",text:p.method||"method"}),h("span",{class:"tag"+(p.play_kind==="combination"?" ad":""),text:p.play_kind==="combination"?"adapted candidate single":(p.play_kind||"play")})]);
+adTags(p.adaptations).length&&tg.appendChild(h("span",{class:"tag ad",text:"Adapted"}));
+c.appendChild(tg);
+c.appendChild(h("div",{class:"kv"},[kv("Probability ("+(p.probability_kind||"type n/a")+")",pct(p.probability)),kv("Implied",pct(p.implied_probability)),kv("Edge",typeof p.edge==="number"?(Math.abs(p.edge)<=1?(p.edge*100).toFixed(1):p.edge.toFixed(1))+" pts":"n/a")]));
+c.appendChild(h("div",{class:"note",text:"Sample size: "+(p.sample_size!=null?p.sample_size:"n/a")+". Probability is "+(p.probability_kind||"of unstated type")+", not a guaranteed chance."}));
+var tk=p.tracking_status;c.appendChild(h("div",{style:"margin-top:6px"},[h("span",{class:"tag "+(tk&&/track|record|captur|lock/i.test(tk)?"ok":""),text:"Tracking: "+(tk||"unconfirmed")})]));
+var d=h("details",{style:"margin-top:6px"},[h("summary",{text:"Details"})]);
+var ul=h("ul");(p.checks||[]).forEach(function(k){ul.appendChild(h("li",{},[h("span",{class:k.passed?"pos":"neg",text:k.passed?"Pass ":"Fail "}),(k.label||"")+": "+(k.value==null?"n/a":k.value)]))});
+if(!(p.checks||[]).length)ul.appendChild(h("li",{text:"No checks reported."}));
+d.appendChild(ul);
+adTags(p.adaptations).length&&d.appendChild(h("div",{},[h("b",{class:"pos",style:"color:var(--wn)",text:"Adaptations (ours, not the author's):"}),h("ul",{},adTags(p.adaptations).map(function(a){return h("li",{text:String(a)})}))]));
+d.appendChild(h("div",{},[srcLink(p.source_url)]));
+c.appendChild(d);return c}
+function kv(l,v){return h("div",{},[h("b",{text:v}),h("small",{text:l})])}
+function methodPanel(x){
+var ctx=x.kind==="RESEARCH"||x.kind==="LIVE";
+var p=h("div",{class:"panel"});
+p.appendChild(h("div",{class:"row",style:"justify-content:space-between"},[h("b",{text:x.name}),h("span",{},[h("span",{class:"tag"+(ctx?" ctx":""),text:x.kind||"method"}),h("span",{class:"tag",text:"Status: "+(x.status||"unknown")})])]));
+if(ctx)p.appendChild(h("div",{class:"note",text:"Context only. Not an automated pick source."}));
+if(x.message)p.appendChild(h("div",{class:"note",text:x.message}));
+p.appendChild(h("div",{class:"note",text:"Author claim: "+(x.claim||"none stated")+" (author claims, not independently verified)."}));
+p.appendChild(h("div",{class:"note",text:"Examined "+(x.examined!=null?x.examined:"n/a")+" - Qualifying "+(x.qualifying!=null?x.qualifying:"n/a")}));
+p.appendChild(h("div",{},[srcLink(x.source_url)]));
+var d=h("details",{style:"margin-top:6px"},[h("summary",{text:"Rules, adaptations and pending inputs"})]);
+var ul=h("ul");(x.rules||[]).forEach(function(r){ul.appendChild(h("li",{text:(r.label||r.field)+" "+(r.op||"")+" "+(r.value==null?"":r.value)+" ["+(r.type||"text")+"]"}))});
+if(!(x.rules||[]).length)ul.appendChild(h("li",{text:"No rules listed."}));
+d.appendChild(h("b",{text:"Rules"}));d.appendChild(ul);
+var ad=adTags(x.adaptations);
+d.appendChild(h("div",{},[h("b",{style:"color:var(--wn)",text:"Adaptations"}),ad.length?h("ul",{},ad.map(function(a){return h("li",{text:String(a)})})):h("div",{class:"note",text:"None declared."})]));
+var pd=x.pending||[];
+d.appendChild(h("b",{text:"Pending entities ("+pd.length+")"}));
+if(pd.length){d.appendChild(h("ul",{},pd.map(function(e){return h("li",{text:e.name+" - missing: "+((e.missing||[]).join(", ")||"n/a")})})))}
+else d.appendChild(h("div",{class:"note",text:"None pending."}));
+p.appendChild(d);return p}
+// record
+function sumGrid(s){var w=s.wins,l=s.losses;
+var items=[["Wins",s.wins],["Losses",s.losses],["Push",s.push],["Void",s.void],["Pending",s.pending],["Hit rate",s.hit_rate==null?"n/a":pct(s.hit_rate)],["Profit",money(s.profit)],["ROI",s.roi==null?"n/a":pct(s.roi)],["Priced staked",s.priced_staked==null?"n/a":s.priced_staked]];
+var g=h("div",{class:"sum"});items.forEach(function(i){var cls=(i[0]==="Profit"||i[0]==="ROI")&&typeof i[1]==="string"?(i[1].charAt(0)==="-"?" neg":(i[1]!=="n/a"?" pos":"")):"";g.appendChild(h("div",{},[h("b",{class:cls,text:i[1]==null?"n/a":String(i[1])}),h("small",{text:i[0]})]))});return g}
+function renderRecord(M){
+var c=h("div",{class:"row",style:"margin-bottom:10px"});
+function tgl(on,l,fn){c.appendChild(h("button",{class:"btn"+(on?" on":""),onclick:fn,text:l}))}
+tgl(S.scope==="day","Date "+date,function(){S.scope="day";loadRec()});tgl(S.scope==="all","All-time",function(){S.scope="all";loadRec()});
+c.appendChild(h("span",{style:"flex:1"}));
+tgl(S.rview==="method","By method",function(){S.rview="method";render()});tgl(S.rview==="list","Full list",function(){S.rview="list";render()});
+c.appendChild(h("button",{class:"btn",disabled:S.rec?false:"disabled",onclick:csv,text:"Download CSV"}));
+M.appendChild(c);
+if(S.rLoad&&!S.rec){skel(M);return}
+if(S.rErr){M.appendChild(banner("err","Record unavailable: "+S.rErr+". No totals are shown because the record could not be loaded.",loadRec));return}
+var r=S.rec;if(!r||!r.summary)return;
+M.appendChild(h("div",{class:"panel"},[h("h2",{text:"LMS forward record - "+(S.scope==="day"?date:"all-time")}),sumGrid(r.summary),h("p",{class:"note",text:"Forward results of captured LMS plays only. Separate from official app totals; not a historical simulation. Units depend on priced stakes only."})]));
+if(S.rview==="method"){(r.by_method||[]).forEach(function(m){M.appendChild(h("div",{class:"panel"},[h("b",{text:m.method||"Method"}),h("div",{style:"height:6px"}),sumGrid(m)]))});
+if(!(r.by_method||[]).length)M.appendChild(h("div",{class:"panel note",text:"No per-method rows in this range."}))}
+else{var rows=r.rows||[];if(!rows.length){M.appendChild(h("div",{class:"panel note",text:"No tracked plays in this range."}));return}
+var tw=h("div",{class:"tw panel"});var tb=h("table",{class:"rt"});
+tb.appendChild(h("thead",{},[h("tr",{},["Date","Method","Play","Market","Price","Result","Actual","P/L"].map(function(x){return h("th",{text:x})}))]));
+var body=h("tbody");rows.forEach(function(x){var res=x.result||"pending";
+var cls=res==="win"||res==="WIN"?"ok":(res==="loss"||res==="LOSS"?"bad":"");
+body.appendChild(h("tr",{class:"mrow"},[td("Date",x.date),td("Method",x.method),td("Play",[x.name,x.team].filter(Boolean).join(" - ")),td("Market",[x.market,x.side,x.line].filter(function(v){return v!=null}).join(" ")),td("Price",odds(x.odds)+(x.book?" @ "+x.book:"")),
+h("td",{"data-l":"Result"},[h("span",{class:"tag "+cls,text:res}),x.pending_reason?h("div",{class:"note",text:x.pending_reason}):null]),td("Actual",x.actual==null?"n/a":x.actual),
+h("td",{"data-l":"P/L",class:typeof x.profit==="number"?(x.profit<0?"neg":x.profit>0?"pos":""):""},[money(x.profit)])]))});
+tb.appendChild(body);tw.appendChild(tb);M.appendChild(tw)}}
+function td(l,v){return h("td",{"data-l":l,text:v==null||v===""?"n/a":String(v)})}
+function cell(v){if(v==null)return "";if(typeof v==="number")return String(v);var s=String(v);if(/^[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"'}
+function csv(){var r=S.rec;if(!r)return;var cols=["date","method","name","team","opponent","market","side","line","odds","book","probability","probability_kind","sample_size","implied_probability","edge","result","actual","profit","pending_reason"];
+var out=[cols.join(",")];(r.rows||[]).forEach(function(x){out.push(cols.map(function(k){return cell(x[k])}).join(","))});
+var bl=new Blob([out.join("\r\n")+"\r\n"],{type:"text/csv;charset=utf-8"});var u=URL.createObjectURL(bl);
+var a=h("a",{href:u,download:"lms-"+SPORT+"-record-"+(S.scope==="day"?date:"all-time")+".csv"});document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u)},1000)}
+render();loadBoard();loadRec();
+})();
+</script>
+</body>
+</html>
