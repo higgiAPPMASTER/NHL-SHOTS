@@ -2045,6 +2045,13 @@ async def get_shot_lines(
                                     "oddsFormat": "american"}),
                         return_exceptions=True,
                     )
+                    try:
+                        from lms_quotes import collect as _lms_collect
+                        for _lms_response in (r2, ra):
+                            if isinstance(_lms_response, httpx.Response) and _lms_response.status_code == 200:
+                                _lms_collect("nhl", target_date, _lms_response.json())
+                    except Exception as _lms_e:
+                        print(f"[lms] quote collection unavailable: {type(_lms_e).__name__}")
                     if isinstance(r2, httpx.Response) and r2.status_code == 200:
                         targets = {
                             "player_shots_on_goal": lines,
@@ -4416,6 +4423,8 @@ async def run_picks(
     # be reached by a future live-run entry point.
     capture_official = bool(
         persist_live_snapshot and slate_meta["officialCaptureAllowed"])
+    if capture_official:
+        await asyncio.to_thread(_LMS.attach, _result, locals())
     if capture_official:
         _nhl_save_gp_snapshot(target_date, _result)
         _result["captureStatus"] = (
@@ -11973,3 +11982,6 @@ async def api_progress():
 @app.get("/health")
 async def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
+from lms import install as _install_lms
+_LMS = _install_lms("nhl", app, globals())
