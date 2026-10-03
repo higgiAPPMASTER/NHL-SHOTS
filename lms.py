@@ -530,6 +530,11 @@ class LMS:
                 if index >= 0:
                     self.ns[key] = body[:index] + link + body[index:]
 
+        # NHL serves the static template already updated above. Do not wrap
+        # every picks/progress request in streaming-response middleware.
+        if self.sport == "nhl":
+            return
+
         # NBA also serves an inline/dynamic template. Keep the same additive
         # entry there; this middleware never touches API responses or other pages.
         @app.middleware("http")
