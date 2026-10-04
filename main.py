@@ -3947,6 +3947,8 @@ async def run_picks(
                 print(f"[GP] independent no-props predictor unavailable: {exc}")
         return {
             "date": target_date, "targetDate": target_date, "season": season,
+            "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
+            "simulation": bool(simulate),
             "system": system, "games": games, "picks": [], "sa_ranks": sa_ranks,
             "game_predictions": game_preds, "qualified": 0, "poolSize": 0,
             "preseason": slate_meta["preseason"],
@@ -5135,17 +5137,17 @@ body.is-admin .frank-ai-systems{display:flex!important}
         <option value="goals">Goals</option>
         <option value="saves">Goalie Saves</option>
       </select>
+      <div role="group" aria-label="Edge Coach side" style="display:inline-flex;gap:5px;flex-wrap:wrap">
+        <button type="button" id="frankSideAll" class="frank-ai-side-btn active" aria-pressed="true" onclick="_frankSetSide('')">All</button>
+        <button type="button" id="frankSideOver" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('OVER')">Over</button>
+        <button type="button" id="frankSideUnder" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('UNDER')">Under</button>
+      </div>
       <label style="display:inline-flex;align-items:center;gap:9px;flex-wrap:wrap;max-width:100%;color:#fbbf24;font-size:.71rem;font-weight:900;margin:0">
         EDGE COACH GAME
         <select id="frankAiGame" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;max-width:100%;cursor:pointer">
           <option value="">All games · load a board to choose</option>
         </select>
       </label>
-      <div role="group" aria-label="Edge Coach side" style="display:inline-flex;gap:5px;flex-wrap:wrap">
-        <button type="button" id="frankSideAll" class="frank-ai-side-btn active" aria-pressed="true" onclick="_frankSetSide('')">All</button>
-        <button type="button" id="frankSideOver" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('OVER')">Over</button>
-        <button type="button" id="frankSideUnder" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('UNDER')">Under</button>
-      </div>
       <span style="color:#9ca3af;font-size:.68rem;font-weight:600">Applies to presets, Analyze, and Best Alt-Line Edge Plays.</span>
     </div>
     <div class="frank-ai-presets">
@@ -6360,7 +6362,7 @@ async function _nhlSelectLiveSystem(system){
     try{
       var tok=localStorage.getItem('__mpa_token')||'';
       var admin=new URLSearchParams(location.search).get('admin')||'';
-      var r=await fetch('/api/nhl/system-board?date_str='+encodeURIComponent(dt)+'&system='+encodeURIComponent(system)+'&token='+encodeURIComponent(tok)+'&admin='+encodeURIComponent(admin));
+      var r=await fetch('/api/nhl/system-board?date_str='+encodeURIComponent(dt)+'&system='+encodeURIComponent(system)+'&token='+encodeURIComponent(tok)+'&admin='+encodeURIComponent(admin),{cache:'no-store'});
       var data=await r.json();
       if(!r.ok)throw new Error(data.detail||data.error||('HTTP '+r.status));
       board=data;
@@ -6407,7 +6409,7 @@ async function runAllNhlSystems(){
       var row=(data.systems||{})[system]||{};
       parts.push(system+': '+(row.ok
         ?(data.preseason?(row.picks+' generated · view-only'):(row.picks+' logged'))
-        :(row.error||'failed')));
+        :(row.error||'failed'))+(row.boardStorage&&row.boardStorage.durable===false?' · permanent board NOT saved':''));
     });
     if(st)st.textContent=(data.preseason
       ?'PRESEASON tuning complete · official records not written · '
@@ -11939,6 +11941,101 @@ async def nhl_historical_analysis(
 _CRON_BUSY_NHL = False
 
 
+def _nhl_valid_live_board(board, date_str: str, system: str):
+    """Validate exact saved identity; never relabel A as another system."""
+    if (not isinstance(board, dict) or board.get("date") != date_str
+            or str(board.get("system") or "").upper() != system
+            or board.get("simulation") or board.get("error")
+            or board.get("no_games")):
+        return None
+    expected = 10 if system == "D" else 9
+    if board.get("_nhlCacheVersion") == expected:
+        return board
+    # The old no-props return omitted its version tag. This is an actual
+    # saved empty board, NOT evidence that the system never ran.
+    if (board.get("_nhlCacheVersion") is None
+            and board.get("poolSize") == 0 and board.get("qualified") == 0
+            and board.get("picks") == [] and isinstance(board.get("games"), list)
+            and board.get("data_note") ==
+            "Player props are unavailable for this slate; Game Predictor is shown independently."):
+        return {**board, "_nhlCacheVersion": expected}
+    return None
+
+
+def _nhl_save_live_board(date_str: str, system: str, board: dict):
+    """Store complete live display data separately from every official record."""
+    board = _nhl_valid_live_board(board, date_str, system)
+    if board is None:
+        return False
+    return _nhl_sb_upsert("mpa_track_ledger", [{
+        "app": _NHL_TRK_APP + "_live_boards", "date": date_str,
+        "category": "__board_" + system + "__", "side": "ALL",
+        "wins": 0, "losses": 0, "locked": False, "locked_at": None,
+        "detail": {
+            "version": 1, "system": system, "date": date_str,
+            "saved_at": datetime.utcnow().isoformat() + "Z", "board": board,
+        },
+    }], on_conflict="app,date,category,side")
+
+
+def _nhl_load_live_board(date_str: str, system: str):
+    """Read disk, then durable storage. No models, capture, or grading."""
+    cache_name = "nhl" if system == "A" else f"nhl_live_board_v1_{system}"
+    path = _cache_path(cache_name, date_str)
+    local_error = False
+    if path.exists():
+        try:
+            board = _nhl_valid_live_board(
+                json.loads(path.read_text(encoding="utf-8")), date_str, system)
+            if board is not None:
+                return board
+            local_error = True
+        except (OSError, ValueError):
+            local_error = True
+    if not _NHL_SB_URL or not _NHL_SB_KEY:
+        raise RuntimeError("Saved board storage is unavailable; absence of this system could not be confirmed.")
+    params = {
+        "app": "eq." + _NHL_TRK_APP + "_live_boards",
+        "category": "eq.__board_" + system + "__",
+        "side": "eq.ALL", "date": "eq." + date_str,
+        "select": "detail", "limit": "1",
+    }
+    for attempt in range(3):
+        try:
+            response = httpx.get(
+                f"{_NHL_SB_URL}/rest/v1/mpa_track_ledger",
+                headers={"apikey": _NHL_SB_KEY,
+                         "Authorization": f"Bearer {_NHL_SB_KEY}"},
+                params=params, timeout=10)
+            if response.status_code == 200:
+                rows = response.json()
+                if not isinstance(rows, list):
+                    raise ValueError("Unreadable saved board response")
+                if rows:
+                    detail = rows[0].get("detail")
+                    if (not isinstance(detail, dict) or detail.get("version") != 1
+                            or detail.get("date") != date_str
+                            or detail.get("system") != system):
+                        raise ValueError("Saved board metadata does not match")
+                    board = _nhl_valid_live_board(detail.get("board"), date_str, system)
+                    if board is None:
+                        raise ValueError("Saved board identity or schema does not match")
+                    return board
+                if attempt == 2:
+                    if local_error:
+                        raise RuntimeError("A saved system board exists but could not be read safely.")
+                    return None
+            else:
+                logger.warning("NHL saved %s board read returned HTTP %s",
+                               system, response.status_code)
+        except (httpx.RequestError, ValueError, AttributeError, TypeError):
+            logger.warning("NHL saved %s board read failed (attempt %s)",
+                           system, attempt + 1)
+        if attempt < 2:
+            time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError("Saved board storage could not be read; this does not mean the system was not run.")
+
+
 async def _nhl_run_all_and_cache(date_str: str) -> dict:
     batch = await run_all_nhl_systems(date_str)
     results = batch.get("results") or {}
@@ -11951,6 +12048,29 @@ async def _nhl_run_all_and_cache(date_str: str) -> dict:
         board = results.get(system) or {}
         if board and "error" not in board and not board.get("no_games"):
             _cache_set(f"nhl_live_board_v1_{system}", date_str, board)
+    # /tmp is only an accelerator. Keep complete display boards across
+    # redeploys, including preseason and legitimately empty player-prop pools.
+    # This namespace never contributes to any official record or W/L.
+    storage_failures = []
+    for system in ("A", "B", "C", "D"):
+        board = results.get(system) or {}
+        if not board or "error" in board or board.get("no_games"):
+            continue
+        try:
+            saved = await asyncio.to_thread(
+                _nhl_save_live_board, date_str, system, board)
+        except Exception:
+            logger.exception("NHL system %s permanent board save failed", system)
+            saved = False
+        (batch.get("systems") or {}).get(system, {})["boardStorage"] = {
+            "durable": bool(saved)}
+        if not saved:
+            storage_failures.append(system)
+    if storage_failures:
+        batch["board_storage_warning"] = (
+            "Permanent live board saving was not confirmed for "
+            + ", ".join(storage_failures) + ". Local copies may be lost on restart.")
+        batch["message"] = (batch.get("message") or "") + " · " + batch["board_storage_warning"]
     # Grade prior player/GP slates after today's capture.  The current date
     # remains pending until its games finish.
     await asyncio.get_running_loop().run_in_executor(
@@ -12002,19 +12122,16 @@ async def api_nhl_system_board(
     system = str(system or "A").upper()
     if system not in ("A", "B", "C", "D"):
         raise HTTPException(status_code=400, detail="Choose system A, B, C, or D")
-    if system == "A":
-        board = _cache_get("nhl", ds)
-    else:
-        path = _cache_path(f"nhl_live_board_v1_{system}", ds)
-        try:
-            board = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=503, detail="Saved system board could not be read") from exc
-    if (not isinstance(board, dict) or board.get("date") != ds
-            or board.get("_nhlCacheVersion") != (10 if system == "D" else 9)):
+    try:
+        board = await asyncio.to_thread(_nhl_load_live_board, ds, system)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if board is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No saved {system} board for {ds}. Run A+B+C+D for this date first.")
+            detail=(f"No saved {system} board remains for {ds}. Older versions kept "
+                    "live boards only in /tmp, which can be cleared on restart or redeploy. "
+                    "This version permanently saves each successful A+B+C+D run."))
     return JSONResponse(board, headers={"Cache-Control": "no-store"})
 
 
