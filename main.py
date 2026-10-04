@@ -883,7 +883,7 @@ async def _nhl_gp_fetch_all(target_date: str, season: str, games: list = None) -
                                             if point is None or not _allowed_price(oc.get("price")):
                                                 continue
                                             entry["total"] = point
-                                            entry["tot_book"] = book.get("key", "")
+                                            entry["tot_book"] = book.get("title") or book.get("key", "")
                                             for side in ("OVER", "UNDER"):
                                                 paired = next(
                                                     (row.get("price") for row in outcomes
@@ -905,8 +905,10 @@ async def _nhl_gp_fetch_all(target_date: str, season: str, games: list = None) -
                                         if na == h_abbr and "home_ml" not in entry:
                                             entry["home_ml"] = pr
                                             entry["ml_book"] = book.get("key", "")
+                                            entry["home_ml_book"] = book.get("title") or book.get("key", "")
                                         elif na == a_abbr and "away_ml" not in entry:
                                             entry["away_ml"] = pr
+                                            entry["away_ml_book"] = book.get("title") or book.get("key", "")
                             if entry:
                                 game_lines[(a_abbr, h_abbr)] = entry
         except Exception as _gp_oe:
@@ -1091,6 +1093,7 @@ def _nhl_gp_predict(games: list, gp_data: dict) -> list:
             "aScheduleContext": a_schedule,
             "bookTotal": book_total, "overOdds": over_odds, "underOdds": under_odds,
             "homeMl": home_ml, "awayMl": away_ml,
+            "homeMlBook": gl.get("home_ml_book", ""), "awayMlBook": gl.get("away_ml_book", ""),
             "ouRec": ou_rec, "mlImpliedH": ml_impl_h,
             "totBook": gl.get("tot_book", ""), "mlBook": gl.get("ml_book", ""),
         })
@@ -1691,6 +1694,23 @@ async def get_opp_goalie_svpct(season: str) -> Dict[str, float]:
         return {}
 
 
+def _nhl_side_book(pick: Dict, side: str) -> str:
+    """Actual selected quote's book; provider/source labels are not sportsbooks."""
+    side = str(side or "OVER").upper()
+    value = pick.get("under_book" if side == "UNDER" else "over_book")
+    if not value and side == "OVER":
+        value = pick.get("odds_book")
+    if not value and str(pick.get("side") or side).upper() == side:
+        value = pick.get("book")
+    value = str(value or "").strip()
+    if value.lower() in {"oddsapi", "odds api", "the odds api",
+                         "historical odds api", "oddsapi (alternate)",
+                         "historical odds api (alternate)", "book",
+                         "model", "simulation", "no book line"}:
+        return ""
+    return value
+
+
 async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                                        target_date: str,
                                        games: List[Dict]) -> tuple:
@@ -1859,8 +1879,10 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                                 continue
                             if side == "Over" and not rec["odds"]:
                                 rec["odds"] = str(outcome.get("price", ""))
+                                rec["odds_book"] = book.get("title") or book.get("key") or ""
                             elif side == "Under" and not rec["under_odds"]:
                                 rec["under_odds"] = str(outcome.get("price", ""))
+                                rec["under_book"] = book.get("title") or book.get("key") or ""
             return found
 
         per_event = await asyncio.gather(*[_event_player_lines(ev) for ev in events])
@@ -1883,6 +1905,8 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                 targets[market].setdefault(player, {
                     "line": rec["line"], "odds": rec["odds"],
                     "under_odds": rec["under_odds"],
+                    "odds_book": rec.get("odds_book", ""),
+                    "under_book": rec.get("under_book", ""),
                     "source": rec["source"],
                 })
         print(
@@ -1959,7 +1983,14 @@ async def get_shot_lines(
             date.fromisoformat(target_date) >= date.today()
             and "alternates" not in _oc
         )
-        if (not cached_live_alternates
+        # Older live payloads never requested standard Goals O/U. Refresh
+        # those once on the next user-requested run; historical odds caches
+        # and frozen pregame records must retain their existing behavior.
+        cached_live_goals_ou = (
+            date.fromisoformat(target_date) >= date.today()
+            and not _oc.get("goals_ou_requested", False)
+        )
+        if (not cached_live_alternates and not cached_live_goals_ou
                 and not (date.fromisoformat(target_date) < date.today() and not cached_lines)):
             return (
                 cached_lines, _oc.get("pts", {}),
@@ -1992,6 +2023,8 @@ async def get_shot_lines(
         alternate_lines: Dict[str, Dict[str, Dict]] = {
             market: {} for market in LIVE_ALTERNATE_PROP_MARKETS
         }
+        goal_ou_lines: Dict[str, Dict] = {}
+        goal_ou_reads_ok: List[bool] = []
         async with httpx.AsyncClient(timeout=20) as c:
             if date.fromisoformat(target_date) < date.today():
                 (lines, pts_lines, ast_lines, sv_lines,
@@ -2031,7 +2064,8 @@ async def get_shot_lines(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
                             params={"apiKey": api_key, "regions": "us,us2,ca",
                                     "markets": ("player_shots_on_goal,player_points,"
-                                                "player_assists,player_total_saves"),
+                                                "player_assists,player_total_saves,"
+                                                "player_goals"),
                                     "oddsFormat": "american"}),
                         c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
@@ -2045,12 +2079,15 @@ async def get_shot_lines(
                                     "oddsFormat": "american"}),
                         return_exceptions=True,
                     )
+                    goal_ou_reads_ok.append(
+                        isinstance(r2, httpx.Response) and r2.status_code == 200)
                     if isinstance(r2, httpx.Response) and r2.status_code == 200:
                         targets = {
                             "player_shots_on_goal": lines,
                             "player_points":        pts_lines,
                             "player_assists":       ast_lines,
                             "player_total_saves":   sv_lines,
+                            "player_goals":         goal_ou_lines,
                         }
                         for book in r2.json().get("bookmakers", []):
                             for mkt in book.get("markets", []):
@@ -2063,16 +2100,34 @@ async def get_shot_lines(
                                     if nm not in ("Over", "Under"):
                                         continue
                                     player = oc.get("description", "").strip()
-                                    line   = float(oc.get("point") or 0)
-                                    if not player or line <= 0:
+                                    if not player:
                                         continue
+                                    if mkey == "player_goals":
+                                        # Keep Goals (1+) at its exact standard
+                                        # 0.5 line. Never attach alternate-goal
+                                        # prices or manufacture an Under price.
+                                        try:
+                                            line = float(oc.get("point") or 0)
+                                            goal_price = float(oc.get("price"))
+                                        except (TypeError, ValueError):
+                                            continue
+                                        if (line != 0.5 or not goal_price.is_integer() or not (
+                                                goal_price >= 100
+                                                or -1000 <= goal_price <= -100)):
+                                            continue
+                                    else:
+                                        line = float(oc.get("point") or 0)
+                                        if line <= 0:
+                                            continue
                                     rec = target.setdefault(player, {
                                         "line": line, "odds": "",
                                         "under_odds": "", "source": "OddsAPI"})
                                     if nm == "Over" and not rec["odds"]:
                                         rec["odds"] = str(oc.get("price", ""))
+                                        rec["odds_book"] = book.get("title") or book.get("key") or ""
                                     elif nm == "Under" and not rec["under_odds"]:
                                         rec["under_odds"] = str(oc.get("price", ""))
+                                        rec["under_book"] = book.get("title") or book.get("key") or ""
                     if isinstance(ra, httpx.Response) and ra.status_code == 200:
                         for book in ra.json().get("bookmakers", []):
                             for mkt in book.get("markets", []):
@@ -2130,8 +2185,23 @@ async def get_shot_lines(
                                         "under_odds": "", "source": "OddsAPI"})
                                     if not rec["odds"]:
                                         rec["odds"] = str(oc.get("price", ""))
+                                        rec["odds_book"] = book.get("title") or book.get("key") or ""
 
                 await asyncio.gather(*[_fetch_ev_odds(ev) for ev in events])
+
+                # Keep the original scorer-Yes Over price when available.
+                # Under is a separately published quote from player_goals.
+                for player, goal_ou in goal_ou_lines.items():
+                    rec = goal_lines.setdefault(player, {
+                        "line": 0.5, "odds": "", "under_odds": "",
+                        "source": "OddsAPI",
+                    })
+                    if not rec["under_odds"] and goal_ou.get("under_odds"):
+                        rec["under_odds"] = goal_ou["under_odds"]
+                        rec["under_book"] = goal_ou.get("under_book", "")
+                    if not rec["odds"] and goal_ou.get("odds"):
+                        rec["odds"] = goal_ou["odds"]
+                        rec["odds_book"] = goal_ou.get("odds_book", "")
 
                 if (lines or pts_lines or ast_lines or sv_lines or goal_lines
                         or any(alternate_lines.values())):
@@ -2144,6 +2214,7 @@ async def get_shot_lines(
             _odds_cache_set("nhl_lineup_v5_us_ca", target_date, {
                 "lines": lines, "pts": pts_lines,
                 "ast": ast_lines, "sv": sv_lines, "goals": goal_lines,
+                "goals_ou_requested": bool(goal_ou_reads_ok) and all(goal_ou_reads_ok),
                 "alternates": alternate_lines})
         return lines, pts_lines, ast_lines, sv_lines, goal_lines
     except Exception as e:
@@ -2241,11 +2312,14 @@ async def get_shot_qualified_players(
             # 1.5 estimate: the analyzer skips a player without this line.
             real_line, real_odds, line_source = None, "", "No book line"
             real_under_odds = ""
+            over_book, under_book = "", ""
             for odds_name, sb_info in lines_map.items():
                 if _match_odds_name(odds_name, [p]):
                     real_line       = sb_info["line"]
                     real_odds       = sb_info.get("odds", "")
                     real_under_odds = sb_info.get("under_odds", "")
+                    over_book = _nhl_side_book(sb_info, "OVER")
+                    under_book = _nhl_side_book(sb_info, "UNDER")
                     line_source     = sb_info.get("source", "OddsAPI")
                     break
             pool.append({
@@ -2260,6 +2334,7 @@ async def get_shot_qualified_players(
                 "realLine":   real_line,
                 "realOdds":   real_odds,
                 "realUnderOdds": real_under_odds,
+                "over_book": over_book, "under_book": under_book,
                 "lineSource": line_source,
                 "estLine":    None,
                 "spg":        0,
@@ -2568,6 +2643,7 @@ async def get_pts_picks(
             """Normalized pick for one market. Model-only markets use base_line
             and remain visibly unpriced instead of pretending a book posted it."""
             analysis_line, real_line, real_odds, under_odds, line_source = None, None, "", "", "No book line"
+            over_book, under_book = "", ""
             if model_only:
                 analysis_line = base_line
                 line_source = "Model"
@@ -2577,6 +2653,8 @@ async def get_pts_picks(
                         analysis_line = sb_info.get("line")
                         real_odds = sb_info.get("odds", "")
                         under_odds = sb_info.get("under_odds", "")
+                        over_book = _nhl_side_book(sb_info, "OVER")
+                        under_book = _nhl_side_book(sb_info, "UNDER")
                         line_source = sb_info.get("source", "OddsAPI")
                         break
             if analysis_line is None:
@@ -2699,6 +2777,7 @@ async def get_pts_picks(
                 "lineupStatus": player.get("lineupStatus", "UNAVAILABLE"),
                 "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
                 "realLine": real_line, "realOdds": real_odds, "realUnderOdds": under_odds,
+                "over_book": over_book, "under_book": under_book,
                 "lineSource": line_source,
                 "mkt": mkt_label,
                 "dispLine": line,
@@ -2965,11 +3044,14 @@ async def get_saves_picks(
 
         # Real book line (player_total_saves) — fuzzy name match
         real_line, real_odds, under_odds = None, "", ""
+        over_book, under_book = "", ""
         for odds_name, sb_info in sv_lines_map.items():
             if _match_odds_name(odds_name, [{"name": goalie["name"]}]):
                 real_line  = sb_info.get("line")
                 real_odds  = sb_info.get("odds", "")
                 under_odds = sb_info.get("under_odds", "")
+                over_book = _nhl_side_book(sb_info, "OVER")
+                under_book = _nhl_side_book(sb_info, "UNDER")
                 break
         line_source = "OddsAPI"
         if real_line is None:
@@ -3051,6 +3133,7 @@ async def get_saves_picks(
             "starterConfirmedAt": goalie.get("starterConfirmedAt", ""),
             "opponent": opp, "homeRoad": hr, "oppSA": sa_map.get(opp, 0.0),
             "realLine": book_line, "realOdds": real_odds, "realUnderOdds": under_odds,
+            "over_book": over_book, "under_book": under_book,
             "lineSource": line_source,
             "mkt": "Goalie Saves", "dispLine": base_line,
             "avg": avg3, "avgA": avg2,
@@ -3665,6 +3748,7 @@ def _nhl_historical_replay_payload(result: dict) -> dict:
                 "category": category, "stat_key": stat_key, "side": side,
                 "line": line, "model_line": model_line,
                 "odds": odds, "rank": rank,
+                "book": _nhl_side_book(pick, side),
                 "is_overflow": bool(is_overflow), "line_source": line_source,
                 "schedule_context": pick.get("scheduleContext") or {},
                 "player_workload": pick.get("playerWorkload") or {},
@@ -4028,6 +4112,7 @@ async def run_picks(
             "rawScore": raw_score,
             "confidenceScore": confidence_score,
             "realUnderOdds": p.get("realUnderOdds", ""),
+            "over_book": p.get("over_book", ""), "under_book": p.get("under_book", ""),
             **uf, "overOk": selected_over_ok,
             "legacyOverOk": legacy_over_ok,
             "proj": proj, "projEdge": proj_edge, "projPick": proj_pick,
@@ -4904,6 +4989,11 @@ body.is-admin #parlayCard{display:block}
 .frank-ai-side-btn{background:#18181b;color:#cbd5e1;border:1px solid #52525b;border-radius:7px;padding:9px 12px;font-size:.72rem;font-weight:900;cursor:pointer}
 .frank-ai-side-btn.active{background:#92400e;color:#fff;border-color:#fbbf24}
 .frank-ai-side-btn:disabled{opacity:.5;cursor:not-allowed}
+.frank-parlay-panel>summary::-webkit-details-marker{display:none}
+.frank-parlay-panel>summary:focus-visible{outline:2px solid #c4b5fd;outline-offset:4px;border-radius:6px}
+.frank-parlay-close-label{display:none}
+.frank-parlay-panel[open] .frank-parlay-close-label{display:inline}
+.frank-parlay-panel[open] .frank-parlay-open-label{display:none}
 .frank-ai-systems{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:12px 0 3px}
 .frank-ai-system{background:#171717;color:#9ca3af;border:1px solid #3f3f46;border-radius:8px;padding:7px 12px;font-size:.68rem;font-weight:950;cursor:pointer}
 .frank-ai-system.active{color:#fff;border-color:#fb923c;background:rgba(234,88,12,.18);box-shadow:inset 0 0 0 1px rgba(251,146,60,.22)}
@@ -5045,6 +5135,12 @@ body.is-admin .frank-ai-systems{display:flex!important}
         <option value="goals">Goals</option>
         <option value="saves">Goalie Saves</option>
       </select>
+      <label style="display:inline-flex;align-items:center;gap:9px;flex-wrap:wrap;max-width:100%;color:#fbbf24;font-size:.71rem;font-weight:900;margin:0">
+        EDGE COACH GAME
+        <select id="frankAiGame" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;max-width:100%;cursor:pointer">
+          <option value="">All games · load a board to choose</option>
+        </select>
+      </label>
       <div role="group" aria-label="Edge Coach side" style="display:inline-flex;gap:5px;flex-wrap:wrap">
         <button type="button" id="frankSideAll" class="frank-ai-side-btn active" aria-pressed="true" onclick="_frankSetSide('')">All</button>
         <button type="button" id="frankSideOver" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('OVER')">Over</button>
@@ -5052,14 +5148,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
       </div>
       <span style="color:#9ca3af;font-size:.68rem;font-weight:600">Applies to presets, Analyze, and Best Alt-Line Edge Plays.</span>
     </div>
-    <label style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:#fbbf24;font-size:.71rem;font-weight:900;margin:0 0 12px">
-      EDGE COACH GAME
-      <select id="frankAiGame" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;max-width:100%;cursor:pointer">
-        <option value="">All games · load a board to choose</option>
-      </select>
-    </label>
     <div class="frank-ai-presets">
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays from -200 to -1000')">Coach Edge · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays at any eligible odds')">Coach Edge · Top 10</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show me the top 10 safest bets')">Safest Bets · Top 10</button>
       <button class="frank-ai-preset" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" style="border-color:#f59e0b;color:#fde68a">Best Alt-Line Edge Plays · Top 10</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')">Top 3 Plays</button>
@@ -5087,12 +5177,15 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <span id="frankAiSystemStatus" style="color:#fbbf24;font-size:.64rem;font-weight:800">System A loaded board</span>
     </div>
     <div class="frank-ai-row">
-      <input id="frankAiInput" class="frank-ai-input" type="text" placeholder="Example: Best positive edge shots props in TOR vs MTL from -200 to -500" onkeydown="if(event.key==='Enter')askFrank()"/>
+      <input id="frankAiInput" class="frank-ai-input" type="text" placeholder="Example: Top 10 positive edge shots props in TOR vs MTL at any eligible odds" onkeydown="if(event.key==='Enter')askFrank()"/>
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
     <div class="frank-ai-note">Requires a loaded NHL board and a real price. Safest Bets uses only the exact side that qualified for the loaded board, keeps only positive Coach Edge, then ranks by sportsbook-implied probability. Model-only PP Points and plays without odds are excluded.</div>
-    <div style="margin-top:14px;padding:14px;border:1px solid rgba(167,139,250,.35);border-radius:12px;background:#11121b">
-      <div style="font-size:.93rem;font-weight:900;color:#ddd6fe;margin-bottom:5px">Edge Coach Parlay Builder</div>
+    <details id="frankParlayPanel" class="frank-parlay-panel" open style="margin-top:14px;padding:14px;border:1px solid rgba(167,139,250,.35);border-radius:12px;background:#11121b">
+      <summary style="display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer;font-size:.93rem;font-weight:900;color:#ddd6fe;margin-bottom:5px">
+        <span>Edge Coach Parlay Builder</span>
+        <span style="flex-shrink:0;border:1px solid #7c3aed;border-radius:6px;background:#312e81;color:#fff;padding:5px 10px;font-size:.7rem"><span class="frank-parlay-close-label">Close</span><span class="frank-parlay-open-label">Open</span></span>
+      </summary>
       <div style="font-size:.7rem;color:#94a3b8;margin-bottom:10px">Check the markets and sides you want to include. Legs use positive Coach Edge and genuine sportsbook lines only; no record is written.</div>
       <div style="display:flex;align-items:end;gap:9px;flex-wrap:wrap">
         <div role="group" aria-label="Coach parlay categories" style="color:#c4b5fd;font-size:.72rem;font-weight:800">
@@ -5128,7 +5221,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
       </div>
       <div style="font-size:.67rem;color:#94a3b8;margin-top:8px">Power Play Points is normally model-only. Selecting it never invents a line or price; without a genuine priced play the builder shows no available legs.</div>
       <div id="frankParlayResult" aria-live="polite" style="margin-top:10px"></div>
-    </div>
+    </details>
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
 
@@ -5356,7 +5449,7 @@ function _nhlLeg(p){
     ?(p.underRate||p.underRateAny||p.underRateVo||0)
     :(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
   var odds=modelOnly?'':dir==='UNDER'?(p.realUnderOdds||''):(p.realOdds||'');var dec=_amToDec(odds);
-  return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,dec:dec,hasOdds:!!dec,source:'normal',modelOnly:modelOnly};
+  return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,book:_nhlBookName(p,dir),dec:dec,hasOdds:!!dec,source:'normal',modelOnly:modelOnly};
 }
 function _nhlParlayCatKey(c){
   var base={'Shots on Goal':'SHOTS','Points (1+)':'POINTS','Power Play Points (1+)':'PP','Assists (1+)':'ASSISTS','Goals (1+)':'GOALS','Goalie Saves':'SAVES'}[c.market]||'SHOTS';
@@ -5375,7 +5468,7 @@ function _nhlCoachParlayCandidates(){
     var odds=Number(p.odds),dec=_amToDec(odds);
     return {player:p.player,playerKey:String((p.source&&p.source.pid)||p.pid||p.player||''),team:p.team||'',opp:p.opponent||'',
       market:p.market||'NHL Prop',dir:p.side,line:p.line,rate:Math.round(Number(p.appProb||0)),odds:odds,dec:dec,
-      hasOdds:!!dec,edge:Number(p.edge||0),isAlternate:!!isAlternate,source:'coach',coachCats:[]};
+      hasOdds:!!dec,book:_nhlBookName(p,p.side),edge:Number(p.edge||0),isAlternate:!!isAlternate,source:'coach',coachCats:[]};
   }
   var positive=_frankAllProps().filter(function(p){
     return p.edge>0&&_floorOk(p.odds)&&_nhlParlayGameOn(p.team,p.opponent);
@@ -5383,7 +5476,7 @@ function _nhlCoachParlayCandidates(){
   var byEdge=function(a,b){return b.edge-a.edge||b.appProb-a.appProb;};
   var bySafe=function(a,b){return b.implied-a.implied||b.appProb-a.appProb;};
   var pools={
-    coach_edge:select(positive.filter(function(p){return p.odds>=-1000&&p.odds<=-200;}),byEdge,10),
+    coach_edge:select(positive,byEdge,10),
     safest_bets:select(positive,bySafe,10),
     top_3:select(positive,byEdge,3),
     best_overs:select(positive.filter(function(p){return p.side==='OVER';}),byEdge,10),
@@ -5480,7 +5573,7 @@ function _paintNhlParlay(legs,n,randomize){
     +'<div style="display:flex;align-items:center;gap:8px;min-width:0">'
     +'<div style="min-width:0;flex:1">'
     +'<div style="font-weight:800;color:#fff;font-size:.85rem">'+(i+1)+'. '+l.player+' <span style="color:#777;font-size:.7rem">'+l.team+(l.opp?(' vs '+l.opp):'')+'</span></div>'
-     +'<div style="color:#999;font-size:.72rem;margin-top:2px">'+l.market+(l.line!=null?(' · '+(l.modelOnly?'model threshold ':'line ')+l.line):'')+(l.rate?(' · '+l.rate+'% hit'):'')+'</div>'
+     +'<div style="color:#999;font-size:.72rem;margin-top:2px">'+l.market+(l.line!=null?(' · '+(l.modelOnly?'model threshold ':'line ')+l.line):'')+(l.rate?(' · '+l.rate+'% hit'):'')+_nhlBookBadge(l,l.dir)+'</div>'
     +'</div>'
     +'<button type="button" onclick="replaceNhlParlayLeg('+i+')" title="Generate a new player prop" aria-label="Generate a new player prop" style="flex:0 0 auto;background:#7c3aed;color:#fff;border:0;border-radius:6px;width:25px;height:25px;padding:0;cursor:pointer;font-size:.95rem;font-weight:900;line-height:25px">↻</button>'
     +'</div>'
@@ -5535,9 +5628,57 @@ function _frankSetSide(side){
 function _frankSystemLabel(system){
   return system==='B'?'B · OLD':system==='C'?'C · SELECTIVE':system==='D'?'D · TOP PLAYERS':'A · NEW';
 }
+var _frankBoardRequests={};
+var _frankBoardState={};
+var _frankBoardEpoch=0;
+function _frankBoardDate(){
+  var raw=window.__NHL_RAW__||{},dp=document.getElementById('datePicker');
+  return String(raw.date||window.__NHL_DATE__||(dp&&dp.value)||'');
+}
+async function _frankEnsureSystemBoard(system){
+  var existing=_frankRawForSystem(system);
+  if(existing)return existing;
+  var dt=_frankBoardDate(),epoch=_frankBoardEpoch,key=epoch+'|'+dt+'|'+system;
+  if(!dt)throw new Error('Load a dated NHL board first.');
+  if(!window.IS_ADMIN)throw new Error('Load the current NHL picks board first.');
+  if(_frankBoardRequests[key])return _frankBoardRequests[key];
+  _frankBoardState[key]={loading:true,error:''};
+  _frankPaintSystemButtons();
+  var request=(async function(){
+    try{
+      var token=localStorage.getItem('__mpa_token')||'';
+      var admin=new URLSearchParams(location.search).get('admin')||'';
+      var response=await fetch('/api/nhl/system-board?date_str='+encodeURIComponent(dt)
+        +'&system='+encodeURIComponent(system)+'&token='+encodeURIComponent(token)
+        +'&admin='+encodeURIComponent(admin),{credentials:'include',cache:'no-store'});
+      var data=await response.json();
+      if(!response.ok)throw new Error(data.detail||data.error||('HTTP '+response.status));
+      if(!data||data.date!==dt||String(data.system||'A').toUpperCase()!==system)
+        throw new Error('The saved board does not match the requested date and system.');
+      if(_frankBoardDate()!==dt||_frankBoardEpoch!==epoch){
+        _frankBoardState[key]={loading:false,error:''};
+        return null;
+      }
+      if(window.__NHL_SYSTEM_RESULTS_DATE__!==dt)window.__NHL_SYSTEM_RESULTS__={};
+      window.__NHL_SYSTEM_RESULTS_DATE__=dt;
+      window.__NHL_SYSTEM_RESULTS__[system]=data;
+      _frankBoardState[key]={loading:false,error:''};
+      return data;
+    }catch(error){
+      _frankBoardState[key]={loading:false,error:error.message||'Saved board could not be read.'};
+      throw error;
+    }finally{
+      delete _frankBoardRequests[key];
+      if(_frankBoardDate()===dt&&_frankBoardEpoch===epoch)_frankPaintSystemButtons();
+    }
+  })();
+  _frankBoardRequests[key]=request;
+  return request;
+}
 function _frankRawForSystem(system){
   system=String(system||'A').toUpperCase();
   var current=window.__NHL_RAW__||{};
+  if(!current.date)return null;
   if(!window.IS_ADMIN)return current;
   var currentDate=String(current.date||window.__NHL_DATE__||'');
   // The system currently rendered on screen is the authoritative Coach source.
@@ -5565,18 +5706,36 @@ function _frankPaintSystemButtons(){
     b.style.opacity=_frankRawForSystem(system)?'1':'.48';
   });
   var status=document.getElementById('frankAiSystemStatus');
+  var state=_frankBoardState[_frankBoardEpoch+'|'+_frankBoardDate()+'|'+window.NHL_FRANK_SYSTEM]||{};
   if(status)status.textContent=_frankRawForSystem(window.NHL_FRANK_SYSTEM)
-    ?_frankSystemLabel(window.NHL_FRANK_SYSTEM)+' loaded board'
-    :_frankSystemLabel(window.NHL_FRANK_SYSTEM)+' is not loaded — run A+B+C+D first';
+    ?_frankSystemLabel(window.NHL_FRANK_SYSTEM)+' loaded board · '+_frankBoardDate()
+    :state.loading?'Loading saved '+_frankSystemLabel(window.NHL_FRANK_SYSTEM)+' board…'
+    :state.error?'Saved '+_frankSystemLabel(window.NHL_FRANK_SYSTEM)+': '+state.error
+    :'Select '+_frankSystemLabel(window.NHL_FRANK_SYSTEM)+' to load its saved board.';
 }
-function _frankSetSystem(system){
+async function _frankSetSystem(system){
   if(!window.IS_ADMIN){window.NHL_FRANK_SYSTEM='A';return;}
   window.NHL_FRANK_SYSTEM=['A','B','C','D'].indexOf(system)>=0?system:'A';
+  var requested=window.NHL_FRANK_SYSTEM,dt=_frankBoardDate();
+  if(window.__NHL_ALT_COACH_ABORT__)window.__NHL_ALT_COACH_ABORT__.abort();
+  window.__NHL_ALT_COACH_ACTIVE__=false;
+  window.__FRANK_LAST_ROWS__=[];
   _frankPaintSystemButtons();
-  var raw=_frankRawForSystem(window.NHL_FRANK_SYSTEM)||window.__NHL_RAW__||{};
-  _frankLoadGames(raw.games||[]);
+  var raw=_frankRawForSystem(requested);
+  _frankLoadGames((raw&&raw.games)||[]);
   var answer=document.getElementById('frankAiAnswer');
   if(answer){answer.innerHTML='';answer.style.display='none';}
+  if(raw)return;
+  try{
+    raw=await _frankEnsureSystemBoard(requested);
+    if(!raw||window.NHL_FRANK_SYSTEM!==requested||_frankBoardDate()!==dt)return;
+    _frankLoadGames(raw.games||[]);
+    _frankPaintSystemButtons();
+  }catch(error){
+    if(window.NHL_FRANK_SYSTEM!==requested||_frankBoardDate()!==dt)return;
+    _frankCommit('<div class="frank-ai-summary">'+_frankEsc(error.message)
+      +'<br>Select this source again to retry loading the saved board. No picks were rerun.</div>');
+  }
 }
 function _frankLoadGames(games){
   var sel=document.getElementById('frankAiGame');if(!sel)return;
@@ -5634,7 +5793,7 @@ function _frankAllProps(){
         ?Number(p.underConfidence||p.underRate||p.underRateAny||p.underRateVo||0)
         :Number(p.dispScore||p.ptsScore||p.score||0);
       var implied=_frankImplied(odds);
-      if(line==null||implied==null||!isFinite(appProb)||appProb<=0)return;
+      if(line==null||implied==null||_frankNumber(odds)<-1000||!isFinite(appProb)||appProb<=0)return;
       appProb=Math.max(0,Math.min(100,appProb));
       var edge=appProb-implied;
       var key=String(p.pid||p.name)+'|'+market+'|'+side+'|'+line+'|'+odds;
@@ -5642,7 +5801,7 @@ function _frankAllProps(){
       out.push({
         player:p.name,team:p.team||'',opponent:p.opponent||'',market:market,
         marketKey:_frankMarketKey(market),side:side,line:Number(line),odds:Number(odds),
-        book:p.lineSource||'',appProb:appProb,implied:implied,edge:edge,
+        book:_nhlBookName(p,side),appProb:appProb,implied:implied,edge:edge,
         projection:p.proj!=null?Number(p.proj):null,
         projectionEdge:p.projEdge!=null?Number(p.projEdge):null,
         recentRate:Number(p.rateB||p.step3Rate||p.pts3Rate||p.vsLineRate||0),
@@ -5727,7 +5886,7 @@ function _frankPaintParlay(message){
     return '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 0;border-bottom:1px solid #283043;font-size:.73rem">'
       +'<span><b>'+String(i+1)+'. '+_nhlSafe(p.player)+'</b> · '+_nhlSafe(p.team)
       +' · '+_nhlSafe(p.market)+' '+_nhlSafe(p.side)+' '+_nhlSafe(p.line)+'</span>'
-      +'<span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="white-space:nowrap;color:#86efac">'+_nhlSafe(am)+' · +'+p.edge.toFixed(1)+'% edge</span>'
+      +'<span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="white-space:nowrap;color:#86efac">'+_nhlSafe(am)+' · +'+p.edge.toFixed(1)+'% edge'+_nhlBookBadge(p)+'</span>'
       +'<button type="button" onclick="_frankReplaceParlayLeg('+i+')" aria-label="Generate new pick for '+_nhlSafe(p.player)+'" title="Generate a new pick for this leg" style="cursor:pointer;background:#312e81;color:#fff;border:1px solid #7c3aed;border-radius:6px;padding:5px 8px;font-size:.7rem;font-weight:800">↻ New pick</button></span></div>';
   }).join('');
   out.innerHTML=(message?'<div role="status" style="color:#fbbf24;font-size:.72rem;margin-bottom:6px">'+_nhlSafe(message)+'</div>':'')
@@ -5866,7 +6025,7 @@ function _frankAccordions(p){
     +'<details><summary>Odds Comparison</summary><div class="frank-ai-accord-body"><div class="frank-ai-stat-grid">'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Selected side</div><div class="frank-ai-stat-v">'+p.side+' '+_frankOdds(p.odds)+' · '+p.implied.toFixed(1)+'% implied</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Other side</div><div class="frank-ai-stat-v">'+(opposite!=null?otherSide+' '+_frankOdds(opposite)+' · '+oppositeImplied.toFixed(1)+'% implied':'N/A')+'</div></div>'
-    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Source</div><div class="frank-ai-stat-v">'+_frankEsc(p.book||'Sportsbook line')+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Sportsbook</div><div class="frank-ai-stat-v">'+_frankEsc(_nhlBookName(p)||'Book unavailable')+'</div></div>'
     +'</div><div style="margin-top:7px">Only prices carried by the loaded NHL prop are shown. This is not a full multi-book screen unless the source provides those books.</div></div></details>'
     +'<details open><summary>Hit Rate Chart</summary><div class="frank-ai-accord-body">'+_frankSplitTiles(p)+'</div></details>'
     +'<details><summary>Line Movement</summary><div class="frank-ai-accord-body">Line movement is unavailable because the NHL app does not yet store timestamped opening and closing prices. No movement or sharp-money claim is generated.</div></details>'
@@ -5897,7 +6056,7 @@ function _frankRender(question,rows,totalPriced,mode){
     var sys=window.IS_ADMIN?'<span class="frank-ai-system-tag" style="color:#fb923c">'+_frankEsc(p.poolTag||((p.system||'A')+' T10'))+'</span>':'';
     return '<tr><td>'+(i+1)+'</td><td><button type="button" class="frank-ai-player-link" onclick="_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button>'+sys+'<br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span></td>'
       +'<td>'+_frankEsc(p.market)+'<br><b style="color:'+(p.side==='OVER'?'#4ade80':'#f87171')+'">'+p.side+' '+p.line+'</b></td>'
-      +'<td>'+_frankOdds(p.odds)+'</td><td>'+p.appProb.toFixed(1)+'%</td><td>'+p.implied.toFixed(1)+'%</td>'
+      +'<td>'+_frankOdds(p.odds)+_nhlBookBadge(p)+'</td><td>'+p.appProb.toFixed(1)+'%</td><td>'+p.implied.toFixed(1)+'%</td>'
       +'<td class="frank-ai-edge" style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'!important">'+_frankSigned(p.edge)+' pts</td></tr>';
   }).join('');
   var detail=rows.map(function(p,i){
@@ -5925,7 +6084,7 @@ function _frankRender(question,rows,totalPriced,mode){
       + '<div class="frank-ai-metric-grid">'
       + '<div class="frank-ai-metric">'
       + '<div class="frank-ai-metric-val" style="color:#fbbf24">'+_frankOdds(p.odds)+'</div>'
-      + '<div class="frank-ai-metric-lbl">Odds</div>'
+      + '<div class="frank-ai-metric-lbl">Odds'+_nhlBookBadge(p)+'</div>'
       + '</div>'
       + '<div class="frank-ai-metric">'
       + '<div class="frank-ai-metric-val" style="color:#e2e8f0">'+p.appProb.toFixed(1)+'%</div>'
@@ -6012,10 +6171,23 @@ async function askNhlAltCoach(){
     if(btn){btn.disabled=false;btn.textContent='Best Alt-Line Edge Plays · Top 10';}
   }
 }
-function askFrank(){
+async function askFrank(){
   var input=document.getElementById('frankAiInput');
   var question=String(input&&input.value||'').trim();
   if(!question){if(input)input.focus();return;}
+  var requested=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A',dt=_frankBoardDate();
+  if(!window.__NHL_ALT_COACH_ACTIVE__&&!_frankRawForSystem(requested)){
+    try{
+      _frankCommit('<div class="frank-ai-summary">Loading the saved '+_frankEsc(requested)+' board. No model rerun is needed.</div>');
+      var saved=await _frankEnsureSystemBoard(requested);
+      if(!saved||window.NHL_FRANK_SYSTEM!==requested||_frankBoardDate()!==dt)return;
+      _frankLoadGames(saved.games||[]);
+    }catch(error){
+      if(window.NHL_FRANK_SYSTEM===requested&&_frankBoardDate()===dt)
+        _frankCommit('<div class="frank-ai-summary">'+_frankEsc(error.message)+'<br>Click Analyze again to retry the saved-board read.</div>');
+      return;
+    }
+  }
   var categoryEl=document.getElementById('frankAiCategory'),category=categoryEl?categoryEl.value:'';
   var gameEl=document.getElementById('frankAiGame'),game=gameEl?gameEl.value:'';
   var selectedSide=window.NHL_FRANK_SIDE||'';
@@ -6024,7 +6196,7 @@ function askFrank(){
   if(!props.length){
     var el=document.getElementById('frankAiAnswer');
     if(el){
-      _frankCommit('<div><div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">Load an NHL board with Get Picks first. The Edge Coach only analyzes generated props that have real sportsbook prices.</div></div></div>');
+      _frankCommit('<div><div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">'+_frankEsc(_frankSystemLabel(requested))+' board is loaded for '+_frankEsc(dt)+', but has no priced props available for this Coach analysis. This is not a missing-board message.</div></div></div>');
     }
     return;
   }
@@ -6226,6 +6398,7 @@ async function runAllNhlSystems(){
       if(st)st.textContent=data.message||('No NHL games scheduled for '+dt+'.');
       return;
     }
+    _frankBoardEpoch++;
     window.__NHL_SYSTEM_RESULTS__={};
     window.__NHL_SYSTEM_RESULTS_DATE__=data.date||dt;
     _frankPaintSystemButtons();
@@ -6408,14 +6581,29 @@ function _rateHtml(rate,hits,tot){
   if(!tot) return '<span class="gray">—</span>';
   return '<span class="'+rateClass(rate)+'">'+hits+'/'+tot+' ('+rate+'%)</span>';
 }
-function _nhlLineSourceBadge(p){
+function _nhlBookName(p,side){
+  side=String(side||p.side||p.pick||'OVER').toUpperCase();
+  var name=p[side==='UNDER'?'under_book':'over_book']||(side==='OVER'?p.odds_book:'')||'';
+  if(!name&&(!p.side||String(p.side).toUpperCase()===side))name=p.book||'';
+  name=String(name).trim();
+  return /^(oddsapi|odds api|the odds api|historical odds api|oddsapi \\(alternate\\)|historical odds api \\(alternate\\)|book|model|simulation|no book line)$/i.test(name)?'':name;
+}
+function _nhlBookBadge(p,side){
+  side=String(side||p.side||p.pick||'OVER').toUpperCase();
+  var value=p.odds!=null?p.odds:p[side==='UNDER'?'realUnderOdds':'realOdds'];
+  var priced=value!=null&&String(value).trim()!==''&&Number(value)!==0;
+  return '<span style="display:block;font-size:.65rem;color:#93c5fd;font-weight:800;line-height:1.5">'
+    +_nhlEsc(priced?(_nhlBookName(p,side)||'Book unavailable'):'MODEL · UNPRICED')+'</span>';
+}
+function _nhlLineSourceBadge(p,side){
+  var book=_nhlBookBadge(p,side);
   if(p.lineSource==='Historical Odds API'){
-    return '<span style="margin-left:5px;padding:2px 5px;border-radius:4px;background:rgba(59,130,246,.18);color:#93c5fd;font-size:.55rem;font-weight:900;letter-spacing:.05em">ARCHIVED</span>';
+    return book+'<span style="margin-left:5px;padding:2px 5px;border-radius:4px;background:rgba(59,130,246,.18);color:#93c5fd;font-size:.55rem;font-weight:900;letter-spacing:.05em">ARCHIVED</span>';
   }
   if(p.lineSource==='Simulation'||p.lineSource==='Model'||p.lineSource==='No book line'){
     return '<span style="margin-left:5px;color:#94a3b8;font-size:.6rem;font-weight:800">MODEL · UNPRICED</span>';
   }
-  return '';
+  return book;
 }
 function _nhlLineupBadge(p){
   if(p.lineupStatus==='STARTER_CONFIRMED')
@@ -6459,7 +6647,7 @@ function nhlCard(p,i){
   var head='https://assets.nhle.com/mugs/nhl/'+season+'/'+p.team+'/'+p.pid+'.png';
   var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
   var lineHtml=(p.realLine!=null)
-    ? `<span class="ln">${p.dispLine}</span> <span class="od">${p.realOdds||''}</span>${_nhlLineSourceBadge(p)}`
+    ? `<span class="ln">${p.dispLine}</span> <span class="od">${p.realOdds||''}</span>${_nhlLineSourceBadge(p,'OVER')}`
     : `<span class="est">MODEL ${p.dispLine} · NO BOOK LINE</span>`;
   return `
    <div class="pick-card ${_accFor(p.mkt)}">
@@ -6510,7 +6698,7 @@ function nhlUnderCard(p,i){
   var head='https://assets.nhle.com/mugs/nhl/'+season+'/'+p.team+'/'+p.pid+'.png';
   var logo='https://assets.nhle.com/logos/nhl/svg/'+p.team+'_light.svg';
   var lineHtml=(p.realLine!=null)
-    ? `<span class="ln">U ${p.dispLine}</span> <span class="od">${p.realUnderOdds||''}</span>${_nhlLineSourceBadge(p)}`
+    ? `<span class="ln">U ${p.dispLine}</span> <span class="od">${p.realUnderOdds||''}</span>${_nhlLineSourceBadge(p,'UNDER')}`
     : `<span class="est">MODEL UNDER ${p.dispLine} · NO BOOK LINE</span>`;
   var voHtml=p.underTotVo?`<span class="${underClass(p.underRateVo)}">${p.underHitsVo}/${p.underTotVo} (${p.underRateVo}%)</span>`:'<span class="gray">—</span>';
   var anHtml=p.underTotAny?`<span class="${underClass(p.underRateAny)}">${p.underHitsAny}/${p.underTotAny} (${p.underRateAny}%)</span>`:'<span class="gray">—</span>';
@@ -6791,7 +6979,7 @@ function renderNhlGamePredictor(preds){
     var mlRow='';
     if(g.homeMl!=null&&g.awayMl!=null){
       var hs=g.homeMl>=0?'+':'', as_=g.awayMl>=0?'+':'';
-      mlRow='<div class="gp-ml-row"><span>'+g.awayTeam+' ML: '+as_+g.awayMl+'</span><span>'+g.homeTeam+' ML: '+hs+g.homeMl+'</span></div>';
+      mlRow='<div class="gp-ml-row"><span>'+g.awayTeam+' ML: '+as_+g.awayMl+_nhlBookBadge({odds:g.awayMl,book:g.awayMlBook})+'</span><span>'+g.homeTeam+' ML: '+hs+g.homeMl+_nhlBookBadge({odds:g.homeMl,book:g.homeMlBook})+'</span></div>';
     }
     h+='<div class="gp-card">'
       +'<div class="gp-head"><span class="gp-mu">'+g.awayTeam+' <span style="color:#4b5563;font-weight:400">@</span> '+g.homeTeam+'</span><span class="gp-time">'+t+'</span></div>'
@@ -6806,7 +6994,7 @@ function renderNhlGamePredictor(preds){
       +'</div>'
       +'<div class="gp-totals">'
         +'<div class="gp-tbox"><div class="gk">Proj Total</div><div class="gv">'+(g.projTotal==null?'—':g.projTotal)+'</div></div>'
-        +'<div class="gp-tbox ou-book"><div class="gk">Book O/U</div><div class="gv" style="color:#9ca3af">'+(g.bookTotal==null?'—':g.bookTotal)+'</div></div>'
+        +'<div class="gp-tbox ou-book"><div class="gk">Book O/U</div><div class="gv" style="color:#9ca3af">'+(g.bookTotal==null?'—':g.bookTotal)+'</div>'+_nhlBookBadge({odds:g.overOdds!=null?g.overOdds:g.underOdds,book:g.totBook})+'</div>'
         +'<div class="gp-tbox '+ouClass+'"><div class="gk">O/U Pick</div><div class="gv">'+ouLbl+'</div></div>'
       +'</div>'
       +'<div class="gp-history-note">'+(g.projTotal==null?'Prior-season venue scoring unavailable; no total projected.'
@@ -6906,7 +7094,7 @@ function buildPtsTable(picks, startNum){
       '<td><span class="tbadge">' + p.team + '</span></td>' +
       '<td><span class="tbadge">' + p.opponent + '</span></td>' +
       '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
-      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~0.5</span>') + '</td>' +
+      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~0.5</span>') + _nhlBookBadge(p,'OVER') + '</td>' +
       '<td><span class="gold">' + p.ptsOppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ptsHa10avg + '</span></td>' +
       '<td>' + fmtVsLine(p) + '</td>' +
@@ -6934,7 +7122,7 @@ function buildTable(picks, startNum){
       '<td><span class="tbadge">' + p.team + '</span></td>' +
       '<td><span class="tbadge">' + p.opponent + '</span></td>' +
       '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
-      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.estLine + '</span>') + '</td>' +
+      '<td>' + (p.realLine ? '<span class="real-line">' + p.realLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.estLine + '</span>') + _nhlBookBadge(p,'OVER') + '</td>' +
       '<td><span class="gold">' + p.oppAvg + '</span></td>' +
       '<td><span class="gold">' + p.ha10avg + '</span></td>' +
       '<td>' + fmtVsLine(p) + '</td>' +
@@ -6962,7 +7150,7 @@ function buildNormTable(picks, startNum){
       '<td><span class="tbadge">' + p.team + '</span></td>' +
       '<td><span class="tbadge">' + p.opponent + '</span></td>' +
       '<td><span class="' + (ha ? 'home' : 'away') + '">' + (ha ? 'HOME' : 'AWAY') + '</span></td>' +
-      '<td>' + (p.realLine!=null ? '<span class="real-line">' + p.dispLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.dispLine + '</span>') + '</td>' +
+      '<td>' + (p.realLine!=null ? '<span class="real-line">' + p.dispLine + '</span> <span class="odds-txt">' + (p.realOdds||'') + '</span>' : '<span class="est">~' + p.dispLine + '</span>') + _nhlBookBadge(p,'OVER') + '</td>' +
       '<td><span class="gold">' + p.avgA + '</span></td>' +
       '<td><span class="gold">' + p.avg + '</span></td>' +
       '<td>' + fmtVsLine(p) + '</td>' +
@@ -7401,7 +7589,7 @@ function _nhlBetBtn(p,forceSide){
   window.__NHL_BET_SRC__[k]={
     name:p.name,pid:(p.pid!=null?String(p.pid):''),team:(p.team||''),opp:(p.opponent||''),
     category:mk[1],side:side,stat_key:mk[0],stat_label:mk[1],
-    line:p.realLine,odds:(odds!=null?odds:null),date:(window.__NHL_DATE__||'')
+    line:p.realLine,odds:(odds!=null?odds:null),book:_nhlBookName(p,side),date:(window.__NHL_DATE__||'')
   };
   return '<button data-betkey="'+k+'" class="admin-only" onclick="event.stopPropagation();_nhlBetForm(this.dataset.betkey)" style="background:#0e7490;color:#fff;border:none;border-radius:8px;padding:6px 10px;font-size:.7rem;font-weight:800;cursor:pointer">Track Bet</button>';
 }
@@ -7421,7 +7609,7 @@ function _nhlBetForm(key){
       <div>
         <div style="font-weight:800;color:#fff;font-size:1.02rem">${_nhlEsc(src.name)}</div>
         <div style="color:#67e8f9;font-size:.82rem;font-weight:800;margin-top:2px">${_nhlEsc(pickTxt)}</div>
-        <div style="color:#94a3b8;font-size:.72rem;margin-top:2px">${_nhlEsc(src.category||'')}${src.opp?' &middot; vs '+_nhlEsc(src.opp):''}${src.date?' &middot; '+src.date:''}</div>
+        <div style="color:#94a3b8;font-size:.72rem;margin-top:2px">${_nhlEsc(src.category||'')}${src.opp?' &middot; vs '+_nhlEsc(src.opp):''}${src.date?' &middot; '+src.date:''}${_nhlBookBadge(src,src.side)}</div>
       </div>
       <button onclick="document.getElementById('nhl-bet-modal').style.display='none'" style="background:#1e293b;border:none;color:#cbd5e1;width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:1rem">&#215;</button>
     </div>
@@ -7454,7 +7642,7 @@ async function _nhlSaveBet(){
   if(!isFinite(s)||s<=0){msg.textContent='Enter a bet size greater than 0.';return;}
   var btn=document.getElementById('nhl-bet-save');btn.disabled=true;btn.textContent='Saving\u2026';
   try{
-    var body=Object.assign({},src,{odds:Math.round(o),stake:s,placed_at:new Date().toISOString()});
+    var body=Object.assign({},src,{odds:Math.round(o),book:Number(src.odds)===Math.round(o)?src.book:'',stake:s,placed_at:new Date().toISOString()});
     var res=await fetch('/api/bets'+_nhlBetAuthQS(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!res.ok){throw new Error(await res.text());}
     document.getElementById('nhl-bet-modal').style.display='none';
@@ -7523,7 +7711,7 @@ function renderNhlMyBets(d){
       +'<td style="white-space:nowrap;color:#94a3b8;font-family:monospace;font-size:.76rem">'+(b.date||'')+'</td>'
       +'<td style="font-weight:600">'+_nhlEsc(b.name||'')+'<div style="font-size:.68rem;color:#64748b">'+_nhlEsc(b.category||'')+'</div></td>'
       +'<td style="font-size:.82rem">'+_nhlEsc(pk)+'</td>'
-      +'<td style="font-family:monospace">'+_nhlBetOddsDisp(b.odds)+'</td>'
+      +'<td style="font-family:monospace">'+_nhlBetOddsDisp(b.odds)+_nhlBookBadge(b)+'</td>'
       +'<td style="font-family:monospace">'+_nhlMoney(b.stake)+'</td>'
       +'<td style="font-weight:800;color:'+_nhlResColor(res)+'">'+(res==='pending'?'pending':res)+actTxt+'</td>'
       +'<td style="font-family:monospace;font-weight:700;color:'+((b.profit||0)>=0?'#4ade80':'#f87171')+'">'+(b.profit!=null?_nhlMoney(b.profit):'\u2014')+'</td>'
@@ -7544,12 +7732,12 @@ async function _nhlDeleteBet(id){
 }
 function downloadNhlMyBetsCSV(){
   var d=window.__NHL_MYBETS__;if(!d){alert('Open My Bets first.');return;}
-  var rows=[['Date','Player','Team','Category','Side','Pick','Odds','Stake','Result','Actual','Profit']];
+  var rows=[['Date','Player','Team','Category','Side','Pick','Odds','Stake','Result','Actual','Profit','Sportsbook']];
   (d.bets||[]).forEach(function(b){
     rows.push([b.date||'',b.name||'',b.team||'',b.category||'',b.side||'',
       b.side+' '+b.line+' '+(b.stat_label||''),
       b.odds!=null?b.odds:'',b.stake!=null?b.stake:'',
-      b.result||'',b.actual!=null?b.actual:'',b.profit!=null?b.profit:'']);
+      b.result||'',b.actual!=null?b.actual:'',b.profit!=null?b.profit:'',_nhlBookName(b)]);
   });
   function _c(v){var sv=String(v==null?'':v);if(/[,"\\n]/.test(sv))sv='"'+sv.replace(/"/g,'""')+'"';return sv;}
   var csv=rows.map(function(r){return r.map(_c).join(',');}).join('\\r\\n');
@@ -7962,7 +8150,7 @@ function renderNhlOverflowDay(){
           +'<td style="color:#f8fafc;font-weight:850;font-size:.82rem">'+r.name+'</td>'
          +'<td style="color:#94a3b8;font-weight:800">'+r.team+'</td>'
           +'<td style="color:#e2e8f0;font-weight:800">'+(r.side||'')+(r.line!=null?' '+r.line:(r.model_line!=null?' model '+r.model_line:' —'))+'</td>'
-         +'<td style="font-family:monospace;color:#cbd5e1;font-weight:700">'+odds+'</td>'
+         +'<td style="font-family:monospace;color:#cbd5e1;font-weight:700">'+odds+_nhlBookBadge(r,side)+'</td>'
          +'<td style="color:#cbd5e1;font-weight:700">'+((r.actual!=null)?r.actual:'—')+'</td>'
          +'<td><span class="nhl-trk-result '+resultClass+'">'+result+'</span></td>'
          +'<td style="font-family:monospace;font-weight:900;color:'+plColor+'">'+(rowProfit!=null?money(rowProfit):'—')+'</td>'
@@ -7974,7 +8162,7 @@ function renderNhlOverflowDay(){
        +'<span class="nhl-trk-group-kicker">Category</span><span class="nhl-trk-group-name">'+cat+'</span><span class="nhl-trk-group-side">'+side+'</span></div>'
         +'<div class="nhl-trk-group-summary"><span>'+meta+'</span><span class="nhl-trk-group-rate">'+(rate!=null?rate.toFixed(1)+'%':'—')+'</span><span class="nhl-trk-group-pl" style="color:'+(pl>=0?'#4ade80':'#f87171')+'">'+money(pl)+'</span><span class="nhl-trk-group-toggle" aria-hidden="true">+</span></div></summary>'
        +'<div class="nhl-trk-table-scroll"><table class="nhl-trk-tbl"><thead><tr>'
-       +(showRank?'<th>Rank</th>':'')+'<th>Player</th><th>Team</th><th>Pick</th><th>Odds</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Note</th>'
+       +(showRank?'<th>Rank</th>':'')+'<th>Player</th><th>Team</th><th>Pick</th><th>Odds / Book</th><th>Actual</th><th>Result</th><th>P/L</th><th>Line / Note</th>'
          +'</tr></thead><tbody>'+rows+'</tbody></table></div>'
          +(showRankStats?_nhlRankStatsHtml(list,stake):'')+'</details>';
    }
@@ -8071,7 +8259,7 @@ function _nhlGpInitialFromTrack(d){
         pick:p.pickTeam||'',pick_prob:p.pickProb,win_prob_home:p.winProbHome!=null?p.winProbHome*100:null,
         proj_home:p.projHome,proj_away:p.projAway,proj_total:p.projTotal,
         book_total:p.bookTotal,total_pick:p.ouRec,home_ml:p.homeMl,away_ml:p.awayMl,
-        ml_book:p.mlBook||'',total_book:p.totBook||'',actual_home:p.actualHome,actual_away:p.actualAway,
+        ml_book:p.mlBook||'',home_ml_book:p.homeMlBook||'',away_ml_book:p.awayMlBook||'',total_book:p.totBook||'',actual_home:p.actualHome,actual_away:p.actualAway,
         actual_total:p.actualTotal,team_result:p.mlResult,ou_result:p.ouResult,start_time:p.startTime||''
       };
     });
@@ -8129,8 +8317,8 @@ function _nhlGpGamesHtml(games){
     var total=(g.total_pick&&g.book_total!=null)?g.total_pick+' '+g.book_total:'No total call';
     return '<tr><td style="color:#e2e8f0;font-weight:800">'+g.away_abbr+' @ '+g.home_abbr+'</td>'
       +'<td style="color:#94a3b8">'+final+'</td><td style="color:#cbd5e1">'+(g.pick||'—')
-      +(g.pick_prob!=null?' ('+g.pick_prob+'%)':'')+(mlOdds!=null?' · '+(mlOdds>0?'+':'')+mlOdds:'')+'</td>'
-      +'<td>'+_nhlGpResult(g.team_result)+'</td><td style="color:#cbd5e1">'+total+'</td>'
+      +(g.pick_prob!=null?' ('+g.pick_prob+'%)':'')+(mlOdds!=null?' · '+(mlOdds>0?'+':'')+mlOdds:'')+_nhlBookBadge({odds:mlOdds,book:g.pick===g.home_abbr?g.home_ml_book:g.away_ml_book})+'</td>'
+      +'<td>'+_nhlGpResult(g.team_result)+'</td><td style="color:#cbd5e1">'+total+'<span style="display:block;font-size:.65rem;color:#93c5fd">'+_nhlEsc(g.book_total==null?'MODEL · UNPRICED':(_nhlBookName({book:g.total_book})||'Book unavailable'))+'</span></td>'
       +'<td style="color:#94a3b8">'+(g.actual_total!=null?g.actual_total:'—')+'</td><td>'+_nhlGpResult(g.ou_result)+'</td></tr>';
   }).join('');
   return '<div style="overflow-x:auto"><table class="nhl-trk-tbl"><thead><tr><th>Matchup</th><th>Final</th><th>ML Pick</th><th>ML</th><th>Total Call</th><th>Total</th><th>O/U</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
@@ -8446,7 +8634,7 @@ function renderNhlCoachTrack(){
   rows.forEach(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0';if(r==='WIN'){w++;if(hasPrice){priced++;net+=_nhlCalcProfit(x.odds,stake,r)}}else if(r==='LOSS'){l++;if(hasPrice){priced++;net-=stake}}else if(r==='PUSH')p++;else if(r==='VOID')v++;else pend++;});
   if(!canonical||k==='All Coach Edge Plays · uncapped'||k==='Alternate-Line Coach'){tw+=w;tl+=l;tp+=p;tv+=v;tnet+=net;tpriced+=priced;}
   var rate=w+l?100*w/(w+l):null,roi=priced?100*net/(priced*stake):null;
-  var trs=rows.map(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0',pl=(hasPrice&&(r==='WIN'||r==='LOSS'))?_nhlCalcProfit(x.odds,stake,r):null,ap=x.app_probability==null?'—':(Number(x.app_probability)*100).toFixed(1)+'%',ip=x.implied_probability==null?'—':(Number(x.implied_probability)*100).toFixed(1)+'%',ed=x.coach_edge==null?'—':Number(x.coach_edge).toFixed(1)+' pts';return '<tr><td>'+_nhlEsc(x.date)+'</td><td><b>'+_nhlEsc(x.name)+'</b><br><small>'+_nhlEsc(x.team||'')+'</small></td><td>'+_nhlEsc(x.category)+'<br><b>'+_nhlEsc(x.side)+' '+_nhlEsc(x.line)+'</b></td><td>'+(hasPrice?_nhlEsc(x.odds):'—')+'<br><small>'+_nhlEsc(x.book||'')+'</small></td><td>'+_nhlEsc(x.actual)+'</td><td style="color:'+(r==='WIN'?'#4ade80':r==='LOSS'?'#f87171':'#fbbf24')+'">'+r+'<br><small>'+(pl==null?'—':_nhlMoney(pl))+'</small></td><td><small>App '+ap+'<br>Implied '+ip+'<br>Edge '+ed+'</small></td></tr>';}).join('');
+  var trs=rows.map(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0',pl=(hasPrice&&(r==='WIN'||r==='LOSS'))?_nhlCalcProfit(x.odds,stake,r):null,ap=x.app_probability==null?'—':(Number(x.app_probability)*100).toFixed(1)+'%',ip=x.implied_probability==null?'—':(Number(x.implied_probability)*100).toFixed(1)+'%',ed=x.coach_edge==null?'—':Number(x.coach_edge).toFixed(1)+' pts';return '<tr><td>'+_nhlEsc(x.date)+'</td><td><b>'+_nhlEsc(x.name)+'</b><br><small>'+_nhlEsc(x.team||'')+'</small></td><td>'+_nhlEsc(x.category)+'<br><b>'+_nhlEsc(x.side)+' '+_nhlEsc(x.line)+'</b></td><td>'+(hasPrice?_nhlEsc(x.odds):'—')+_nhlBookBadge(x,x.side)+'</td><td>'+_nhlEsc(x.actual)+'</td><td style="color:'+(r==='WIN'?'#4ade80':r==='LOSS'?'#f87171':'#fbbf24')+'">'+r+'<br><small>'+(pl==null?'—':_nhlMoney(pl))+'</small></td><td><small>App '+ap+'<br>Implied '+ip+'<br>Edge '+ed+'</small></td></tr>';}).join('');
   html+='<details style="border:1px solid #26334a;border-radius:10px;margin:8px 0;background:#0f172a"><summary style="cursor:pointer;padding:13px;color:#fff"><b>'+_nhlEsc(k)+'</b><span style="float:right;color:#94a3b8">'+w+'W · '+l+'L'+(p?' · '+p+'P':'')+(v?' · '+v+'V':'')+(pend?' · '+pend+' pending':'')+' · '+(rate==null?'—':rate.toFixed(1)+'%')+' · <b style="color:'+(net>=0?'#4ade80':'#f87171')+'">'+_nhlMoney(net)+'</b> · '+(roi==null?'—':roi.toFixed(1)+'% ROI')+'</span></summary><div style="overflow-x:auto"><table class="trk-tbl"><thead><tr><th>Date</th><th>Player</th><th>Market</th><th>Odds/Book</th><th>Actual</th><th>Result/P&L</th><th>Probabilities</th></tr></thead><tbody>'+trs+'</tbody></table></div></details>';
  });
  var troi=tpriced?100*tnet/(tpriced*stake):null;if(sum)sum.innerHTML='<div class="trk-summary"><b>'+tw+'W · '+tl+'L'+(tp?' · '+tp+'P':'')+(tv?' · '+tv+' VOID':'')+'</b> · Net <b style="color:'+(tnet>=0?'#4ade80':'#f87171')+'">'+_nhlMoney(tnet)+'</b> · '+(troi==null?'—':troi.toFixed(1)+'% ROI')+'</div>';
@@ -8982,6 +9170,7 @@ def _nhl_save_picks_snapshot(
                 "team": p.get("team", ""), "category": cat,
                 "stat_key": sk, "side": side, "line": line,
                 "odds": odds,
+                "book": _nhl_side_book(p, side),
                 "coach_line": p.get("realLine"),
                 "coach_probability": (
                     p.get("underConfidence") or p.get("underRate")
@@ -9089,6 +9278,7 @@ def _nhl_save_gp_snapshot(date_str: str, result: dict):
             "bookTotal": p.get("bookTotal"), "ouRec": p.get("ouRec"),
             "homeMl": p.get("homeMl"), "awayMl": p.get("awayMl"),
             "totBook": p.get("totBook", ""), "mlBook": p.get("mlBook", ""),
+            "homeMlBook": p.get("homeMlBook", ""), "awayMlBook": p.get("awayMlBook", ""),
         })
     ok = _nhl_sb_upsert("mpa_track_ledger", [{
         "app": _NHL_TRK_APP, "date": date_str, "category": _NHL_GP_CAT,
@@ -9261,6 +9451,8 @@ def _nhl_gp_record_payload() -> dict:
                 "home_ml": p.get("homeMl"),
                 "away_ml": p.get("awayMl"),
                 "ml_book": p.get("mlBook", ""),
+                "home_ml_book": p.get("homeMlBook", ""),
+                "away_ml_book": p.get("awayMlBook", ""),
                 "total_book": p.get("totBook", ""),
                 "actual_home": p.get("actualHome"),
                 "actual_away": p.get("actualAway"),
@@ -9438,6 +9630,7 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
             row = {"name": p.get("name",""), "team": p.get("team",""),
                    "category": cat, "side": side, "stat_key": sk,
                    "line": line_raw, "odds": odds, "rank": rank,
+                   "book": p.get("book", ""),
                    "result": result_val, "actual": actual, "profit": profit}
             row["is_overflow"] = bool(is_ovf)
             if not is_ovf:
@@ -9777,6 +9970,7 @@ async def nhl_add_bet(request: Request, token: str = "", admin: str = ""):
            "side": side, "stat_key": stat_key,
            "stat_label": (body.get("stat_label") or _NHL_STAT_LABEL.get(stat_key, "")).strip(),
            "line": line, "odds": odds, "stake": stake,
+           "book": _nhl_side_book(body, side),
            "placed_at": (body.get("placed_at") or date.today().isoformat()),
            "result": "pending", "actual": None, "profit": None, "settled_at": None}
     try:
