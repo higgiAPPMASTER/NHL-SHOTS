@@ -5774,7 +5774,7 @@ function _frankMarketKey(market){
 }
 function _frankAllProps(){
   var sourceSystem=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
-  var raw=_frankRawForSystem(sourceSystem)||{};
+  var raw=_nhlUpcomingBoard(_frankRawForSystem(sourceSystem)||{});
   var defs=[
     ['picks','OVER',false],['rest','OVER',true],['ptsPicks','OVER',false],['ptsRest','OVER',true],
     ['ppPicks','OVER',false],['ppRest','OVER',true],['astPicks','OVER',false],['astRest','OVER',true],
@@ -6195,6 +6195,8 @@ async function askFrank(){
   var selectedSide=window.NHL_FRANK_SIDE||'';
   var props=window.__NHL_ALT_COACH_ACTIVE__
     ?(window.__NHL_ALT_COACH_ROWS__||[]):_frankAllProps();
+  var liveRaw=_frankRawForSystem(requested)||{};
+  props=props.filter(function(p){return _nhlRowUpcoming(p.source||p,liveRaw);});
   if(!props.length){
     var el=document.getElementById('frankAiAnswer');
     if(el){
@@ -6578,6 +6580,7 @@ function _sigBadges(p,hideForm){
   return out?'<div class="sig-row">'+out+'</div>':'';
 }
 function _nhlFormBadge(p,side){
+  if(p.savedSnapshot&&p.hotTotal==null)return '';
   if(p.hotTotal<3)return '';
   var hits=Number(p.hotHits||0),total=Number(p.hotTotal||0);
   var under=side==='UNDER';
@@ -6621,6 +6624,7 @@ function _nhlLineupBadge(p){
     ?'<span style="color:#fbbf24;font-size:.64rem;font-weight:800"> · ROSTER — UNCONFIRMED</span>':'';
 }
 function _nhlQualText(p){
+  if(p.savedSnapshot)return 'Original selection; split history and projection details were not stored.';
   var m=String(p.mkt||'');
   var threshold=m==='Points (1+)'?60:(m==='Power Play Points (1+)'?50:(m==='Assists (1+)'?60:(m==='Goals (1+)'?50:(m==='Goalie Saves'?55:70))));
   var ha=p.homeRoad==='H'?'Home':'Away';
@@ -6642,6 +6646,7 @@ function _nhlQualText(p){
   return _nhlEsc(basis)+': '+hits+'/'+total+' ('+rate+'%) ≥ '+threshold+'%'+_nhlEsc(note+ppNote);
 }
 function _nhlUnderWhy(p){
+  if(p.savedSnapshot)return 'Original selection; split history and projection details were not stored.';
   var basis=p.underBasis||'L10 Home/Away';
   var ppNote=(String(p.mkt||'')==='Power Play Points (1+)'&&p.ppUsageGames!=null)
     ?' · PP role '+p.ppUsageGames+'/'+(p.ppUsageTotal||10)+' recent games':'';
@@ -6670,7 +6675,7 @@ function _nhlSavedPickCard(p,i){
     +'<span>'+_nhlBetBtn(p,side)+'</span></div></div>';
 }
 function nhlCard(p,i){
-  if(p.savedSnapshot)return _nhlSavedPickCard(p,i);
+  if(p.savedSnapshot&&p.savedSide==='UNDER')return nhlUnderCard(p,i);
   var season=(window.__NHL_SEASON__||'20252026');
   var key=_ladKey(p); window.__NHLLAD__[key]=p;
   var ha=p.homeRoad==='H';
@@ -6681,7 +6686,7 @@ function nhlCard(p,i){
     : `<span class="est">MODEL ${p.dispLine} · NO BOOK LINE</span>`;
   return `
    <div class="pick-card ${_accFor(p.mkt)}">
-     <div class="pc-rank">${i}</div>
+      <div class="pc-rank">${p.savedSnapshot?(p.savedRank==null?'—':p.savedRank):i}</div>
      <div class="pc-top">
        <div class="hs-wrap"><span class="hs-ini">${_initials(p.name)}</span>
          <img class="hs-img" src="${head}" onerror="this.style.display='none'"/>
@@ -6689,7 +6694,7 @@ function nhlCard(p,i){
        </div>
        <div class="pc-id">
            <div class="pc-name"><span class="pc-name-text">${p.name}</span></div>
-         <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span>${_nhlLineupBadge(p)}</div>
+          <div class="pc-meta">${p.team} vs ${p.opponent||'—'} <span class="${ha?'home':'away'}">${p.savedSnapshot&&!p.homeRoad?'—':ha?'HOME':'AWAY'}</span>${_nhlLineupBadge(p)}</div>
          <div class="pc-mkt">${p.mkt||''}</div>
        </div>
      </div>
@@ -6698,14 +6703,14 @@ function nhlCard(p,i){
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Line</span></div>
      ${p.proj!=null?`<div class="pc-proj"><span class="pp-lab">Projected</span><span class="pp-num">${p.proj}</span><span class="pp-edge ${p.projEdge>=0?'pos':'neg'}">${p.projEdge>=0?'+':''}${p.projEdge}</span></div>`:''}
      <div class="pc-stats">
-       <div class="pc-stat"><div class="k">Career vs ${p.opponent}</div><div class="v">${_rateHtml(p.rateA,p.hitsA,p.totA)}</div></div>
-       <div class="pc-stat"><div class="k">L10 ${ha?'Home':'Away'}</div><div class="v">${_rateHtml(p.rateB,p.hitsB,p.totB)}</div></div>
-        <div class="pc-stat"><div class="k">Avg vs ${p.opponent}</div><div class="v gold">${p.totA?p.avgA:'—'}</div></div>
-        <div class="pc-stat"><div class="k">L10 Avg</div><div class="v gold">${p.avg}</div></div>
+        <div class="pc-stat"><div class="k">Career vs ${p.opponent||'opponent'}</div><div class="v">${_rateHtml(p.rateA,p.hitsA,p.totA)}</div></div>
+        <div class="pc-stat"><div class="k">L10 ${p.savedSnapshot&&!p.homeRoad?'H/A':ha?'Home':'Away'}</div><div class="v">${_rateHtml(p.rateB,p.hitsB,p.totB)}</div></div>
+         <div class="pc-stat"><div class="k">Avg vs ${p.opponent||'opponent'}</div><div class="v gold">${p.totA?p.avgA:'—'}</div></div>
+         <div class="pc-stat"><div class="k">L10 Avg</div><div class="v gold">${p.avg==null?'—':p.avg}</div></div>
      </div>
      <div class="pc-why"><span class="why-k">Why qualifies</span>${_nhlQualText(p)}</div>
-     <div class="pc-foot"><span class="pc-score">${p.dispScore}</span>
-       <span style="display:flex;gap:6px">${_nhlBetBtn(p)}<button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></span></div>
+      <div class="pc-foot"><span class="pc-score">${p.dispScore==null?'—':p.dispScore}</span>
+        <span style="display:flex;gap:6px">${_nhlBetBtn(p)}<button class="pc-tap" ${p.savedSnapshot?'disabled title="Game logs were not stored with these selections"':`onclick="openNhlLadder('${key}')"`}>📊 Game Log</button></span></div>
    </div>`;
 }
 function nhlCardGrid(picks){
@@ -6722,7 +6727,6 @@ function nhlRestBlock(rest, label, color){
 }
 function underClass(r){ return r>=75?'green':r>=65?'gold':'red-txt'; }
 function nhlUnderCard(p,i){
-  if(p.savedSnapshot)return _nhlSavedPickCard(p,i);
   var season=(window.__NHL_SEASON__||'20252026');
   var key=_ladKey(p); window.__NHLLAD__[key]=p;
   var ha=p.homeRoad==='H';
@@ -6735,7 +6739,7 @@ function nhlUnderCard(p,i){
   var anHtml=p.underTotAny?`<span class="${underClass(p.underRateAny)}">${p.underHitsAny}/${p.underTotAny} (${p.underRateAny}%)</span>`:'<span class="gray">—</span>';
   return `
    <div class="pick-card under-card ${_accFor(p.mkt)}">
-     <div class="pc-rank">${i}</div>
+      <div class="pc-rank">${p.savedSnapshot?(p.savedRank==null?'—':p.savedRank):i}</div>
      <div class="pc-top">
        <div class="hs-wrap"><span class="hs-ini">${_initials(p.name)}</span>
          <img class="hs-img" src="${head}" onerror="this.style.display='none'"/>
@@ -6743,7 +6747,7 @@ function nhlUnderCard(p,i){
        </div>
        <div class="pc-id">
            <div class="pc-name"><span class="pc-name-text">${p.name}</span></div>
-         <div class="pc-meta">${p.team} vs ${p.opponent} <span class="${ha?'home':'away'}">${ha?'HOME':'AWAY'}</span>${_nhlLineupBadge(p)}</div>
+          <div class="pc-meta">${p.team} vs ${p.opponent||'—'} <span class="${ha?'home':'away'}">${p.savedSnapshot&&!p.homeRoad?'—':ha?'HOME':'AWAY'}</span>${_nhlLineupBadge(p)}</div>
          <div class="pc-mkt">${p.mkt||''} · UNDER</div>
        </div>
      </div>
@@ -6751,14 +6755,14 @@ function nhlUnderCard(p,i){
       ${_sigBadges(p,true)}
      <div class="pc-line-row"><span>${lineHtml}</span><span class="od">Under Line</span></div>
      <div class="pc-stats">
-       <div class="pc-stat"><div class="k">Under vs ${p.opponent}</div><div class="v">${voHtml}</div></div>
-       <div class="pc-stat"><div class="k">Under L10 ${ha?'Home':'Away'}</div><div class="v">${anHtml}</div></div>
-       <div class="pc-stat"><div class="k">Avg</div><div class="v gold">${p.avg}</div></div>
+        <div class="pc-stat"><div class="k">Under vs ${p.opponent||'opponent'}</div><div class="v">${voHtml}</div></div>
+        <div class="pc-stat"><div class="k">Under L10 ${p.savedSnapshot&&!p.homeRoad?'H/A':ha?'Home':'Away'}</div><div class="v">${anHtml}</div></div>
+         <div class="pc-stat"><div class="k">Avg</div><div class="v gold">${p.avg==null?'—':p.avg}</div></div>
        <div class="pc-stat"><div class="k">Basis</div><div class="v">${p.underBasis||'—'}</div></div>
      </div>
      <div class="pc-why"><span class="why-k">Why qualifies</span>${_nhlUnderWhy(p)}</div>
-     <div class="pc-foot"><span class="pc-score ${underClass(p.underRate)}">${p.underHits}/${p.underTotal} (${p.underRate}%)</span>
-       <span style="display:flex;gap:6px">${_nhlBetBtn(p,'UNDER')}<button class="pc-tap" onclick="openNhlLadder('${key}')">📊 Game Log</button></span></div>
+      <div class="pc-foot"><span class="pc-score ${underClass(p.underRate)}">${p.savedSnapshot?(p.savedCoachProbability==null?'—':p.savedCoachProbability+'%'):p.underHits+'/'+p.underTotal+' ('+p.underRate+'%)'}</span>
+        <span style="display:flex;gap:6px">${_nhlBetBtn(p,'UNDER')}<button class="pc-tap" ${p.savedSnapshot?'disabled title="Game logs were not stored with these selections"':`onclick="openNhlLadder('${key}')"`}>📊 Game Log</button></span></div>
    </div>`;
 }
 function nhlUnderGrid(picks){
@@ -7220,9 +7224,46 @@ function nhlScrollToGameId(id){
   row.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
+function _nhlRowUpcoming(p,raw){
+  if(raw.simulation||raw.historical)return true;
+  var starts=[],direct=p.gameStart||p.game_start||p.startTime;
+  if(direct)starts.push(direct);
+  if(!starts.length){
+    (raw.games||[]).forEach(function(g){
+      if(p.team&&(p.team===g.homeTeam||p.team===g.awayTeam)
+          &&(!p.opponent||p.opponent===g.homeTeam||p.opponent===g.awayTeam))
+        starts.push(g.startTime);
+    });
+  }
+  if(!starts.length)return !raw.savedPickRecovery;
+  return starts.every(function(s){var t=Date.parse(s);return Number.isFinite(t)&&Date.now()<t;});
+}
+function _nhlUpcomingBoard(raw){
+  if(!raw||raw.simulation||raw.historical)return raw||{};
+  var d=Object.assign({},raw),total=0,visible=0;
+  ['picks','rest','ptsPicks','ptsRest','ppPicks','ppRest','astPicks','astRest',
+   'goalPicks','goalRest','savesPicks','savesRest','shotUnders','shotUndersRest',
+   'ptsUnders','ptsUndersRest','ppUnders','ppUndersRest','astUnders','astUndersRest',
+   'goalUnders','goalUndersRest','savesUnders','savesUndersRest'].forEach(function(k){
+    total+=(raw[k]||[]).length;
+    d[k]=(raw[k]||[]).filter(function(p){return _nhlRowUpcoming(p,raw);});
+    visible+=d[k].length;
+  });
+  d.games=(raw.games||[]).filter(function(g){
+    var t=Date.parse(g.startTime);return Number.isFinite(t)&&Date.now()<t;
+  });
+  d.game_predictions=(raw.game_predictions||[]).filter(function(g){
+    var t=Date.parse(g.startTime);return Number.isFinite(t)&&Date.now()<t;
+  });
+  d.liveUpcomingPickCount=visible;
+  if(total&&!visible)d.data_note='No upcoming saved plays. Started/finished games are hidden here; their picks remain in Track Record and Overflow.'
+    +(raw.savedPickRecovery&&!(raw.games||[]).length?' Saved start times are unavailable, so these selections cannot be verified as upcoming.':'');
+  return d;
+}
+var _nhlLiveRefreshTimer=null;
 function renderResults(d){
   window.__NHL_RAW__ = d;
-  _frankLoadGames(d.games||[]);
+  _frankLoadGames(_nhlUpcomingBoard(d).games||[]);
   window.__NHL_SEASON__ = d.season || '20252026';
   window.__NHL_DATE__ = d.date || '';
   var _preseason=!!d.preseason;
@@ -7236,6 +7277,26 @@ function renderResults(d){
   }
   _nhlLiveSystemVisibility();
   _nhlPaint('');
+  if(_nhlLiveRefreshTimer)clearInterval(_nhlLiveRefreshTimer);
+  if(!d.simulation&&!d.historical)_nhlLiveRefreshTimer=setInterval(function(){
+    var live=_nhlUpcomingBoard(window.__NHL_RAW__||{});
+    var signature=String(live.liveUpcomingPickCount)+'|'+String((live.games||[]).length);
+    if(signature===window.__NHL_UPCOMING_SIGNATURE__)return;
+    window.__NHL_UPCOMING_SIGNATURE__=signature;
+    var q=document.getElementById('nhlSearch');
+    _nhlPaint(q?q.value:'');
+    _frankLoadGames(live.games||[]);
+    window.__FRANK_LAST_ROWS__=[];
+    if(window.__NHL_CURRENT_PARLAY__&&window.__NHL_CURRENT_PARLAY__.some(function(p){
+      return !_nhlRowUpcoming({team:p.team,opponent:p.opp},window.__NHL_RAW__||{});
+    })){
+      window.__NHL_CURRENT_PARLAY__=[];
+      var parlay=document.getElementById('parlayOut');if(parlay)parlay.innerHTML='';
+    }
+    var answer=document.getElementById('frankAiAnswer');if(answer)answer.innerHTML='';
+  },1000);
+  var initial=_nhlUpcomingBoard(d);
+  window.__NHL_UPCOMING_SIGNATURE__=String(initial.liveUpcomingPickCount)+'|'+String((initial.games||[]).length);
 }
 var _nhlPositionFilter='ALL';
 function _nhlPositionGroup(p){
@@ -7313,7 +7374,8 @@ function nhlLookupPlayer(){
 // #nhlBody so it keeps focus across keystrokes. `d` is aliased to a shallow copy
 // whose pick lists are name-filtered, leaving the original render code untouched.
 function _nhlPaint(q){
-  var raw=window.__NHL_RAW__; if(!raw) return;
+  var original=window.__NHL_RAW__; if(!original) return;
+  var raw=_nhlUpcomingBoard(original);
   var _preseason=!!raw.preseason;
   var options=document.getElementById('nhlPlayerOptions');
   if(options){
@@ -7327,6 +7389,7 @@ function _nhlPaint(q){
     return q?rows.filter(function(p){return (p.name||'').toLowerCase().indexOf(q)>=0;}):rows;
   }
   function _ppRoleEligible(p){
+    if(p.savedSnapshot)return true; // Already-qualified original published pick.
     var games=Number(p&&p.ppUsageGames||0),total=Number(p&&p.ppUsageTotal||0);
     var avg=Number(p&&p.ppToiAvgSec||0);
     return total>=2&&games>=2&&games*2>=total&&avg>=30;
@@ -12164,6 +12227,7 @@ def _nhl_board_from_saved_selections(date_str: str, system: str):
                 home = pick["team"] == game["homeTeam"]
                 pick["opponent"] = game["awayTeam"] if home else game["homeTeam"]
                 pick["homeRoad"] = "H" if home else "R"
+                pick["gameStart"] = game.get("startTime")
     board["savedPickCount"] = count
     board["missingCoachProbabilityCount"] = missing_probabilities
     if missing_probabilities:
