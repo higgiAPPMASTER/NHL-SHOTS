@@ -1929,11 +1929,36 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
 
 
 def _bookable_goal_scorer_lines(lines: Dict[str, Dict]) -> Dict[str, Dict]:
-    """Keep anytime-goal Yes prices; never treat feed No prices as Goal Unders."""
-    return {
-        name: {**(info or {}), "under_odds": ""}
-        for name, info in (lines or {}).items()
-    }
+    """Preserve genuine Goals O/U; an anytime-scorer No is not an Under."""
+    result = {}
+    for name, info in (lines or {}).items():
+        info = dict(info or {})
+        try:
+            standard_under = (info.get("under_market") == "player_goals"
+                              and float(info.get("line")) == 0.5)
+        except (TypeError, ValueError):
+            standard_under = False
+        if not standard_under:
+            info["under_odds"] = ""
+            info["under_book"] = ""
+        result[name] = info
+    return result
+
+
+def _nhl_odds_cache_has_books(payload: Dict) -> bool:
+    """Legacy price-only caches cannot supply quote-specific book names."""
+    for key in ("lines", "pts", "ast", "sv", "goals"):
+        group = payload.get(key) or {}
+        if not isinstance(group, dict):
+            return False
+        for info in group.values():
+            if not isinstance(info, dict):
+                return False
+            for side, price_key in (("OVER", "odds"), ("UNDER", "under_odds")):
+                if (str(info.get(price_key) or "").strip() not in ("", "0")
+                        and not _nhl_side_book(info, side)):
+                    return False
+    return True
 
 
 async def get_shot_lines(
@@ -1967,6 +1992,8 @@ async def get_shot_lines(
         print("[Lines] ODDS_API_KEY not set — no sportsbook props can be published")
         return {}, {}, {}, {}, {}
 
+    # Use the app's NHL record day, not UTC midnight, for today's live quotes.
+    live_odds_date = date.fromisoformat(target_date) >= date.fromisoformat(_nhl_record_today())
     # A separate cache namespace prevents older date+tomorrow mixed slates from
     # being reused after lineup eligibility became date/game specific.
     _oc = _odds_cache_get("nhl_lineup_v5_us_ca", target_date)
@@ -1980,25 +2007,30 @@ async def get_shot_lines(
         # normal run warms those genuine markets too; historical replay keeps
         # its existing cache-only/request behavior unchanged.
         cached_live_alternates = (
-            date.fromisoformat(target_date) >= date.today()
+            live_odds_date
             and "alternates" not in _oc
         )
         # Older live payloads never requested standard Goals O/U. Refresh
         # those once on the next user-requested run; historical odds caches
         # and frozen pregame records must retain their existing behavior.
         cached_live_goals_ou = (
-            date.fromisoformat(target_date) >= date.today()
+            live_odds_date
             and not _oc.get("goals_ou_requested", False)
         )
+        cached_live_books = live_odds_date and (
+            _oc.get("quote_provenance_version") != 1
+            or not _nhl_odds_cache_has_books(_oc)
+        )
         if (not cached_live_alternates and not cached_live_goals_ou
-                and not (date.fromisoformat(target_date) < date.today() and not cached_lines)):
+                and not cached_live_books
+                and not (not live_odds_date and not cached_lines)):
             return (
                 cached_lines, _oc.get("pts", {}),
                 _oc.get("ast", {}), _oc.get("sv", {}),
                 _bookable_goal_scorer_lines(_oc.get("goals", {})),
             )
-        print(f"[HistoricalLines] refreshing empty cached line set for {target_date}")
-    if date.fromisoformat(target_date) < date.today():
+        print(f"[Lines] refreshing outdated quote/book cache for {target_date}")
+    if not live_odds_date:
         durable = _nhl_load_historical_odds_cache(target_date)
         if durable is not None:
             print(f"[HistoricalLines] durable cache hit for {target_date}")
@@ -2026,7 +2058,7 @@ async def get_shot_lines(
         goal_ou_lines: Dict[str, Dict] = {}
         goal_ou_reads_ok: List[bool] = []
         async with httpx.AsyncClient(timeout=20) as c:
-            if date.fromisoformat(target_date) < date.today():
+            if not live_odds_date:
                 (lines, pts_lines, ast_lines, sv_lines,
                  goal_lines) = await _get_historical_player_lines(
                      c, api_key, target_date, games)
@@ -2128,6 +2160,8 @@ async def get_shot_lines(
                                     elif nm == "Under" and not rec["under_odds"]:
                                         rec["under_odds"] = str(oc.get("price", ""))
                                         rec["under_book"] = book.get("title") or book.get("key") or ""
+                                        if mkey == "player_goals":
+                                            rec["under_market"] = "player_goals"
                     if isinstance(ra, httpx.Response) and ra.status_code == 200:
                         for book in ra.json().get("bookmakers", []):
                             for mkt in book.get("markets", []):
@@ -2199,6 +2233,7 @@ async def get_shot_lines(
                     if not rec["under_odds"] and goal_ou.get("under_odds"):
                         rec["under_odds"] = goal_ou["under_odds"]
                         rec["under_book"] = goal_ou.get("under_book", "")
+                        rec["under_market"] = goal_ou.get("under_market", "")
                     if not rec["odds"] and goal_ou.get("odds"):
                         rec["odds"] = goal_ou["odds"]
                         rec["odds_book"] = goal_ou.get("odds_book", "")
@@ -2214,6 +2249,7 @@ async def get_shot_lines(
             _odds_cache_set("nhl_lineup_v5_us_ca", target_date, {
                 "lines": lines, "pts": pts_lines,
                 "ast": ast_lines, "sv": sv_lines, "goals": goal_lines,
+                "quote_provenance_version": 1,
                 "goals_ou_requested": bool(goal_ou_reads_ok) and all(goal_ou_reads_ok),
                 "alternates": alternate_lines})
         return lines, pts_lines, ast_lines, sv_lines, goal_lines
@@ -6027,7 +6063,7 @@ function _frankAccordions(p){
     +'<details><summary>Odds Comparison</summary><div class="frank-ai-accord-body"><div class="frank-ai-stat-grid">'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Selected side</div><div class="frank-ai-stat-v">'+p.side+' '+_frankOdds(p.odds)+' · '+p.implied.toFixed(1)+'% implied</div></div>'
     +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Other side</div><div class="frank-ai-stat-v">'+(opposite!=null?otherSide+' '+_frankOdds(opposite)+' · '+oppositeImplied.toFixed(1)+'% implied':'N/A')+'</div></div>'
-    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Sportsbook</div><div class="frank-ai-stat-v">'+_frankEsc(_nhlBookName(p)||'Book unavailable')+'</div></div>'
+    +'<div class="frank-ai-stat"><div class="frank-ai-stat-k">Sportsbook</div><div class="frank-ai-stat-v">'+_frankEsc(_nhlBookName(p)||'Sportsbook not saved')+'</div></div>'
     +'</div><div style="margin-top:7px">Only prices carried by the loaded NHL prop are shown. This is not a full multi-book screen unless the source provides those books.</div></div></details>'
     +'<details open><summary>Hit Rate Chart</summary><div class="frank-ai-accord-body">'+_frankSplitTiles(p)+'</div></details>'
     +'<details><summary>Line Movement</summary><div class="frank-ai-accord-body">Line movement is unavailable because the NHL app does not yet store timestamped opening and closing prices. No movement or sharp-money claim is generated.</div></details>'
@@ -6603,7 +6639,7 @@ function _nhlBookBadge(p,side){
   var value=p.odds!=null?p.odds:p[side==='UNDER'?'realUnderOdds':'realOdds'];
   var priced=value!=null&&String(value).trim()!==''&&Number(value)!==0;
   return '<span style="display:block;font-size:.65rem;color:#93c5fd;font-weight:800;line-height:1.5">'
-    +_nhlEsc(priced?(_nhlBookName(p,side)||'Book unavailable'):'MODEL · UNPRICED')+'</span>';
+    +_nhlEsc(priced?(_nhlBookName(p,side)||'Sportsbook not saved'):'MODEL · UNPRICED')+'</span>';
 }
 function _nhlLineSourceBadge(p,side){
   var book=_nhlBookBadge(p,side);
@@ -6664,7 +6700,7 @@ function _nhlSavedPickCard(p,i){
     +'<div class="pc-mkt">'+_nhlEsc(p.mkt)+' · '+side+'</div></div></div>'
     +'<div class="pc-tagrow"><span class="tag">SAVED PREGAME PLAY</span></div>'
     +'<div class="pc-line-row"><span class="ln">'+_nhlEsc(line)+'</span><span class="od">'+_nhlEsc(oddsText)+'</span></div>'
-    +'<div class="pc-meta">'+_nhlEsc(_nhlBookName(p,side)||'Book unavailable')+'</div>'
+    +'<div class="pc-meta">'+_nhlEsc(_nhlBookName(p,side)||'Sportsbook not saved')+'</div>'
     +'<div class="pc-stats"><div class="pc-stat"><div class="k">Saved Coach probability</div>'
     +'<div class="v">'+(prob==null?'Not saved':_nhlEsc(prob)+'%')+'</div></div>'
     +'<div class="pc-stat"><div class="k">Saved model score</div><div class="v">'+(p.score==null?'Not saved':_nhlEsc(p.score))+'</div></div></div>'
