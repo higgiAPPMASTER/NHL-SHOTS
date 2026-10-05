@@ -8,7 +8,7 @@ Step 4 : Rank & top 10
 Deployed on Render (FastAPI + httpx)
 """
 
-import os, hmac, asyncio, re, unicodedata, time, json, logging, html
+import os, hmac, asyncio, re, unicodedata, time, json, logging, html, math
 from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -5791,7 +5791,7 @@ function _frankAllProps(){
       var side=def[1],isOverflow=!!def[2],market=p.mkt||'Player Prop';
       var line=p.realLine;
       var odds=side==='UNDER'?p.realUnderOdds:p.realOdds;
-      var appProb=side==='UNDER'
+      var appProb=p.savedSnapshot?Number(p.savedCoachProbability):side==='UNDER'
         ?Number(p.underConfidence||p.underRate||p.underRateAny||p.underRateVo||0)
         :Number(p.dispScore||p.ptsScore||p.score||0);
       var implied=_frankImplied(odds);
@@ -5806,12 +5806,12 @@ function _frankAllProps(){
         book:_nhlBookName(p,side),appProb:appProb,implied:implied,edge:edge,
         projection:p.proj!=null?Number(p.proj):null,
         projectionEdge:p.projEdge!=null?Number(p.projEdge):null,
-        recentRate:Number(p.rateB||p.step3Rate||p.pts3Rate||p.vsLineRate||0),
-        recentHits:Number(p.hitsB||p.step3Hits||p.pts3Hits||p.vsLineHits||0),
-        recentTotal:Number(p.totB||p.step3Total||p.pts3Total||p.vsLineTotal||0),
-        oppRate:Number(p.rateA||p.step2Rate||p.pts2Rate||0),
-        oppHits:Number(p.hitsA||p.step2Hits||p.pts2Hits||0),
-        oppTotal:Number(p.totA||p.step2Total||p.pts2Total||0),
+        recentRate:p.savedSnapshot?null:Number(p.rateB||p.step3Rate||p.pts3Rate||p.vsLineRate||0),
+        recentHits:p.savedSnapshot?null:Number(p.hitsB||p.step3Hits||p.pts3Hits||p.vsLineHits||0),
+        recentTotal:p.savedSnapshot?null:Number(p.totB||p.step3Total||p.pts3Total||p.vsLineTotal||0),
+        oppRate:p.savedSnapshot?null:Number(p.rateA||p.step2Rate||p.pts2Rate||0),
+        oppHits:p.savedSnapshot?null:Number(p.hitsA||p.step2Hits||p.pts2Hits||0),
+        oppTotal:p.savedSnapshot?null:Number(p.totA||p.step2Total||p.pts2Total||0),
         restDays:p.restDays,hotHits:p.hotHits,hotTotal:p.hotTotal,
         toiAvgSec:p.toiAvgSec,ppToiAvgSec:p.ppToiAvgSec,
         scheduleFactor:p.scheduleFactor,oppGoalieSv:p.oppGoalieSv,
@@ -6198,7 +6198,11 @@ async function askFrank(){
   if(!props.length){
     var el=document.getElementById('frankAiAnswer');
     if(el){
-      _frankCommit('<div><div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">'+_frankEsc(_frankSystemLabel(requested))+' board is loaded for '+_frankEsc(dt)+', but has no priced props available for this Coach analysis. This is not a missing-board message.</div></div></div>');
+      var loaded=_frankRawForSystem(requested)||{};
+      var note=loaded.savedPickRecovery
+        ?String(loaded.savedPickCount||0)+' original saved plays are loaded. Coach needs both a genuine saved price and a stored Coach probability; this snapshot has no eligible priced/probability pairs. Missing probabilities are not guessed from model scores.'
+        :'No priced props are available for this Coach analysis.';
+      _frankCommit('<div><div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">'+_frankEsc(_frankSystemLabel(requested))+' board is loaded for '+_frankEsc(dt)+'. '+_frankEsc(note)+' This is not a missing-board message.</div></div></div>');
     }
     return;
   }
@@ -6275,25 +6279,24 @@ async function getPicks(){
     var _nhlAdmin=new URLSearchParams(location.search).get('admin')||'';
     var replaySystem=window.NHL_HIST_SYSTEM||'A';
     var adminReplay=isHistorical&&window.IS_ADMIN;
+    var current=window.__NHL_RAW__||{};
+    var liveSystem=current.date===dt?String(current.system||'A').toUpperCase():'A';
+    if(['A','B','C','D'].indexOf(liveSystem)<0)liveSystem='A';
     var url=isHistorical&&adminReplay
       ?'/api/historical-track-replay?date_str='+encodeURIComponent(dt)+'&system='+encodeURIComponent(replaySystem)+'&token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin)
       :(isHistorical
         ?'/api/picks?target_date='+encodeURIComponent(dt)+'&simulate=true&token='+encodeURIComponent(_nhlTok)
-        :'/api/cached?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok));
+        :(window.IS_ADMIN
+          ?'/api/nhl/system-board?date_str='+encodeURIComponent(dt)+'&system='+encodeURIComponent(liveSystem)+'&token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin)
+          :'/api/cached?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok)));
     var data=null;
     var allCache=window.__NHL_HIST_ALL__;
     if(adminReplay&&allCache&&allCache.date===dt&&allCache.systems&&allCache.systems[replaySystem]){
       data=allCache.systems[replaySystem];
     }else{
-      var res=await fetch(url);
-      // Today may not have a scheduled cache yet (common in preseason). In
-      // that case, run the normal live pipeline instead of stopping at 404.
-      // Preseason persistence remains blocked by run_picks' capture guard.
-      if(res.status===404&&!isHistorical){
-        if(st)st.textContent='No saved board yet — generating today\\'s picks...';
-        url='/api/picks?target_date='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok);
-        res=await fetch(url);
-      }
+      // Live Get Picks reads saved data only; it must never quietly rerun a
+      // model when a display cache is absent or replace early-game picks.
+      var res=await fetch(url,{cache:'no-store'});
       if(res.status===404){ if(st) st.textContent=''; if(out) out.innerHTML=''; alert("Today's picks aren't ready yet -- check back a little later."); return; }
       if(!res.ok){
         var errData=await res.json().catch(function(){return {};});
@@ -6325,7 +6328,9 @@ async function getPicks(){
     if(st && data.picks){
       st.textContent=isHistorical
         ?'HISTORICAL REPLAY — '+(data.comparisonSystem||'A New')+' for '+dt+'; not added to the official record'
-        :(data.qualified||0)+' players qualified -- '+data.picks.length+' top picks -- '+(data.date||'');
+        :(data.savedPickRecovery
+          ?'SAVED SYSTEM '+data.system+' — '+data.savedPickCount+' original saved plays restored for '+dt+'; no model rerun'
+          :(data.qualified||0)+' players qualified -- '+data.picks.length+' top picks -- '+(data.date||''));
     }
   }catch(e){ if(st) st.textContent=''; alert(e.message||'Could not load picks. Please try again.'); }
   finally{if(pollTimer)clearInterval(pollTimer);btn.disabled=false;btn.textContent=orig;}
@@ -6380,7 +6385,9 @@ async function _nhlSelectLiveSystem(system){
   renderResults(board);
   if(status)status.textContent='Viewing '+system+' for '+dt+' · switching boards does not change official records.';
   var summary=document.getElementById('statusMsg');
-  if(summary)summary.textContent='LIVE SYSTEM '+system+' · '+dt+' · '+(board.qualified||0)+' players qualified';
+  if(summary)summary.textContent=board.savedPickRecovery
+    ?'SAVED SYSTEM '+system+' · '+dt+' · '+board.savedPickCount+' original saved plays'
+    :'LIVE SYSTEM '+system+' · '+dt+' · '+(board.qualified||0)+' players qualified';
 }
 async function runAllNhlSystems(){
   if(!window.IS_ADMIN){alert('Admin only');return;}
@@ -6642,7 +6649,28 @@ function _nhlUnderWhy(p){
     ?' · role-weighted rank '+Number(p.underRankScore).toFixed(1)+' · '+_fmtToi(p.toiAvgSec)+' TOI'+(p.ppToiAvgSec>60?' / '+_fmtToi(p.ppToiAvgSec)+' PP':''):'';
   return _nhlEsc(basis)+': '+Number(p.underHits||0)+'/'+Number(p.underTotal||0)+' ('+Number(p.underRate||0)+'%) ≥ 60%'+_nhlEsc(ppNote+roleNote);
 }
+function _nhlSavedPickCard(p,i){
+  var side=p.savedSide||p.pick||'OVER',prob=p.savedCoachProbability;
+  var odds=side==='UNDER'?p.realUnderOdds:p.realOdds;
+  var oddsText=odds==null?'Unpriced':((Number(odds)>0?'+':'')+odds);
+  var line=p.dispLine==null?'Line unavailable':side+' '+p.dispLine;
+  return '<div class="pick-card '+(side==='UNDER'?'under-card ':'')+_accFor(p.mkt)+'">'
+    +'<div class="pc-rank">'+_nhlEsc(p.savedRank==null?'—':p.savedRank)+'</div>'
+    +'<div class="pc-top"><div class="pc-id"><div class="pc-name">'+_nhlEsc(p.name)+'</div>'
+    +'<div class="pc-meta">'+_nhlEsc(p.team)+(p.opponent?' vs '+_nhlEsc(p.opponent):' · matchup not saved')+'</div>'
+    +'<div class="pc-mkt">'+_nhlEsc(p.mkt)+' · '+side+'</div></div></div>'
+    +'<div class="pc-tagrow"><span class="tag">SAVED PREGAME PLAY</span></div>'
+    +'<div class="pc-line-row"><span class="ln">'+_nhlEsc(line)+'</span><span class="od">'+_nhlEsc(oddsText)+'</span></div>'
+    +'<div class="pc-meta">'+_nhlEsc(_nhlBookName(p,side)||'Book unavailable')+'</div>'
+    +'<div class="pc-stats"><div class="pc-stat"><div class="k">Saved Coach probability</div>'
+    +'<div class="v">'+(prob==null?'Not saved':_nhlEsc(prob)+'%')+'</div></div>'
+    +'<div class="pc-stat"><div class="k">Saved model score</div><div class="v">'+(p.score==null?'Not saved':_nhlEsc(p.score))+'</div></div></div>'
+    +'<div class="pc-why">Original saved selection. Projection, split samples, role and game-log details were not saved in this snapshot; none have been recreated.</div>'
+    +'<div class="pc-foot"><span class="pc-score">'+_nhlEsc(p.savedRank==null?'Saved rank unavailable':'Saved rank '+p.savedRank)+'</span>'
+    +'<span>'+_nhlBetBtn(p,side)+'</span></div></div>';
+}
 function nhlCard(p,i){
+  if(p.savedSnapshot)return _nhlSavedPickCard(p,i);
   var season=(window.__NHL_SEASON__||'20252026');
   var key=_ladKey(p); window.__NHLLAD__[key]=p;
   var ha=p.homeRoad==='H';
@@ -6694,6 +6722,7 @@ function nhlRestBlock(rest, label, color){
 }
 function underClass(r){ return r>=75?'green':r>=65?'gold':'red-txt'; }
 function nhlUnderCard(p,i){
+  if(p.savedSnapshot)return _nhlSavedPickCard(p,i);
   var season=(window.__NHL_SEASON__||'20252026');
   var key=_ladKey(p); window.__NHLLAD__[key]=p;
   var ha=p.homeRoad==='H';
@@ -6745,6 +6774,7 @@ function nhlUnderRestBlock(rest, label, color){
     + '</div></details>';
 }
 function _spRow(p){
+  if(p.savedSnapshot)return '<div class="sp-row"><div><div class="nm">'+_nhlEsc(p.name)+'</div><div class="mt">'+_nhlEsc(p.team)+' · '+_nhlEsc(p.savedSide)+' '+_nhlEsc(p.dispLine)+'</div></div><div style="font-weight:800">'+(p.savedCoachProbability==null?'Not saved':_nhlEsc(p.savedCoachProbability)+'%')+'</div></div>';
   var key=_ladKey(p); window.__NHLLAD__[key]=p;
   var best=Math.max(p.rateA||0,p.rateB||0);
   return `<div class="sp-row" onclick="openNhlLadder('${key}')"><div><div class="nm">${p.name}</div><div class="mt">${p.team} vs ${p.opponent} · ${p.dispLine}</div></div><div class="${rateClass(best)}" style="font-weight:800">${best}%</div></div>`;
@@ -7209,6 +7239,7 @@ function renderResults(d){
 }
 var _nhlPositionFilter='ALL';
 function _nhlPositionGroup(p){
+  if(p&&p.savedSnapshot&&!p.positionGroup)return 'UNKNOWN';
   var group=String(p&&p.positionGroup||'F').toUpperCase();
   if(group==='D'||group.indexOf('DEF')===0)return 'D';
   if(group==='G'||group.indexOf('GOAL')===0)return 'G';
@@ -7312,7 +7343,7 @@ function _nhlPaint(q){
 
   // Chips
   h += '<div class="chips">' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToGames()" role="button" tabindex="0"><div class="val">' + d.games.length + '</div><div class="lbl">Games</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToGames()" role="button" tabindex="0"><div class="val">' + (d.savedPickRecovery&&!d.games.length?'Not saved':d.games.length) + '</div><div class="lbl">Games</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToShots()" role="button" tabindex="0"><div class="val">' + ((d.picks||[]).length) + '</div><div class="lbl">Shots</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToPoints()" role="button" tabindex="0"><div class="val">' + ((d.ptsPicks||[]).length) + '</div><div class="lbl">Points</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToPpPoints()" role="button" tabindex="0"><div class="val">' + ((d.ppPicks||[]).length) + '</div><div class="lbl">PP Points</div></div>' +
@@ -11978,6 +12009,170 @@ def _nhl_save_live_board(date_str: str, system: str, board: dict):
     }], on_conflict="app,date,category,side")
 
 
+def _nhl_read_saved_selection_rows(date_str: str, category: str):
+    """Strict, read-only access to the SAME permanent data used by records."""
+    if not _NHL_SB_URL or not _NHL_SB_KEY:
+        raise RuntimeError("Saved-pick storage is unavailable; saved selections could not be checked.")
+    params = {
+        "app": "eq." + _NHL_TRK_APP, "date": "eq." + date_str,
+        "category": "eq." + category, "side": "eq.ALL",
+        "select": "date,category,detail", "limit": "1",
+    }
+    for attempt in range(3):
+        try:
+            response = httpx.get(
+                f"{_NHL_SB_URL}/rest/v1/mpa_track_ledger",
+                headers={"apikey": _NHL_SB_KEY,
+                         "Authorization": f"Bearer {_NHL_SB_KEY}"},
+                params=params, timeout=10)
+            if response.status_code == 200:
+                rows = response.json()
+                if not isinstance(rows, list):
+                    raise ValueError("Invalid saved-pick response")
+                if rows:
+                    row = rows[0]
+                    if (not isinstance(row, dict) or row.get("date") != date_str
+                            or row.get("category") != category
+                            or not isinstance(row.get("detail"), list)):
+                        raise ValueError("Saved-pick identity or detail is invalid")
+                    return row["detail"]
+                if attempt == 2:
+                    return []
+        except (httpx.RequestError, ValueError, TypeError):
+            logger.warning("NHL saved selection read failed (attempt %s)", attempt + 1)
+        if attempt < 2:
+            time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError("Saved selections could not be read. This is not proof that no picks were saved.")
+
+
+def _nhl_saved_number(value):
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _nhl_board_from_saved_selections(date_str: str, system: str):
+    """Restore published picks, not missing model inputs or a new candidate pool."""
+    rows = _nhl_read_saved_selection_rows(date_str, _NHL_SYSTEM_SNAP_CATS[system])
+    source = "saved_pregame_snapshot"
+    if not rows:
+        rows = _nhl_read_saved_selection_rows(date_str, _NHL_SYSTEM_DETAIL_CATS[system])
+        source = "saved_graded_detail"
+    if not rows:
+        return None
+    ds = date.fromisoformat(date_str)
+    year = ds.year if ds.month >= 7 else ds.year - 1
+    board = {
+        "date": date_str, "targetDate": date_str, "system": system,
+        "_nhlCacheVersion": 10 if system == "D" else 9,
+        "season": str(year) + str(year + 1), "simulation": False,
+        "savedPickRecovery": True, "savedPickSource": source,
+        "games": [], "game_predictions": [], "sa_ranks": [],
+        "playerProfiles": [], "data_note": (
+            "Restored original saved " + system + " selections from Track Record storage. "
+            "No models were rerun and no records were changed. Saved ranks, sides, lines, "
+            "prices and available Coach probabilities are preserved. This is the saved-play "
+            "pool, not the full model candidate pool. Missing projections, splits, positions "
+            "and game-log context are unavailable, not recreated. Prices are saved prices, "
+            "not refreshed live quotes."
+        ),
+    }
+    definitions = {}
+    for key, category, stat_key, side, overflow in _NHL_TRK_LISTS:
+        board[key] = []
+        definitions[(category, side, overflow)] = (key, stat_key)
+    stat_categories = {stat_key: category
+                       for _, category, stat_key, _, _ in _NHL_TRK_LISTS}
+    count = missing_probabilities = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("A saved pick is unreadable; no replacement picks were generated.")
+        # Locks duplicate underlying category picks in graded detail.
+        if row.get("category") == "80-100% Locks":
+            continue
+        category = str(row.get("category") or "")
+        if category == "NHL Overflow":
+            category = stat_categories.get(row.get("stat_key"), "")
+        side = str(row.get("side") or "").upper()
+        rank = _nhl_saved_number(row.get("rank"))
+        overflow = (bool(row["is_overflow"]) if "is_overflow" in row else
+                    row.get("category") == "NHL Overflow" or (rank is not None and rank > 10))
+        definition = definitions.get((category, side, overflow))
+        if not definition or not row.get("name"):
+            raise RuntimeError("A saved pick's category/side could not be matched safely; no picks were silently dropped.")
+        key, _ = definition
+        line = _nhl_saved_number(row.get("line"))
+        if line is None:
+            line = _nhl_saved_number(row.get("model_line"))
+        odds = _nhl_saved_number(row.get("odds"))
+        if odds is not None and (odds == 0 or odds < -1000):
+            odds = None
+        probability = _nhl_saved_number(row.get("coach_probability"))
+        if probability is not None and not 0 <= probability <= 100:
+            probability = None
+        if probability is None:
+            missing_probabilities += 1
+        score = _nhl_saved_number(row.get("score"))
+        book = str(row.get("book") or "")
+        pick = {
+            "name": row["name"], "pid": row.get("pid"), "team": row.get("team") or "",
+            "mkt": category, "pick": side, "side": side,
+            "line": line, "dispLine": line,
+            "realLine": line if odds is not None else None,
+            "realOdds": odds if side == "OVER" else None,
+            "realUnderOdds": odds if side == "UNDER" else None,
+            "over_book": book if side == "OVER" else "",
+            "under_book": book if side == "UNDER" else "", "book": book,
+            "score": score, "dispScore": score, "ptsScore": score,
+            "savedSnapshot": True, "savedSide": side, "savedRank": rank,
+            "savedCoachProbability": probability,
+            "savedResult": row.get("result"), "position": row.get("position"),
+            "positionGroup": row.get("positionGroup"),
+        }
+        board[key].append(pick)
+        count += 1
+    if not count:
+        raise RuntimeError("Saved detail contains no recoverable base-category selections.")
+    for key, *_ in _NHL_TRK_LISTS:
+        board[key].sort(key=lambda p: (
+            p["savedRank"] is None,
+            p["savedRank"] if p["savedRank"] is not None else 0))
+    # Only fixture identities from the saved GP source are reused. Never borrow
+    # A's predictions/probabilities to manufacture a B/C/D model board.
+    try:
+        gp = _nhl_read_saved_selection_rows(date_str, _NHL_GP_CAT)
+        for game in gp:
+            if not isinstance(game, dict):
+                continue
+            if game.get("homeTeam") and game.get("awayTeam"):
+                board["games"].append({key: game.get(key) for key in (
+                    "homeTeam", "awayTeam", "startTime", "homeFull", "awayFull")})
+    except RuntimeError:
+        board["data_note"] += " Saved matchup context could not be read."
+    if not board["games"]:
+        board["data_note"] += " Matchup identities were not saved; game filtering is unavailable for these restored selections."
+    for key, *_ in _NHL_TRK_LISTS:
+        for pick in board[key]:
+            matches = [g for g in board["games"]
+                       if pick["team"] in (g.get("homeTeam"), g.get("awayTeam"))]
+            if len(matches) == 1:
+                game = matches[0]
+                home = pick["team"] == game["homeTeam"]
+                pick["opponent"] = game["awayTeam"] if home else game["homeTeam"]
+                pick["homeRoad"] = "H" if home else "R"
+    board["savedPickCount"] = count
+    board["missingCoachProbabilityCount"] = missing_probabilities
+    if missing_probabilities:
+        board["data_note"] += (
+            f" {missing_probabilities} saved plays have no stored Coach probability; "
+            "they remain visible in Picks but cannot enter probability-based Coach recommendations.")
+    return board
+
+
 def _nhl_load_live_board(date_str: str, system: str):
     """Read disk, then durable storage. No models, capture, or grading."""
     cache_name = "nhl" if system == "A" else f"nhl_live_board_v1_{system}"
@@ -12022,6 +12217,9 @@ def _nhl_load_live_board(date_str: str, system: str):
                         raise ValueError("Saved board identity or schema does not match")
                     return board
                 if attempt == 2:
+                    recovered = _nhl_board_from_saved_selections(date_str, system)
+                    if recovered is not None:
+                        return recovered
                     if local_error:
                         raise RuntimeError("A saved system board exists but could not be read safely.")
                     return None
@@ -12129,9 +12327,9 @@ async def api_nhl_system_board(
     if board is None:
         raise HTTPException(
             status_code=404,
-            detail=(f"No saved {system} board remains for {ds}. Older versions kept "
-                    "live boards only in /tmp, which can be cleared on restart or redeploy. "
-                    "This version permanently saves each successful A+B+C+D run."))
+            detail=(f"No saved {system} display board or saved selections could be found for {ds}. "
+                    "Both display storage and this system's Track Record sources were checked. "
+                    "No model rerun was started."))
     return JSONResponse(board, headers={"Cache-Control": "no-store"})
 
 
@@ -12179,10 +12377,17 @@ async def api_cached(request: Request, target_date: str = None, token: str = "")
     if not _verify_hub_token(tok):
         raise HTTPException(status_code=401, detail="Subscription required — please log in via moneypicksarena.com")
     key = target_date or date.today().isoformat()
-    cached = _cache_get("nhl", key)
+    try:
+        key = date.fromisoformat(key).isoformat()
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="A valid date is required")
+    try:
+        cached = await asyncio.to_thread(_nhl_load_live_board, key, "A")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if cached:
         return JSONResponse(cached)
-    raise HTTPException(status_code=404, detail="No saved picks for this date.")
+    raise HTTPException(status_code=404, detail="No saved picks or board for this date. Get Picks does not rerun models.")
 
 
 @app.get("/api/warm")
