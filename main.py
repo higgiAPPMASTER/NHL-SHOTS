@@ -5774,7 +5774,7 @@ function _frankMarketKey(market){
 }
 function _frankAllProps(){
   var sourceSystem=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
-  var raw=_nhlUpcomingBoard(_frankRawForSystem(sourceSystem)||{});
+  var raw=_frankRawForSystem(sourceSystem)||{};
   var defs=[
     ['picks','OVER',false],['rest','OVER',true],['ptsPicks','OVER',false],['ptsRest','OVER',true],
     ['ppPicks','OVER',false],['ppRest','OVER',true],['astPicks','OVER',false],['astRest','OVER',true],
@@ -6195,8 +6195,6 @@ async function askFrank(){
   var selectedSide=window.NHL_FRANK_SIDE||'';
   var props=window.__NHL_ALT_COACH_ACTIVE__
     ?(window.__NHL_ALT_COACH_ROWS__||[]):_frankAllProps();
-  var liveRaw=_frankRawForSystem(requested)||{};
-  props=props.filter(function(p){return _nhlRowUpcoming(p.source||p,liveRaw);});
   if(!props.length){
     var el=document.getElementById('frankAiAnswer');
     if(el){
@@ -7263,7 +7261,7 @@ function _nhlUpcomingBoard(raw){
 var _nhlLiveRefreshTimer=null;
 function renderResults(d){
   window.__NHL_RAW__ = d;
-  _frankLoadGames(_nhlUpcomingBoard(d).games||[]);
+  _frankLoadGames(d.games||[]);
   window.__NHL_SEASON__ = d.season || '20252026';
   window.__NHL_DATE__ = d.date || '';
   var _preseason=!!d.preseason;
@@ -7285,15 +7283,12 @@ function renderResults(d){
     window.__NHL_UPCOMING_SIGNATURE__=signature;
     var q=document.getElementById('nhlSearch');
     _nhlPaint(q?q.value:'');
-    _frankLoadGames(live.games||[]);
-    window.__FRANK_LAST_ROWS__=[];
     if(window.__NHL_CURRENT_PARLAY__&&window.__NHL_CURRENT_PARLAY__.some(function(p){
       return !_nhlRowUpcoming({team:p.team,opponent:p.opp},window.__NHL_RAW__||{});
     })){
       window.__NHL_CURRENT_PARLAY__=[];
       var parlay=document.getElementById('parlayOut');if(parlay)parlay.innerHTML='';
     }
-    var answer=document.getElementById('frankAiAnswer');if(answer)answer.innerHTML='';
   },1000);
   var initial=_nhlUpcomingBoard(d);
   window.__NHL_UPCOMING_SIGNATURE__=String(initial.liveUpcomingPickCount)+'|'+String((initial.games||[]).length);
