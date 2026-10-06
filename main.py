@@ -4789,6 +4789,7 @@ async def run_picks(
         _result["captureStatus"] = (
             "OFFICIAL_CAPTURE" if _nhl_save_picks_snapshot(target_date, _result)
             else "CAPTURE_FAILED")
+        await _nhl_capture_daily_coach(target_date, _result, system)
     if not capture_official:
         _result["captureStatus"] = (
             "PRESEASON view-only: official snapshots, system records, "
@@ -4868,6 +4869,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
             target_date, b, snapshot_category="__picks_B__")
         b["captureStatus"] = (
             "OFFICIAL_CAPTURE" if capture_ok["B"] else "CAPTURE_FAILED")
+        await _nhl_capture_daily_coach(target_date, b, "B")
 
     systems = {"A": a, "B": b}
     for system in ("C", "D"):
@@ -4896,12 +4898,17 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 target_date, result, snapshot_category=f"__picks_{system}__")
             result["captureStatus"] = (
                 "OFFICIAL_CAPTURE" if capture_ok[system] else "CAPTURE_FAILED")
+            await _nhl_capture_daily_coach(target_date, result, system)
 
     summary = {}
     for system, result in systems.items():
         summary[system] = {
             "ok": ("error" not in result and not result.get("no_games")
-                   and (preseason_slate or bool(capture_ok.get(system)))),
+                   and (preseason_slate or (
+                       bool(capture_ok.get(system))
+                       and result.get("coachCaptureStatus") == "AUTO_CAPTURE"))),
+            "coachCaptureStatus": result.get("coachCaptureStatus", "VIEW_ONLY"),
+            "coachCaptureError": result.get("coachCaptureError"),
             "captureStatus": (
                 "PRESEASON_VIEW_ONLY" if result.get("preseason")
                 else ("OFFICIAL_CAPTURE" if capture_ok.get(system)
@@ -4915,7 +4922,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 "goalPicks", "goalRest", "goalUnders", "goalUndersRest",
                 "savesPicks", "savesRest", "savesUnders", "savesUndersRest",
             )),
-            "error": result.get("error") or (
+            "error": result.get("error") or result.get("coachCaptureError") or (
                 "Pregame record could not be saved" if not preseason_slate
                 and not capture_ok.get(system) else None),
         }
@@ -5446,6 +5453,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge points under props')">Points Unders · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge power play points over props')">PP Points Overs · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge power play points under props')">PP Points Unders · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPlusMinusPreset('OVER')" title="Model-only while genuine Plus/Minus odds are unavailable">Plus/Minus Overs · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPlusMinusPreset('UNDER')" title="Model-only while genuine Plus/Minus odds are unavailable">Plus/Minus Unders · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge assists over props')">Assists Overs · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge assists under props')">Assists Unders · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goals over props')">Goals Overs · Top 5</button>
@@ -5553,7 +5562,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
       </details>
       <details style="border:1px solid rgba(34,197,94,.35);border-radius:10px;background:#111827;text-align:left">
         <summary style="display:flex;justify-content:space-between;gap:8px;padding:11px 12px;color:#86efac;font-size:.72rem;font-weight:900;cursor:pointer;list-style:none">
-          <span>COACH CATEGORIES</span><span id="nhlParlayCoachSummary" style="color:#94a3b8;font-size:.64rem">18/18</span>
+          <span>COACH CATEGORIES</span><span id="nhlParlayCoachSummary" style="color:#94a3b8;font-size:.64rem">20/20</span>
         </summary>
         <div style="border-top:1px solid rgba(34,197,94,.2);padding:9px 11px">
           <div style="text-align:right;margin-bottom:6px"><button type="button" onclick="_nhlParlayCoachSetAll(true)" style="background:none;border:0;color:#5eead4;cursor:pointer;font-weight:900">All</button><button type="button" onclick="_nhlParlayCoachSetAll(false)" style="background:none;border:0;color:#fb7185;cursor:pointer;font-weight:900">None</button></div>
@@ -5654,6 +5663,7 @@ var _NHL_PARLAY_COACH_CATS=[
   {key:'shots_over',label:'Best Shots Overs — Top 5'},{key:'shots_under',label:'Best Shots Unders — Top 5'},
   {key:'points_over',label:'Best Points Overs — Top 5'},{key:'points_under',label:'Best Points Unders — Top 5'},
   {key:'pp_over',label:'Best PP Points Overs — Top 5'},{key:'pp_under',label:'Best PP Points Unders — Top 5'},
+  {key:'pm_over',label:'Plus/Minus Overs — Top 5 (priced only)'},{key:'pm_under',label:'Plus/Minus Unders — Top 5 (priced only)'},
   {key:'assists_over',label:'Best Assists Overs — Top 5'},{key:'assists_under',label:'Best Assists Unders — Top 5'},
   {key:'goals_over',label:'Best Goals Overs — Top 5'},{key:'goals_under',label:'Best Goals Unders — Top 5'},
   {key:'saves_over',label:'Best Saves Overs — Top 5'},{key:'saves_under',label:'Best Saves Unders — Top 5'}
@@ -5767,7 +5777,7 @@ function _nhlCoachParlayCandidates(){
     best_overs:select(positive.filter(function(p){return p.side==='OVER';}),byEdge,10),
     best_unders:select(positive.filter(function(p){return p.side==='UNDER';}),byEdge,10)
   };
-  ['shots','points','pp','assists','goals','saves'].forEach(function(market){
+  ['shots','points','pp','pm','assists','goals','saves'].forEach(function(market){
     ['OVER','UNDER'].forEach(function(side){
       pools[market+'_'+side.toLowerCase()]=select(positive.filter(function(p){return p.marketKey===market&&p.side===side;}),byEdge,5);
     });
@@ -6398,6 +6408,21 @@ function _frankRender(question,rows,totalPriced,mode){
 function askFrankPreset(question){
   var input=document.getElementById('frankAiInput');if(input)input.value=question;askFrank();
 }
+async function askFrankPlusMinusPreset(side){
+  window.__NHL_ALT_COACH_ACTIVE__=false;
+  var category=document.getElementById('frankAiCategory');
+  if(category)category.value='pm';
+  _frankSetSide(side);
+  var question='Show the top 5 plus/minus '+side.toLowerCase()+' props';
+  var input=document.getElementById('frankAiInput');if(input)input.value=question;
+  var system=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
+  try{
+    if(!_frankRawForSystem(system))await _frankEnsureSystemBoard(system);
+    var game=document.getElementById('frankAiGame');
+    if(_frankAllProps().some(function(p){return p.marketKey==='pm'&&p.side===side;})){await askFrank();return;}
+    _frankPlusMinusModel(question,system,game?game.value:'',side);
+  }catch(error){_frankCommit('<div class="frank-ai-empty">'+_frankEsc(error.message||'Could not load saved Plus/Minus picks.')+'</div>');}
+}
 function _frankPlusMinusModel(question,system,game,selectedSide){
   var raw=_frankRawForSystem(system)||{},props=[];
   [['pmPicks','OVER',false],['pmRest','OVER',true],['pmUnders','UNDER',false],['pmUndersRest','UNDER',true]].forEach(function(def){
@@ -6418,7 +6443,7 @@ function _frankPlusMinusModel(question,system,game,selectedSide){
       return true;
     });
     var main=rows.filter(function(p){return !p.isOverflow;}).slice(0,limit).map(function(p){return p.source;});
-    var overflow=rows.filter(function(p){return p.isOverflow;}).map(function(p){return p.source;});
+    var overflow=/top +5/i.test(question)?[]:rows.filter(function(p){return p.isOverflow;}).map(function(p){return p.source;});
     html+='<div class="sec">Plus/Minus '+side+' 0.5 · MODEL / UNPRICED</div>';
     if(main.length)html+=side==='UNDER'?nhlUnderGrid(main):nhlCardGrid(main);
     else html+='<div class="frank-ai-empty">No saved qualifying Plus/Minus '+side+' picks match this selection. A new category cannot be recreated from an older board. A normal pregame analysis captures it going forward.</div>';
@@ -7073,7 +7098,6 @@ function _nhlSavedPickCard(p,i){
     +'<div class="v">'+(prob==null?'Not saved':_nhlEsc(prob)+'%')+'</div></div>'
     +'<div class="pc-stat"><div class="k">Saved model score</div><div class="v">'+(p.score==null?'Not saved':_nhlEsc(p.score))+'</div></div></div>'
     +'<div class="pc-why">Original saved selection. Projection, split samples, role and game-log details were not saved in this snapshot; none have been recreated.</div>'
-    +_nhlLast5Box(p)
     +'<div class="pc-foot"><span class="pc-score">'+_nhlEsc(p.savedRank==null?'Saved rank unavailable':'Saved rank '+p.savedRank)+'</span>'
     +'<span>'+_nhlBetBtn(p,side)+'</span></div></div>';
 }
@@ -7112,7 +7136,6 @@ function nhlCard(p,i){
          <div class="pc-stat"><div class="k">L10 Avg</div><div class="v gold">${p.avg==null?'—':p.avg}</div></div>
      </div>
      <div class="pc-why"><span class="why-k">Why qualifies</span>${_nhlQualText(p)}</div>
-     ${_nhlLast5Box(p)}
       <div class="pc-foot"><span class="pc-score">${p.dispScore==null?'—':p.dispScore}</span>
         <span style="display:flex;gap:6px">${_nhlBetBtn(p)}<button class="pc-tap" ${p.savedSnapshot?'disabled title="Game logs were not stored with these selections"':`onclick="openNhlLadder('${key}')"`}>📊 Game Log</button></span></div>
    </div>`;
@@ -7165,7 +7188,6 @@ function nhlUnderCard(p,i){
        <div class="pc-stat"><div class="k">Basis</div><div class="v">${p.underBasis||'—'}</div></div>
      </div>
      <div class="pc-why"><span class="why-k">Why qualifies</span>${_nhlUnderWhy(p)}</div>
-     ${_nhlLast5Box(p)}
       <div class="pc-foot"><span class="pc-score ${underClass(p.underRate)}">${p.savedSnapshot?(p.savedCoachProbability==null?'—':p.savedCoachProbability+'%'):p.underHits+'/'+p.underTotal+' ('+p.underRate+'%)'}</span>
         <span style="display:flex;gap:6px">${_nhlBetBtn(p,'UNDER')}<button class="pc-tap" ${p.savedSnapshot?'disabled title="Game logs were not stored with these selections"':`onclick="openNhlLadder('${key}')"`}>📊 Game Log</button></span></div>
    </div>`;
@@ -9212,9 +9234,9 @@ function renderNhlCoachTrack(){
  var body=document.getElementById('nhlCoachTrackBody'),sum=document.getElementById('nhlCoachTrackSummary');if(!body||!_nhlCoachTrackData)return;
  var stake=Number(document.getElementById('nhlCoachTrkStake').value)||100,groups={},all=[];
  _nhlPeriodDays(_nhlCoachTrackData.dates||[],_nhlPeriodValue('nhlCoachTrkPeriod'),document.getElementById('nhlCoachTrkDate').value).forEach(function(day){(day.detail||[]).forEach(function(x){x=Object.assign({},x,{date:day.date});all.push(x);var k=x.preset||x.category;(groups[k]||(groups[k]=[])).push(x);});});
- ['Plus/Minus OVER · Model-only','Plus/Minus UNDER · Model-only'].forEach(function(k){if(!groups[k])groups[k]=[];});
+  (_nhlCoachTrackData.presetLabels||[]).concat(['Plus/Minus OVER · Model-only','Plus/Minus UNDER · Model-only']).forEach(function(k){if(!groups[k])groups[k]=[];});
  var tw=0,tl=0,tp=0,tv=0,tnet=0,tpriced=0,html='';
- var canonical=_nhlCoachTrackData.source==='official'&&!!groups['All Coach Edge Plays · uncapped'];
+  var canonical=_nhlCoachTrackData.source==='official'&&(_nhlCoachTrackData.automaticPresetCapture||!!groups['All Coach Edge Plays · uncapped']);
  Object.keys(groups).forEach(function(k){var rows=groups[k],w=0,l=0,p=0,v=0,pend=0,net=0,priced=0;
   rows.forEach(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0';if(r==='WIN'){w++;if(hasPrice){priced++;net+=_nhlCalcProfit(x.odds,stake,r)}}else if(r==='LOSS'){l++;if(hasPrice){priced++;net-=stake}}else if(r==='PUSH')p++;else if(r==='VOID')v++;else pend++;});
   if(!canonical||k==='All Coach Edge Plays · uncapped'||k==='Alternate-Line Coach'||k==='Plus/Minus OVER · Model-only'||k==='Plus/Minus UNDER · Model-only'){tw+=w;tl+=l;tp+=p;tv+=v;tnet+=net;tpriced+=priced;}
@@ -9660,6 +9682,23 @@ _NHL_COACH_ALT_DETAIL_CATS = {
     system: f"__coach_alt_detail_{system}__" for system in ("A", "B", "C", "D")
 }
 _NHL_COACH_ALT_LOCK = _bt_th.Lock()
+_NHL_COACH_PRESET_SNAP_CATS = {
+    system: f"__coach_presets_{system}__" for system in ("A", "B", "C", "D")
+}
+_NHL_COACH_PRESET_DETAIL_CATS = {
+    system: f"__coach_presets_detail_{system}__" for system in ("A", "B", "C", "D")
+}
+_NHL_COACH_PRESET_LOCK = _bt_th.Lock()
+_NHL_COACH_MARKETS = (
+    "Shots on Goal", "Points", "Power Play Points", "Plus/Minus",
+    "Assists", "Goals", "Goalie Saves",
+)
+_NHL_COACH_PRESET_LABELS = [
+    "Coach Edge Top 10", "Safest Bets Top 10", "Best Alt-Line Edge Top 10",
+    "Top 3", "Best Overs", "Best Unders",
+    *[f"{market} {side} · Top 5" for market in _NHL_COACH_MARKETS
+      for side in ("OVER", "UNDER")],
+]
 _NHL_COACH_STAT_KEYS = {
     "shots": "SHOTS", "points": "POINTS", "pp": "PP_POINTS",
     "pm": "PLUS_MINUS",
@@ -9853,6 +9892,297 @@ def _nhl_save_alt_coach_snapshot(date_str: str, system: str,
             "locked": False, "detail": existing + added,
         }], "app,date,category,side")
         return ok, len(flat) if ok else 0
+
+
+def _nhl_coach_storage_rows(category: str, date_str: str = "",
+                            start: str = "", end: str = "") -> list:
+    """Strict, paged reads: a storage error must not erase frozen selections."""
+    if not _NHL_SB_URL or not _NHL_SB_KEY:
+        raise RuntimeError("Coach record storage is not configured")
+    params = {"app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{category}",
+              "side": "eq.ALL", "select": "date,detail", "order": "date.asc"}
+    if date_str:
+        params["date"] = f"eq.{date_str}"
+    elif start and end:
+        params["and"] = f"(date.gte.{start},date.lte.{end})"
+    rows, offset = [], 0
+    while True:
+        r = httpx.get(f"{_NHL_SB_URL}/rest/v1/mpa_track_ledger",
+                      headers={"apikey": _NHL_SB_KEY,
+                               "Authorization": f"Bearer {_NHL_SB_KEY}"},
+                      params={**params, "limit": "50", "offset": str(offset)},
+                      timeout=20)
+        r.raise_for_status()
+        page = r.json()
+        if not isinstance(page, list):
+            raise RuntimeError("Coach record storage returned an invalid response")
+        rows.extend(page)
+        if len(page) < 50:
+            return rows
+        offset += 50
+
+
+def _nhl_coach_identity(row: dict) -> tuple:
+    return (str(row.get("name") or "").strip().casefold(),
+            row.get("stat_key"), row.get("side"), str(row.get("line")),
+            str(row.get("odds")))
+
+
+def _nhl_coach_board_groups(board: dict) -> dict:
+    """Match the UI's exact side, probability, price, sorting and preset caps."""
+    candidates, pm_models, seen = [], [], set()
+    games = {team: g for g in board.get("games") or []
+             for team in (g.get("homeTeam"), g.get("awayTeam"))}
+    for key, market, stat_key, side, overflow in _NHL_TRK_LISTS:
+        for rank, p in enumerate(board.get(key) or [], 11 if overflow else 1):
+            game = games.get(p.get("team")) or {}
+            if (not p.get("pid") or game.get("gameType") not in (2, 3)
+                    or not _nhl_gp_is_pre_game({"startTime": game.get("startTime")})):
+                continue
+            score = (p.get("savedCoachProbability") if p.get("savedSnapshot")
+                     else (p.get("underConfidence") or p.get("underRate")
+                           or p.get("underRateAny") or p.get("underRateVo") or 0)
+                     if side == "UNDER" else
+                     (p.get("dispScore") or p.get("ptsScore") or p.get("score") or 0))
+            try:
+                model = max(0.0, min(100.0, float(score)))
+                if not math.isfinite(float(score)) or model <= 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            line = p.get("realLine")
+            odds = p.get("realUnderOdds" if side == "UNDER" else "realOdds")
+            implied = _nhl_alt_implied(odds)
+            priced = line is not None and implied is not None
+            if priced:
+                try:
+                    priced = math.isfinite(float(odds)) and float(odds) >= -1000
+                except (TypeError, ValueError):
+                    priced = False
+            row = {
+                "name": p.get("name"), "pid": p.get("pid"), "team": p.get("team"),
+                "opponent": p.get("opponent"), "category": market,
+                "stat_key": stat_key, "side": side,
+                "line": line if priced else p.get("dispLine", 0.5),
+                "odds": float(odds) if priced else None,
+                "book": p.get("under_book" if side == "UNDER" else "over_book", ""),
+                "score": model, "app_probability": model / 100,
+                "implied_probability": implied / 100 if priced else None,
+                "coach_edge": model - implied if priced else None,
+                "rank": rank, "is_overflow": overflow,
+                "game_start": game.get("startTime"), "result": "PENDING",
+                "actual": None, "profit": None,
+            }
+            identity = _nhl_coach_identity(row)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if priced and row["coach_edge"] > 0:
+                row["pricing_status"] = "priced_positive_edge"
+                candidates.append(row)
+            elif market == "Plus/Minus" and not priced:
+                row.update({"line": 0.5, "pricing_status": "unpriced_model",
+                            "coach_model_only": True})
+                pm_models.append(row)
+
+    def select(rows, limit, safe=False):
+        ordered = sorted(rows, key=lambda p: (
+            p["implied_probability"] if safe else p["coach_edge"],
+            p["app_probability"]), reverse=True)
+        unique, players = [], set()
+        for row in ordered:
+            player = str(row["name"] or "").strip().casefold()
+            if player and player not in players:
+                players.add(player)
+                unique.append(row)
+        return unique[:limit]
+
+    groups = {
+        "All Coach Edge Plays · uncapped": sorted(
+            candidates, key=lambda p: (p["coach_edge"], p["app_probability"]), reverse=True),
+        "Coach Edge Top 10": select(candidates, 10),
+        "Safest Bets Top 10": select(candidates, 10, safe=True),
+        "Top 3": select(candidates, 3),
+        "Best Overs": select([p for p in candidates if p["side"] == "OVER"], 10),
+        "Best Unders": select([p for p in candidates if p["side"] == "UNDER"], 10),
+    }
+    for market in _NHL_COACH_MARKETS:
+        for side in ("OVER", "UNDER"):
+            rows = [p for p in candidates if p["category"] == market and p["side"] == side]
+            if market == "Plus/Minus" and not rows:
+                rows = [p for p in pm_models if p["side"] == side]
+                groups[f"{market} {side} · Top 5"] = rows[:5]
+            else:
+                groups[f"{market} {side} · Top 5"] = select(rows, 5)
+    for side in ("OVER", "UNDER"):
+        groups[f"Plus/Minus {side} · Model-only"] = [
+            p for p in pm_models if p["side"] == side][:20]
+    return groups
+
+
+def _nhl_store_coach_groups(date_str: str, system: str, groups: dict,
+                            games: list) -> bool:
+    """Freeze each ranked preset once; empty categories can qualify later pregame."""
+    if not any(g.get("gameType") in (2, 3) and _nhl_gp_is_pre_game(
+            {"startTime": g.get("startTime")}) for g in games):
+        return True
+    with _NHL_COACH_PRESET_LOCK:
+        saved = _nhl_coach_storage_rows(_NHL_COACH_PRESET_SNAP_CATS[system], date_str)
+        payload = (saved[0].get("detail") if saved else None)
+        if payload is not None and not isinstance(payload, dict):
+            raise RuntimeError("Saved Coach preset data is invalid; it was not overwritten")
+        payload = payload or {"version": 1, "revision": 0, "presets": {}}
+        prior = payload.get("presets")
+        if not isinstance(prior, dict):
+            raise RuntimeError("Saved Coach preset manifest is invalid")
+        updated = {key: list(rows) for key, rows in prior.items()}
+        changed = not saved
+        for label in _NHL_COACH_PRESET_LABELS + [
+                "All Coach Edge Plays · uncapped",
+                "Plus/Minus OVER · Model-only", "Plus/Minus UNDER · Model-only"]:
+            if label not in updated:
+                updated[label] = []
+                changed = True
+        union_labels = {"All Coach Edge Plays · uncapped",
+                        "Plus/Minus OVER · Model-only", "Plus/Minus UNDER · Model-only"}
+        for label, rows in groups.items():
+            eligible = [p for p in rows if _nhl_gp_is_pre_game(
+                {"startTime": p.get("game_start")})]
+            if label in union_labels:
+                seen = {(str(p.get("pid")), p.get("stat_key"), p.get("side"))
+                        for p in updated.get(label, [])}
+                fresh = []
+                for row in eligible:
+                    identity = (str(row.get("pid")), row.get("stat_key"), row.get("side"))
+                    if identity not in seen:
+                        seen.add(identity)
+                        fresh.append(row)
+                if fresh:
+                    updated.setdefault(label, []).extend(fresh)
+                    changed = True
+            elif not updated.get(label) and eligible:
+                updated[label] = eligible
+                changed = True
+        if not changed:
+            return True
+        capture_time = datetime.utcnow().isoformat() + "Z"
+        for label, rows in updated.items():
+            updated[label] = [{**p, "preset": label,
+                               "captured_at": p.get("captured_at") or capture_time}
+                              for p in rows]
+        payload = {**payload, "presets": updated,
+                   "revision": int(payload.get("revision") or 0) + 1,
+                   "updated_at": capture_time}
+        return _nhl_sb_upsert("mpa_track_ledger", [{
+            "app": _NHL_TRK_APP, "date": date_str,
+            "category": _NHL_COACH_PRESET_SNAP_CATS[system], "side": "ALL",
+            "wins": 0, "losses": 0, "locked": False, "detail": payload,
+        }], "app,date,category,side")
+
+
+async def _nhl_capture_daily_coach(date_str: str, board: dict, system: str):
+    """Capture every preset automatically; never wait for a button click."""
+    if board.get("preseason") or not board.get("officialCaptureAllowed", True):
+        board["coachCaptureStatus"] = "VIEW_ONLY"
+        return
+    games = board.get("games") or []
+    if not any(g.get("gameType") in (2, 3) and _nhl_gp_is_pre_game(
+            {"startTime": g.get("startTime")}) for g in games):
+        board["coachCaptureStatus"] = "NO_PREGAME_GAMES"
+        return
+    board["coachCaptureStatus"] = "CAPTURE_FAILED"
+    try:
+        groups = _nhl_coach_board_groups(board)
+        ok = await asyncio.to_thread(
+            _nhl_store_coach_groups, date_str, system, groups, games)
+        if not ok:
+            raise RuntimeError("Standard Coach presets could not be saved")
+        board["coachCaptureStatus"] = "CAPTURE_PARTIAL"
+        payload = await asyncio.wait_for(_warm_nhl_alt_coach(date_str, system), timeout=120)
+        if payload.get("error") and "No genuine NHL alternate lines" not in payload["error"]:
+            raise RuntimeError(payload["error"])
+        picks = payload.get("picks") or []
+        ok, _ = await asyncio.to_thread(
+            _nhl_save_alt_coach_snapshot, date_str, system, picks, games)
+        if not ok:
+            raise RuntimeError("Alternate Coach audit could not be saved")
+        game_by_team = {team: g for g in games for team in (
+            g.get("homeTeam"), g.get("awayTeam"))}
+        alt_rows = [{
+            "name": p.get("player"), "pid": p.get("pid"), "team": p.get("team"),
+            "opponent": p.get("opponent"), "category": p.get("market"),
+            "stat_key": _NHL_COACH_STAT_KEYS.get(p.get("marketKey")),
+            "side": p.get("side"), "line": p.get("line"), "odds": p.get("odds"),
+            "book": p.get("book"), "score": p.get("appProb"),
+            "app_probability": p.get("appProb", 0) / 100,
+            "implied_probability": p.get("implied", 0) / 100,
+            "coach_edge": p.get("edge"), "rank": rank, "is_overflow": False,
+            "game_start": (game_by_team.get(p.get("team")) or {}).get("startTime"),
+            "result": "PENDING", "actual": None, "profit": None,
+        } for rank, p in enumerate(picks[:10], 1)]
+        ok = await asyncio.to_thread(_nhl_store_coach_groups, date_str, system,
+                                    {"Best Alt-Line Edge Top 10": alt_rows}, games)
+        if not ok:
+            raise RuntimeError("Alternate Top 10 preset could not be saved")
+        board["coachCaptureStatus"] = "AUTO_CAPTURE"
+        board["coachPresetCount"] = len(_NHL_COACH_PRESET_LABELS)
+        board.pop("coachCaptureError", None)
+    except Exception as exc:
+        board["coachCaptureError"] = str(exc) or "Automatic Coach capture failed"
+        logger.exception("NHL automatic Coach capture failed for %s %s", system, date_str)
+
+
+def _nhl_update_coach_presets_ledger(include_date: str = ""):
+    """Settle frozen preset membership automatically, independent of Coach UI."""
+    today = _nhl_record_today()
+    for system in ("A", "B", "C", "D"):
+        try:
+            snapshots = _nhl_coach_storage_rows(_NHL_COACH_PRESET_SNAP_CATS[system])
+            graded_rows = _nhl_coach_storage_rows(_NHL_COACH_PRESET_DETAIL_CATS[system])
+            existing = {r.get("date"): r.get("detail") or {} for r in graded_rows}
+            for saved in snapshots:
+                ds, payload = saved.get("date"), saved.get("detail") or {}
+                if not ds or ds > today or not isinstance(payload, dict):
+                    continue
+                old = existing.get(ds) or {}
+                if old.get("all_final") and old.get("revision") == payload.get("revision"):
+                    continue
+                rows = [p for values in (payload.get("presets") or {}).values()
+                        for p in values]
+                unique = {_nhl_coach_identity(p): p for p in rows}
+                if not unique:
+                    continue
+                graded = _nhl_grade_date(ds, list(unique.values()))
+                if not graded.get("all_final"):
+                    continue
+                results = {_nhl_coach_identity(p): p for p in
+                           graded.get("main", []) + graded.get("overflow", [])}
+                mature = (date.fromisoformat(today) - date.fromisoformat(ds)).days >= 2
+                detail, unresolved = [], False
+                for original in rows:
+                    result = results.get(_nhl_coach_identity(original)) or {}
+                    outcome = result.get("result")
+                    if outcome not in ("WIN", "LOSS", "PUSH"):
+                        if not mature:
+                            unresolved = True
+                            break
+                        outcome = "VOID"
+                    detail.append({**original, "result": outcome,
+                                   "actual": result.get("actual"),
+                                   "profit": (result.get("profit") if original.get("odds")
+                                              is not None else None)})
+                if unresolved:
+                    continue
+                if not _nhl_sb_upsert("mpa_track_ledger", [{
+                    "app": _NHL_TRK_APP, "date": ds,
+                    "category": _NHL_COACH_PRESET_DETAIL_CATS[system], "side": "ALL",
+                    "wins": 0, "losses": 0, "locked": True,
+                    "detail": {"revision": payload.get("revision"),
+                               "all_final": True, "rows": detail},
+                }], "app,date,category,side"):
+                    raise RuntimeError(f"Coach settlement could not be saved for {ds}")
+        except Exception:
+            logger.exception("NHL automatic Coach settlement failed for %s", system)
 
 def _nhl_save_gp_snapshot(date_str: str, result: dict):
     """Freeze the day's game-predictor calls in the shared ledger.
@@ -10459,6 +10789,7 @@ def _nhl_update_track_ledger(include_date: str = ""):
             for i in range(0, len(upserts), 10):
                 _nhl_sb_upsert("mpa_track_ledger", upserts[i:i+10], "app,date,category,side")
             print(f"[nhl_track] wrote {len(upserts)} record rows")
+        _nhl_update_coach_presets_ledger(include_date)
     # GP uses its own row and read-only summary; grade it independently from
     # player-pick stake accounting.
     try:
@@ -11017,8 +11348,41 @@ async def nhl_coach_track(
                 "detail"].extend(alt)
         days = sorted(days_by_date.values(),
                       key=lambda d: d.get("date") or "", reverse=True)
+        try:
+            filters = {} if requested_period == "all" else {
+                "start": start.isoformat(), "end": end.isoformat()}
+            saved_presets = _nhl_coach_storage_rows(
+                _NHL_COACH_PRESET_SNAP_CATS[record_system], **filters)
+            settled_presets = _nhl_coach_storage_rows(
+                _NHL_COACH_PRESET_DETAIL_CATS[record_system], **filters)
+        except Exception:
+            logger.exception("NHL saved Coach presets could not be read")
+            raise HTTPException(status_code=503, detail="Saved Coach presets could not be read. Please retry; records were not erased.")
+        settled = {r.get("date"): r.get("detail") or {} for r in settled_presets}
+        by_date = {d.get("date"): d for d in days}
+        for saved in saved_presets:
+            ds, manifest = saved.get("date"), saved.get("detail") or {}
+            if not selected_date(ds) or not isinstance(manifest, dict):
+                continue
+            graded = settled.get(ds) or {}
+            if graded.get("revision") == manifest.get("revision"):
+                rows = graded.get("rows") or []
+            else:
+                rows = [{**p, "result": "PENDING", "actual": None, "profit": None}
+                        for values in (manifest.get("presets") or {}).values()
+                        for p in values]
+            # Keep existing alternate audit rows. Frozen standard preset
+            # membership replaces only this date's reconstructed Coach lists.
+            audit = [p for p in (by_date.get(ds) or {}).get("detail", [])
+                     if p.get("preset") == "Alternate-Line Coach"]
+            by_date[ds] = {"date": ds, "detail": rows + audit,
+                           "automaticPresetCapture": True}
+        days = sorted(by_date.values(), key=lambda d: d.get("date") or "", reverse=True)
     return JSONResponse({"source": "historical" if historical else "official",
-                         "system": record_system, "dates": days, "stake": 100.0})
+                         "system": record_system, "dates": days, "stake": 100.0,
+                         "automaticPresetCapture": any(
+                             day.get("automaticPresetCapture") for day in days),
+                         "presetLabels": _NHL_COACH_PRESET_LABELS if not historical else []})
 
 
 def _nhl_save_historical_analysis(
