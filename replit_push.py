@@ -14,6 +14,9 @@
 #   3. In main.py, add the 2-line patch shown at the bottom of this file
 # ===================================================================
 
+import base64
+import gzip
+import json
 import os
 import logging
 
@@ -60,16 +63,34 @@ def push_picks_to_replit(sport: str, result: dict, html: str = "") -> None:
 
     url = f"{base_url}/api/picks/{sport}"
     try:
+        # Compress the complete request, including picks, HTML and counts.
+        # A JSON envelope keeps Express's existing 10 MB body limit on the
+        # compressed transfer, rather than its larger, inflated contents.
+        raw = json.dumps(
+            body, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+        compressed = gzip.compress(raw, compresslevel=6, mtime=0)
+        transfer = {
+            "transferEncoding": "mpa-snapshot-gzip-base64-v1",
+            "uncompressedBytes": len(raw),
+            "data": base64.b64encode(compressed).decode("ascii"),
+        }
+        log.info(
+            "[replit_push] %s snapshot: %d bytes -> %d gzip bytes (%d base64 bytes)",
+            sport.upper(), len(raw), len(compressed), len(transfer["data"]),
+        )
         with httpx.Client(timeout=10.0) as client:
             r = client.post(
                 url,
-                json=body,
+                json=transfer,
                 headers={"x-internal-token": token, "Content-Type": "application/json"},
             )
             if r.status_code == 200:
                 log.info(f"[replit_push] {sport.upper()} pushed ({body['pickCount']} picks)")
             else:
                 log.error(f"[replit_push] {sport.upper()} push failed {r.status_code}: {r.text[:200]}")
+                if r.status_code in (400, 415):
+                    log.error("[replit_push] The hub must support compressed snapshots before this sender is deployed.")
     except Exception as e:
         log.error(f"[replit_push] {sport.upper()} push exception: {e}")
 
