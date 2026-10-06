@@ -12,6 +12,9 @@ import os, hmac, asyncio, re, unicodedata, time, json, logging, html, math
 from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
+_NHL_BOOT_STARTED = time.monotonic()
+logging.getLogger("uvicorn.error").info("NHL startup: loading application module")
+
 import httpx
 from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -52,6 +55,7 @@ def _is_admin_token(token: str) -> bool:
 
 app      = FastAPI(title="NHL Shots Picks")
 logger   = logging.getLogger("nhl_money_shots")
+logging.getLogger("uvicorn.error").info("NHL startup: dependencies loaded; registering routes")
 
 NHL_API      = "https://api-web.nhle.com/v1"
 NHL_STATS    = "https://api.nhle.com/stats/rest/en"
@@ -10468,7 +10472,16 @@ def _nhl_trk_bg():
     except Exception as e:
         print(f"[nhl_track] bg error: {e}")
 
-_bt_th.Thread(target=_nhl_trk_bg, daemon=True).start()
+async def _nhl_startup_record_catchup():
+    """Keep existing catch-up work out of module import and port binding."""
+    # Uvicorn must finish lifespan startup and bind its socket before the
+    # four-system ledger job starts consuming CPU, memory or external APIs.
+    # Do not await this task from the startup event.
+    await asyncio.sleep(30)
+    logging.getLogger("uvicorn.error").info(
+        "NHL startup: launching deferred record catch-up")
+    _bt_th.Thread(
+        target=_nhl_trk_bg, name="nhl-record-catchup", daemon=True).start()
 
 
 def _nhl_settle_bet(bet: dict) -> bool:
@@ -11394,6 +11407,25 @@ async def validate_dashboard_shell():
         logger.error("NHL dashboard startup validation failed")
     else:
         logger.info("NHL dashboard startup validation passed (%d bytes)", len(rendered))
+    if getattr(app.state, "nhl_startup_record_task", None) is None:
+        app.state.nhl_startup_record_task = asyncio.create_task(
+            _nhl_startup_record_catchup())
+    logging.getLogger("uvicorn.error").info(
+        "NHL startup: ready for port binding in %.2fs; record catch-up deferred",
+        time.monotonic() - _NHL_BOOT_STARTED)
+
+
+@app.on_event("shutdown")
+async def cancel_deferred_nhl_record_catchup():
+    """A stopped deployment must not launch its delayed catch-up job."""
+    task = getattr(app.state, "nhl_startup_record_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    app.state.nhl_startup_record_task = None
 
 
 @app.get("/", response_class=HTMLResponse)
