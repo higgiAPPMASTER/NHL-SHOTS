@@ -1186,6 +1186,77 @@ def _nhl_c_confidence_rate(hits: int, total: int, z: float = 1.28) -> float:
 
 
 _NHL_D_LINES_CACHE: Dict[Tuple[str, str], tuple] = {}
+_NHL_PP_UNITS_CACHE: Dict[Tuple[str, str], tuple] = {}
+
+
+async def _nhl_pp_published_units(games: List[Dict], target_date: str) -> Dict[str, Dict]:
+    """Published PP1/PP2 candidates only; never infer live units from ice time."""
+    teams = {team for game in games
+             for team in (game.get("homeTeam"), game.get("awayTeam")) if team}
+    selected_day = date.fromisoformat(target_date)
+    semaphore = asyncio.Semaphore(6)
+    async with httpx.AsyncClient(
+            follow_redirects=True, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MoneyPicksArena/1.0)"}
+    ) as client:
+        async def fetch(team):
+            key = (target_date, team)
+            cached = _NHL_PP_UNITS_CACHE.get(key)
+            now = time.monotonic()
+            if cached and now - cached[0] < (300 if cached[1] else 60):
+                return team, cached[1]
+            selected = {}
+            try:
+                slug = ("utah-mammoth" if team == "UTA" else
+                        re.sub(r"[^a-z0-9]+", "-", _NHL_TEAM_FULL[team].lower()).strip("-"))
+                url = f"https://www.dailyfaceoff.com/teams/{slug}/line-combinations"
+                async with semaphore:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                if len(response.content) > 2_000_000:
+                    raise ValueError("PP unit page too large")
+                match = re.search(
+                    r'<script[^>]*\bid="__NEXT_DATA__"[^>]*>(.*?)</script>',
+                    response.text, re.S)
+                if not match:
+                    raise ValueError("PP unit page has no structured data")
+                page = json.loads(html.unescape(match.group(1)))["props"]["pageProps"]
+                combination = page["combinations"]
+                if (page.get("slug") != slug or combination.get("teamSlug") != slug
+                        or combination.get("teamAbbreviation") != team):
+                    raise ValueError("PP unit team mismatch")
+                source = str(combination.get("sourceName") or "")
+                if "offseason" in source.lower():
+                    raise ValueError("offseason projection is not a current PP unit")
+                updated = datetime.fromisoformat(
+                    str(combination["updatedAt"]).replace("Z", "+00:00"))
+                if not -1 <= (selected_day - updated.date()).days <= 2:
+                    raise ValueError("PP unit update is not current")
+                if not isinstance(combination.get("players"), list):
+                    raise ValueError("PP unit players missing")
+                groups = {"pp1": "PP1", "pp2": "PP2"}
+                for row in combination["players"]:
+                    if not isinstance(row, dict) or row.get("categoryIdentifier") != "pp":
+                        continue
+                    unit = groups.get(row.get("groupIdentifier"))
+                    name = _nhl_starter_name_key(row.get("name"))
+                    if not unit or not name:
+                        continue
+                    if name in selected and selected[name]["ppUnit"] != unit:
+                        raise ValueError("conflicting PP assignments")
+                    selected[name] = {
+                        "ppUnit": unit, "ppUnitSource": "Daily Faceoff",
+                        "ppUnitSourceDetail": source, "ppUnitSourceUrl": url,
+                        "ppUnitUpdatedAt": combination["updatedAt"], "ppUnitsVersion": 1,
+                    }
+                if {info["ppUnit"] for info in selected.values()} != {"PP1", "PP2"}:
+                    raise ValueError("both published PP units are unavailable")
+            except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+                logger.warning("PP1/PP2 assignments unavailable for %s: %s", team, exc)
+                selected = {}
+            _NHL_PP_UNITS_CACHE[key] = (now, selected)
+            return team, selected
+        return dict(await asyncio.gather(*(fetch(team) for team in sorted(teams))))
 
 
 async def _nhl_d_published_lines(games: List[Dict], target_date: str) -> Dict[str, Dict]:
@@ -2565,6 +2636,8 @@ async def get_pts_picks(
     shared_rosters: Dict[str, List[Dict]] = None,
     schedule_context: Dict[str, Dict] = None,
     system: str = "A",
+    pp_units: Optional[Dict[str, Dict]] = None,
+    pp_rosters: Optional[Dict[str, List[Dict]]] = None,
 ):
     """Independent points + power-play points + assists + goals picks using NHL Stats API game logs.
     Returns (points_picks, assist_picks, points_unders, assist_unders, goal_picks,
@@ -2594,10 +2667,24 @@ async def get_pts_picks(
         )
         rosters = {t: (r if isinstance(r, list) else []) for t, r in zip(team_ctx.keys(), roster_vals)}
 
+    # D's normal markets retain F1/F2 + D1/D2. PP alone may also use a
+    # published PP2 member outside that even-strength pool.
+    regular_ids = {p["id"] for players in rosters.values() for p in players}
+    analysis_rosters = {team: list(players) for team, players in rosters.items()}
+    if pp_units is not None:
+        for team, players in (pp_rosters or {}).items():
+            if team not in team_ctx:
+                continue
+            present = {p["id"] for p in analysis_rosters.get(team, [])}
+            for player in players:
+                if (player["id"] not in present
+                        and _nhl_starter_name_key(player.get("name")) in (pp_units.get(team) or {})):
+                    analysis_rosters.setdefault(team, []).append(player)
+                    present.add(player["id"])
     # Fetch multi-season game logs for all players concurrently
     all_players = []
     seen_pts = set()
-    for team, players in rosters.items():
+    for team, players in analysis_rosters.items():
         if team not in team_ctx:
             continue
         ctx = team_ctx[team]
@@ -2672,6 +2759,11 @@ async def get_pts_picks(
                 and pp_usage_games * 2 >= pp_usage_total
                 and pp_role_avg_sec >= C_PP_MIN_AVG_TOI_SEC
             )
+        pp_assignment = {}
+        if pp_units is not None:
+            pp_assignment = (pp_units.get(team) or {}).get(
+                _nhl_starter_name_key(player.get("name")), {})
+            pp_role_ok = pp_assignment.get("ppUnit") in ("PP1", "PP2")
 
         def build_pick(stat_key, base_line, thresh, lines_map, mkt_label,
                        model_only=False, allow_model_fallback=False,
@@ -2844,7 +2936,7 @@ async def get_pts_picks(
 
         pp = build_pick(
             "points", PTS_LINE, HIT_THRESH_PTS, pts_lines_map, "Points (1+)",
-            allow_model_fallback=True, qualify_either=True)
+            allow_model_fallback=True, qualify_either=True) if player["id"] in regular_ids else None
         if pp:
             # Keep legacy point keys so the existing table + parlay code still works
             pp.update({
@@ -2858,26 +2950,27 @@ async def get_pts_picks(
 
         ap = build_pick(
             "assists", AST_LINE, HIT_THRESH_AST, ast_lines_map,
-            "Assists (1+)", allow_model_fallback=True)
+            "Assists (1+)", allow_model_fallback=True) if player["id"] in regular_ids else None
         if ap:
             if ap["overOk"]: ast_picks.append(ap)
             if ap["underOk"]: ast_unders.append(ap)
 
         gp = build_pick(
             "goals", 0.5, HIT_THRESH_GOALS, goal_lines_map,
-            "Goals (1+)", allow_model_fallback=True)
+            "Goals (1+)", allow_model_fallback=True) if player["id"] in regular_ids else None
         if gp:
             if gp["overOk"]: goal_picks.append(gp)
             if gp["underOk"]: goal_unders.append(gp)
 
-        # PP Points must come from a verified regular special-teams player,
-        # not merely a lineup-eligible skater with a one-off PP appearance.
+        # Live PP eligibility uses published units; replay retains its
+        # original pre-date usage proof instead of importing today's lineup.
         ppp = None
         if pp_role_ok:
             ppp = build_pick(
                 "powerPlayPoints", PTS_LINE, HIT_THRESH_PP, {},
                 "Power Play Points (1+)", model_only=True)
         if ppp:
+            ppp.update(pp_assignment)
             ppp["ppUsageGames"] = pp_usage_games
             ppp["ppUsageTotal"] = pp_usage_total
             ppp["ppToiAvgSec"] = pp_role_avg_sec
@@ -3936,6 +4029,15 @@ async def run_picks(
         lineup_maps=[lines_map, pts_lines_map, ast_lines_map, goal_lines_map],
         include_unconfirmed=True,
     )
+    pp_rosters = skater_rosters
+    pp_units = None if simulate else await _nhl_pp_published_units(games, target_date)
+    pp_only_pool = bool(not pool and pp_units and any(
+        _nhl_starter_name_key(player.get("name")) in (pp_units.get(team) or {})
+        for team, players in pp_rosters.items() for player in players))
+    if pp_only_pool:
+        # PP eligibility is independent of the shots pool. Keep other
+        # markets empty exactly as before when no shots-phase pool exists.
+        skater_rosters = {}
     if simulate or unpriced_mode:
         fallback_source = "Simulation" if simulate else "No book line"
         for player in pool:
@@ -3970,7 +4072,7 @@ async def run_picks(
         _fill_sim_map(goal_lines_map, 0.5)
     _progress = {"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35}
 
-    if not pool:
+    if not pool and not pp_only_pool:
         # The team-level predictor does not depend on sportsbook player props.
         # Keep it available while pregame lineup/prop markets are still empty.
         game_preds = []
@@ -3984,6 +4086,9 @@ async def run_picks(
         return {
             "date": target_date, "targetDate": target_date, "season": season,
             "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
+            "ppUnitsVersion": 1 if pp_units is not None else None,
+            "ppUnitMissingTeams": sorted(
+                team for team, assignments in (pp_units or {}).items() if not assignments),
             "simulation": bool(simulate),
             "system": system, "games": games, "picks": [], "sa_ranks": sa_ranks,
             "game_predictions": game_preds, "qualified": 0, "poolSize": 0,
@@ -4196,10 +4301,11 @@ async def run_picks(
      pp_all, pp_unders) = await get_pts_picks(
         games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date, goal_lines_map,
         goalie_map=goalie_map, shared_logs=logs_map, shared_rosters=skater_rosters,
-        schedule_context=schedule_context, system=system)
+        schedule_context=schedule_context, system=system,
+        pp_units=pp_units, pp_rosters=pp_rosters)
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
     goalie_lookup_profiles = []
-    saves_all, saves_unders = await get_saves_picks(
+    saves_all, saves_unders = ([], []) if pp_only_pool else await get_saves_picks(
         games, sa_map, sem_nhl, season, sv_lines_map, target_date,
         simulate=simulate, allow_fallback=not simulate,
         lineup_maps=[sv_lines_map], schedule_context=schedule_context,
@@ -4220,7 +4326,7 @@ async def run_picks(
                 return False
             return line > 0 and (price >= 100 or -1000 <= price <= -100)
 
-        # D's live pilot has no model-only recommendations. Filter each side
+        # D's other live markets remain priced-only. Filter each side
         # independently: a posted Over never supplies a missing Under price.
         picks = [p for p in picks if quoted(p, "OVER")]
         shot_unders = [p for p in shot_unders if quoted(p, "UNDER")]
@@ -4232,9 +4338,8 @@ async def run_picks(
         goal_unders_all = [p for p in goal_unders_all if quoted(p, "UNDER")]
         saves_all = [p for p in saves_all if quoted(p, "OVER")]
         saves_unders = [p for p in saves_unders if quoted(p, "UNDER")]
-        # This market is intentionally model-only today; leave the category
-        # registered, but do not put unbettable PP picks on D's live board.
-        pp_all, pp_unders = [], []
+        # Explicit PP-only exception: qualifying published PP1/PP2 members
+        # stay visible as unpriced model plays, without changing other markets.
     # Admin comparison only: reproduce the attached pre-change system from the
     # exact same corrected data/odds/lineup pool.  This changes selection and
     # ordering only; it never triggers another external-data fetch.
@@ -4343,9 +4448,12 @@ async def run_picks(
         _split("goalUnders", "goalUndersRest", legacy_goal_unders)
         _split("savesPicks", "savesRest", legacy_saves)
         _split("savesUnders", "savesUndersRest", legacy_saves_unders)
-        # Power Play Points did not exist in the attached old application.
-        for key in ("ppPicks", "ppRest", "ppUnders", "ppUndersRest"):
-            legacy_system[key] = []
+        legacy_pp = [_legacy_pick(player) for player in pp_all]
+        legacy_pp_unders = [_legacy_pick(player) for player in pp_unders]
+        legacy_pp.sort(key=lambda x: (x.get("dispScore", 0), x.get("oppSA", 0)), reverse=True)
+        legacy_pp_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
+        _split("ppPicks", "ppRest", legacy_pp)
+        _split("ppUnders", "ppUndersRest", legacy_pp_unders)
     archived_line_count = len({
         (pick.get("pid"), pick.get("mkt"), pick.get("realLine"))
         for group in (
@@ -4425,6 +4533,9 @@ async def run_picks(
 
     _result = {
         "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
+        "ppUnitsVersion": 1 if pp_units is not None else None,
+        "ppUnitMissingTeams": sorted(
+            team for team, assignments in (pp_units or {}).items() if not assignments),
         "picks":         picks[:TOP_N],
         "rest":          picks[TOP_N:TOP_N*2],
         "ptsPicks":      pts_all[:TOP_N],
@@ -6592,6 +6703,8 @@ function _fmtToi(sec){
 }
 function _sigBadges(p,hideForm){
   var out='';
+  if(p.ppUnit==='PP1'||p.ppUnit==='PP2')
+    out+='<span class="sig-badge sig-pp" title="'+_nhlEsc((p.ppUnitSourceDetail||p.ppUnitSource||'Published unit')+' · '+(p.ppUnitUpdatedAt||''))+'">'+_nhlEsc(p.ppUnit)+' · '+_nhlEsc(p.ppUnitSource||'Published unit')+'</span>';
   var rd=p.restDays;
   if(rd!=null){
     if(rd<=1) out+='<span class="sig-badge sig-b2b">B2B / No Rest</span>';
@@ -6677,6 +6790,8 @@ function _nhlQualText(p){
       :'';
   var ppNote=(m==='Power Play Points (1+)'&&p.ppUsageGames!=null)
     ?' · PP role '+p.ppUsageGames+'/'+(p.ppUsageTotal||10)+' recent games':'';
+  if(m==='Power Play Points (1+)'&&p.ppUnit)
+    ppNote=' · published '+p.ppUnit+' · '+(p.ppUnitSource||'unit source');
   return _nhlEsc(basis)+': '+hits+'/'+total+' ('+rate+'%) ≥ '+threshold+'%'+_nhlEsc(note+ppNote);
 }
 function _nhlUnderWhy(p){
@@ -6684,6 +6799,8 @@ function _nhlUnderWhy(p){
   var basis=p.underBasis||'L10 Home/Away';
   var ppNote=(String(p.mkt||'')==='Power Play Points (1+)'&&p.ppUsageGames!=null)
     ?' · PP role '+p.ppUsageGames+'/'+(p.ppUsageTotal||10)+' recent games':'';
+  if(String(p.mkt||'')==='Power Play Points (1+)'&&p.ppUnit)
+    ppNote=' · published '+p.ppUnit+' · '+(p.ppUnitSource||'unit source');
   var roleNote=(String(p.mkt||'')==='Goals (1+)'&&p.underRankScore!=null)
     ?' · role-weighted rank '+Number(p.underRankScore).toFixed(1)+' · '+_fmtToi(p.toiAvgSec)+' TOI'+(p.ppToiAvgSec>60?' / '+_fmtToi(p.ppToiAvgSec)+' PP':''):'';
   return _nhlEsc(basis)+': '+Number(p.underHits||0)+'/'+Number(p.underTotal||0)+' ('+Number(p.underRate||0)+'%) ≥ 60%'+_nhlEsc(ppNote+roleNote);
@@ -7025,6 +7142,13 @@ function renderNhlGamePredictor(preds){
   if(!preds||!preds.length) return '<div class="no-picks">No game predictions available.</div>';
   var h='<div class="gp-grid">';
   preds.forEach(function(g){
+    if(g.savedGamePrediction){
+      g=Object.assign({},g);
+      ['hGfPG','hGaPG','hPpPct','hPkPct','hHomeRec','hL10','hPts','hPctg',
+       'aGfPG','aGaPG','aPpPct','aPkPct','aRoadRec','aL10','aPts','aPctg'].forEach(function(k){
+        if(g[k]==null)g[k]='Unavailable';
+      });
+    }
     var t=g.startTime?new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}):'';
     var hp=Math.round(g.winProbHome*100), ap=100-hp;
     var isHomePick=g.pickTeam===g.homeTeam;
@@ -7039,7 +7163,10 @@ function renderNhlGamePredictor(preds){
     var prior=g.totalSeason||'',seasonLabel=prior?prior.slice(0,4)+'–'+prior.slice(-2):'Prior season';
     var ph=g.priorHome||{},pa=g.priorAway||{},same=g.h2hSame||{},reverse=g.h2hReverse||{};
     var priorRate=function(row){return row.games>=5?row.gf+' / '+row.ga+' ('+row.games+' GP)':'Unavailable';};
-    var h2hRate=function(row){return row.games?row.avg+' goals / '+row.games+' games':'No meetings';};
+    var h2hRate=function(row){
+      if(g.savedGamePrediction&&row.games==null)return 'Unavailable';
+      return row.games?row.avg+' goals / '+row.games+' games':'No meetings';
+    };
     function sBadge(s){
       if(!s) return '';
       return '<span class="gp-stk '+(s[0]==='W'?'win-stk':'loss-stk')+'">'+s+'</span>';
@@ -7289,6 +7416,8 @@ function _nhlUpcomingBoard(raw){
   d.game_predictions=(raw.game_predictions||[]).filter(function(g){
     var t=Date.parse(g.startTime);return Number.isFinite(t)&&Date.now()<t;
   });
+  if((raw.game_predictions||[]).length&&!d.game_predictions.length)
+    d.savedGamePredictorNote='No verified upcoming Game Predictor games. Started games are hidden from live Picks; this does not mean the saved forecast is missing.';
   d.liveUpcomingPickCount=visible;
   if(total&&!visible)d.data_note='No upcoming saved plays. Started/finished games are hidden here; their picks remain in Track Record and Overflow.'
     +(raw.savedPickRecovery&&!(raw.games||[]).length?' Saved start times are unavailable, so these selections cannot be verified as upcoming.':'');
@@ -7421,6 +7550,7 @@ function _nhlPaint(q){
   }
   function _ppRoleEligible(p){
     if(p.savedSnapshot)return true; // Already-qualified original published pick.
+    if(p.ppUnitsVersion===1)return p.ppUnit==='PP1'||p.ppUnit==='PP2';
     var games=Number(p&&p.ppUsageGames||0),total=Number(p&&p.ppUsageTotal||0);
     var avg=Number(p&&p.ppToiAvgSec||0);
     return total>=2&&games>=2&&games*2>=total&&avg>=30;
@@ -7467,9 +7597,13 @@ function _nhlPaint(q){
 
   // ── Game Predictor ────────────────────────────────────────────────────────
   var _gpPreds = d.game_predictions || [];
+  h += '<div class="sec">\\uD83D\\uDD2E Game Predictor \u2014 Win Probability & Projected Totals</div>';
+  if(d.savedGamePredictorNote)
+    h += '<div class="gp-history-note">'+_nhlEsc(d.savedGamePredictorNote)+'</div>';
   if(_gpPreds.length){
-    h += '<div class="sec">\\uD83D\\uDD2E Game Predictor \u2014 Win Probability & Projected Totals</div>';
     h += renderNhlGamePredictor(_gpPreds);
+  }else if(!d.savedGamePredictorNote){
+    h += '<div class="no-picks">No saved game predictions are available for this board.</div>';
   }
 
   // ── 🔒 80–100% Locks — cross-market picks hitting 80%+ ────────────────
@@ -7536,15 +7670,26 @@ function _nhlPaint(q){
   }
   // POWER PLAY POINTS cards — model 0.5 line
   h += '<div id="nhl-section-pp-points" class="nhl-scroll-anchor"></div>';
+  if(d.ppUnitsVersion===1){
+    h+='<div class="gp-history-note">PP Points uses published PP1/PP2 members · model line 0.5 · sportsbook odds are not required.</div>';
+    if((d.ppUnitMissingTeams||[]).length)
+      h+='<div class="gp-history-note">Current PP1/PP2 assignments unavailable for '+_nhlEsc(d.ppUnitMissingTeams.join(', '))+'. No units were guessed.</div>';
+  }else if(!d.simulation&&!d.historical){
+    h+='<div class="gp-history-note">PP1/PP2 assignments were not stored in this older board. The next normal analysis uses published units; existing saved plays are unchanged.</div>';
+  }
   if((d.ppPicks||[]).length){
     h += '<div class="sec">⚡ Top ' + d.ppPicks.length + ' Power Play Points (1+) — MODEL</div>';
     h += nhlCardGrid(d.ppPicks);
     h += nhlRestBlock(d.ppRest, 'power play points', '#c084fc');
+  }else{
+    h+='<div class="sec">⚡ Power Play Points (1+) — OVER · MODEL</div><div class="no-picks">No qualifying visible PP Over plays in this saved board.</div>';
   }
   if((d.ppUnders||[]).length){
     h += '<div class="sec">⬇ Top ' + d.ppUnders.length + ' Power Play Points (1+) — UNDER · MODEL</div>';
     h += nhlUnderGrid(d.ppUnders);
     h += nhlUnderRestBlock(d.ppUndersRest, 'power play points under', '#f87171');
+  }else{
+    h+='<div class="sec">⬇ Power Play Points (1+) — UNDER · MODEL</div><div class="no-picks">No qualifying visible PP Under plays in this saved board.</div>';
   }
   // ASSISTS cards
   h += '<div id="nhl-section-assists" class="nhl-scroll-anchor"></div>';
@@ -9310,6 +9455,9 @@ def _nhl_save_picks_snapshot(
                 # duplicate 80-100% Locks record alongside the base category.
                 "score": p.get("score") or p.get("dispScore") or p.get("ptsScore") or 0,
                 "rank": rank, "is_overflow": ovf,
+                **({key: p.get(key) for key in (
+                    "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
+                    "ppUnitUpdatedAt", "ppUnitsVersion")} if sk == "PP_POINTS" else {}),
             })
             if cat == "Goalie Saves":
                 frozen_goalie_sides.add((team, side))
@@ -9759,6 +9907,10 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
                    "line": line_raw, "odds": odds, "rank": rank,
                    "book": p.get("book", ""),
                    "result": result_val, "actual": actual, "profit": profit}
+            if sk == "PP_POINTS":
+                row.update({key: p.get(key) for key in (
+                    "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
+                    "ppUnitUpdatedAt", "ppUnitsVersion")})
             row["is_overflow"] = bool(is_ovf)
             if not is_ovf:
                 main_rows.append(row)
@@ -9818,6 +9970,10 @@ def _nhl_detail_graded(graded: dict) -> list:
         out.append({k: row.get(k) for k in
                     ("name","team","category","side","stat_key","line","odds","rank",
                      "result","actual","profit","is_overflow")})
+        if row.get("stat_key") == "PP_POINTS":
+            out[-1].update({key: row.get(key) for key in (
+                "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
+                "ppUnitUpdatedAt", "ppUnitsVersion")})
     return out
 
 _NHL_TRK_LOCK = _bt_th.Lock()
@@ -10920,6 +11076,7 @@ async def api_picks(request: Request, target_date: str = None, token: str = "",
     key = target_date or date.today().isoformat()
     cached = None if simulate else _cache_get("nhl", key)
     if cached:
+        cached = await asyncio.to_thread(_nhl_restore_saved_gp, cached, key)
         return JSONResponse(cached)
     result = await run_picks(target_date, simulate=simulate)
     if "error" not in result and not simulate:
@@ -12149,6 +12306,121 @@ def _nhl_saved_number(value):
         return None
 
 
+def _nhl_read_saved_gp_board(date_str: str):
+    """Read the shared A game forecast, without running or recovering models."""
+    path = _cache_path("nhl", date_str)
+    if path.exists():
+        try:
+            board = _nhl_valid_live_board(
+                json.loads(path.read_text(encoding="utf-8")), date_str, "A")
+            if board is not None and board.get("game_predictions"):
+                return board
+        except (OSError, ValueError):
+            pass
+    if not _NHL_SB_URL or not _NHL_SB_KEY:
+        raise RuntimeError("Saved Game Predictor storage is unavailable.")
+    params = {
+        "app": "eq." + _NHL_TRK_APP + "_live_boards",
+        "category": "eq.__board_A__", "side": "eq.ALL",
+        "date": "eq." + date_str, "select": "detail", "limit": "1",
+    }
+    for attempt in range(3):
+        try:
+            response = httpx.get(
+                f"{_NHL_SB_URL}/rest/v1/mpa_track_ledger",
+                headers={"apikey": _NHL_SB_KEY,
+                         "Authorization": f"Bearer {_NHL_SB_KEY}"},
+                params=params, timeout=10)
+            if response.status_code == 200:
+                rows = response.json()
+                if not isinstance(rows, list):
+                    raise ValueError("Invalid saved Game Predictor board response")
+                if rows:
+                    detail = rows[0].get("detail")
+                    if (not isinstance(detail, dict) or detail.get("version") != 1
+                            or detail.get("date") != date_str or detail.get("system") != "A"):
+                        raise ValueError("Saved Game Predictor board identity mismatch")
+                    board = _nhl_valid_live_board(detail.get("board"), date_str, "A")
+                    if board is None:
+                        raise ValueError("Invalid saved Game Predictor board")
+                    return board
+                if attempt == 2:
+                    return None
+        except (httpx.RequestError, ValueError, AttributeError, TypeError):
+            logger.warning("NHL saved Game Predictor board read failed (attempt %s)", attempt + 1)
+        if attempt < 2:
+            time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError("Saved Game Predictor board could not be read.")
+
+
+def _nhl_restore_saved_gp(board: dict, date_str: str):
+    """Attach existing shared forecasts only; never change player selections."""
+    if board.get("game_predictions") or board.get("simulation") or board.get("historical"):
+        return board
+    board = dict(board)
+    rows = []
+    source = ""
+    read_failed = False
+    # C/D intentionally skip computing GP; it is the shared team forecast,
+    # not a C/D player projection. Never copy A's player picks or probabilities.
+    if board.get("system") != "A":
+        try:
+            saved = _nhl_read_saved_gp_board(date_str)
+            if saved:
+                rows = saved.get("game_predictions") or []
+                source = "saved A display board"
+                if not board.get("games"):
+                    board["games"] = saved.get("games") or []
+        except RuntimeError:
+            read_failed = True
+    if not rows:
+        try:
+            rows = _nhl_read_saved_selection_rows(date_str, _NHL_GP_CAT)
+            source = "saved pre-game Game Predictor record"
+        except RuntimeError:
+            read_failed = True
+    predictions = []
+    fixtures = []
+    invalid = 0
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("homeTeam") or not row.get("awayTeam"):
+            invalid += 1
+            continue
+        fixtures.append({key: row.get(key) for key in (
+            "gameId", "homeTeam", "awayTeam", "startTime", "homeFull", "awayFull",
+            "gameType", "gameTypeLabel", "season")})
+        numbers = {key: _nhl_saved_number(row.get(key)) for key in (
+            "winProbHome", "pickProb", "projHome", "projAway", "projTotal")}
+        if (any(value is None for value in numbers.values())
+                or not 0 <= numbers["winProbHome"] <= 1
+                or not 0 <= numbers["pickProb"] <= 100
+                or row.get("pickTeam") not in (row["homeTeam"], row["awayTeam"])):
+            invalid += 1
+            continue
+        predictions.append({**row, "savedGamePrediction": True})
+    if not board.get("games"):
+        board["games"] = fixtures
+    board["game_predictions"] = predictions
+    if predictions:
+        board["savedGamePredictorState"] = "available"
+        board["savedGamePredictorSource"] = source
+        board["savedGamePredictorNote"] = (
+            "Shared Game Predictor restored from the " + source
+            + ". Player-system picks and records are unchanged; unsaved context is unavailable.")
+    elif read_failed:
+        board["savedGamePredictorState"] = "read_failed"
+        board["savedGamePredictorNote"] = (
+            "Saved Game Predictor data could not be read. This does not mean no forecasts were saved.")
+    else:
+        board["savedGamePredictorState"] = "missing"
+        board["savedGamePredictorNote"] = (
+            "No recoverable Game Predictor forecasts were saved for this date. No predictions were regenerated.")
+    if invalid:
+        board["savedGamePredictorNote"] += (
+            f" {invalid} saved game rows lack complete forecast fields and cannot be displayed as predictions.")
+    return board
+
+
 def _nhl_board_from_saved_selections(date_str: str, system: str):
     """Restore published picks, not missing model inputs or a new candidate pool."""
     rows = _nhl_read_saved_selection_rows(date_str, _NHL_SYSTEM_SNAP_CATS[system])
@@ -12156,8 +12428,6 @@ def _nhl_board_from_saved_selections(date_str: str, system: str):
     if not rows:
         rows = _nhl_read_saved_selection_rows(date_str, _NHL_SYSTEM_DETAIL_CATS[system])
         source = "saved_graded_detail"
-    if not rows:
-        return None
     ds = date.fromisoformat(date_str)
     year = ds.year if ds.month >= 7 else ds.year - 1
     board = {
@@ -12227,26 +12497,27 @@ def _nhl_board_from_saved_selections(date_str: str, system: str):
             "savedResult": row.get("result"), "position": row.get("position"),
             "positionGroup": row.get("positionGroup"),
         }
+        if category == "Power Play Points":
+            pick.update({key: row.get(key) for key in (
+                "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
+                "ppUnitUpdatedAt", "ppUnitsVersion")})
         board[key].append(pick)
         count += 1
-    if not count:
+    if rows and not count:
         raise RuntimeError("Saved detail contains no recoverable base-category selections.")
     for key, *_ in _NHL_TRK_LISTS:
         board[key].sort(key=lambda p: (
             p["savedRank"] is None,
             p["savedRank"] if p["savedRank"] is not None else 0))
-    # Only fixture identities from the saved GP source are reused. Never borrow
-    # A's predictions/probabilities to manufacture a B/C/D model board.
-    try:
-        gp = _nhl_read_saved_selection_rows(date_str, _NHL_GP_CAT)
-        for game in gp:
-            if not isinstance(game, dict):
-                continue
-            if game.get("homeTeam") and game.get("awayTeam"):
-                board["games"].append({key: game.get(key) for key in (
-                    "homeTeam", "awayTeam", "startTime", "homeFull", "awayFull")})
-    except RuntimeError:
-        board["data_note"] += " Saved matchup context could not be read."
+    board = _nhl_restore_saved_gp(board, date_str)
+    if not rows:
+        if not board["games"] and not board["game_predictions"]:
+            if board.get("savedGamePredictorState") == "read_failed":
+                raise RuntimeError(board["savedGamePredictorNote"])
+            return None
+        board["data_note"] = (
+            "Restored saved shared Game Predictor data. No saved player selections "
+            "were found for this system/date. No models were rerun and no records were changed.")
     if not board["games"]:
         board["data_note"] += " Matchup identities were not saved; game filtering is unavailable for these restored selections."
     for key, *_ in _NHL_TRK_LISTS:
@@ -12278,7 +12549,7 @@ def _nhl_load_live_board(date_str: str, system: str):
             board = _nhl_valid_live_board(
                 json.loads(path.read_text(encoding="utf-8")), date_str, system)
             if board is not None:
-                return board
+                return _nhl_restore_saved_gp(board, date_str)
             local_error = True
         except (OSError, ValueError):
             local_error = True
@@ -12310,7 +12581,7 @@ def _nhl_load_live_board(date_str: str, system: str):
                     board = _nhl_valid_live_board(detail.get("board"), date_str, system)
                     if board is None:
                         raise ValueError("Saved board identity or schema does not match")
-                    return board
+                    return _nhl_restore_saved_gp(board, date_str)
                 if attempt == 2:
                     recovered = _nhl_board_from_saved_selections(date_str, system)
                     if recovered is not None:
