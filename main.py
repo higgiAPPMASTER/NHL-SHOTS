@@ -72,6 +72,9 @@ _NHL_ALT_COACH_INFLIGHT: Dict[str, asyncio.Task] = {}
 HIT_THRESH         = 70.0  # % hit rate to qualify against the posted sportsbook line
 HIT_THRESH_PTS     = 60.0  # % hit rate to qualify for Points
 HIT_THRESH_PP      = 50.0  # % hit rate to qualify for model-only Power Play Points
+HIT_THRESH_PM      = 60.0  # same opponent-first / venue-L10 gate as Assists
+PLUS_MINUS_LINE    = 0.5   # OVER = +1 or better; UNDER = zero or negative
+_NHL_STANDARD_PP_LINES: Dict[str, Dict] = {}
 PP_MIN_USAGE_GAMES = 2     # floor; PP time must also appear in >= half the recent sample
 PP_MIN_AVG_TOI_SEC = 30    # excludes one-off/end-of-power-play appearances
 PTS_LINE      = 0.5   # legacy default only; published picks require a book line
@@ -2088,13 +2091,15 @@ async def get_shot_lines(
             live_odds_date
             and not _oc.get("goals_ou_requested", False)
         )
+        cached_live_pp = live_odds_date and "pp" not in _oc
         cached_live_books = live_odds_date and (
             _oc.get("quote_provenance_version") != 1
             or not _nhl_odds_cache_has_books(_oc)
         )
         if (not cached_live_alternates and not cached_live_goals_ou
-                and not cached_live_books
+                and not cached_live_books and not cached_live_pp
                 and not (not live_odds_date and not cached_lines)):
+            _NHL_STANDARD_PP_LINES[target_date] = _oc.get("pp", {})
             return (
                 cached_lines, _oc.get("pts", {}),
                 _oc.get("ast", {}), _oc.get("sv", {}),
@@ -2120,6 +2125,7 @@ async def get_shot_lines(
         ast_lines: Dict[str, Dict] = {}
         sv_lines: Dict[str, Dict] = {}
         goal_lines: Dict[str, Dict] = {}
+        pp_lines: Dict[str, Dict] = {}
         # Alternate ladders are deliberately retained in a separate cache
         # payload.  No current board reads them, which prevents an alternate
         # point from changing a standard board's displayed line or analysis.
@@ -2168,7 +2174,7 @@ async def get_shot_lines(
                             params={"apiKey": api_key, "regions": "us,us2,ca",
                                     "markets": ("player_shots_on_goal,player_points,"
                                                 "player_assists,player_total_saves,"
-                                                "player_goals"),
+                                                "player_goals,player_power_play_points"),
                                     "oddsFormat": "american"}),
                         c.get(
                             f"{ODDS_API}/sports/{sport_key}/events/{ev['id']}/odds",
@@ -2191,6 +2197,7 @@ async def get_shot_lines(
                             "player_assists":       ast_lines,
                             "player_total_saves":   sv_lines,
                             "player_goals":         goal_ou_lines,
+                            "player_power_play_points": pp_lines,
                         }
                         for book in r2.json().get("bookmakers", []):
                             for mkt in book.get("markets", []):
@@ -2222,9 +2229,23 @@ async def get_shot_lines(
                                         line = float(oc.get("point") or 0)
                                         if line <= 0:
                                             continue
+                                    if mkey == "player_power_play_points":
+                                        # Existing PP picks are fixed at 0.5:
+                                        # never borrow a different line's price.
+                                        if line != PTS_LINE:
+                                            continue
+                                        try:
+                                            pp_price = float(oc.get("price"))
+                                        except (TypeError, ValueError):
+                                            continue
+                                        if not pp_price.is_integer() or not (
+                                                pp_price >= 100 or -1000 <= pp_price <= -100):
+                                            continue
                                     rec = target.setdefault(player, {
                                         "line": line, "odds": "",
                                         "under_odds": "", "source": "OddsAPI"})
+                                    if mkey == "player_power_play_points" and rec["line"] != line:
+                                        continue
                                     if nm == "Over" and not rec["odds"]:
                                         rec["odds"] = str(oc.get("price", ""))
                                         rec["odds_book"] = book.get("title") or book.get("key") or ""
@@ -2309,17 +2330,19 @@ async def get_shot_lines(
                         rec["odds"] = goal_ou["odds"]
                         rec["odds_book"] = goal_ou.get("odds_book", "")
 
-                if (lines or pts_lines or ast_lines or sv_lines or goal_lines
+                if (lines or pts_lines or ast_lines or sv_lines or goal_lines or pp_lines
                         or any(alternate_lines.values())):
                     break  # found lines — no need to try next sport key
 
         print(f"[Lines] {len(lines)} shot | {len(pts_lines)} point | "
               f"{len(ast_lines)} assist | {len(sv_lines)} saves | {len(goal_lines)} goals lines from The Odds API")
-        if (lines or pts_lines or ast_lines or sv_lines or goal_lines
+        _NHL_STANDARD_PP_LINES[target_date] = pp_lines
+        if (lines or pts_lines or ast_lines or sv_lines or goal_lines or pp_lines
                 or any(alternate_lines.values())):
             _odds_cache_set("nhl_lineup_v5_us_ca", target_date, {
                 "lines": lines, "pts": pts_lines,
                 "ast": ast_lines, "sv": sv_lines, "goals": goal_lines,
+                "pp": pp_lines,
                 "quote_provenance_version": 1,
                 "goals_ou_requested": bool(goal_ou_reads_ok) and all(goal_ou_reads_ok),
                 "alternates": alternate_lines})
@@ -2475,6 +2498,7 @@ async def _pts_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> List[
                 "date":       g.get("gameDate",     ""),
                 "points":     goals + assists,
                 "powerPlayPoints": int(g.get("powerPlayPoints", 0) or 0),
+                "plusMinus": (int(g["plusMinus"]) if g.get("plusMinus") is not None else None),
                 "goals":      goals,
                 "assists":    assists,
                 "toi_sec":    _parse_toi(g.get("toi", "0:00")),
@@ -2638,6 +2662,7 @@ async def get_pts_picks(
     system: str = "A",
     pp_units: Optional[Dict[str, Dict]] = None,
     pp_rosters: Optional[Dict[str, List[Dict]]] = None,
+    extra_markets: Optional[Dict] = None,
 ):
     """Independent points + power-play points + assists + goals picks using NHL Stats API game logs.
     Returns (points_picks, assist_picks, points_unders, assist_unders, goal_picks,
@@ -2651,6 +2676,22 @@ async def get_pts_picks(
     goalie_map = goalie_map or {}
     schedule_context = schedule_context or {}
     c_mode = str(system or "A").strip().upper() == "C"
+    # Only attach genuine standard 0.5 quotes to the existing PP model
+    # benchmark. A different line must never borrow this probability.
+    pp_lines_map = {}
+    for name, info in _NHL_STANDARD_PP_LINES.get(target_date, {}).items():
+        if info.get("line") != PTS_LINE:
+            continue
+        quote = dict(info)
+        for key in ("odds", "under_odds"):
+            try:
+                price = float(quote.get(key))
+                if not (price >= 100 or -1000 <= price <= -100):
+                    quote[key] = ""
+            except (TypeError, ValueError):
+                quote[key] = ""
+        if quote.get("odds") or quote.get("under_odds"):
+            pp_lines_map[name] = quote
 
     # Build team context
     team_ctx: Dict[str, Dict] = {}
@@ -2720,6 +2761,7 @@ async def get_pts_picks(
 
     pts_picks, ast_picks, goal_picks, pp_picks = [], [], [], []
     pts_unders, ast_unders, goal_unders, pp_unders = [], [], [], []
+    pm_picks, pm_unders = [], []
     for player, team, opp, hr in all_players:
         full_logs = logs_map.get(player["id"], [])
         logs = _nhl_pre_game_logs(full_logs, target_date)
@@ -2967,8 +3009,8 @@ async def get_pts_picks(
         ppp = None
         if pp_role_ok:
             ppp = build_pick(
-                "powerPlayPoints", PTS_LINE, HIT_THRESH_PP, {},
-                "Power Play Points (1+)", model_only=True)
+                "powerPlayPoints", PTS_LINE, HIT_THRESH_PP, pp_lines_map,
+                "Power Play Points (1+)", allow_model_fallback=True)
         if ppp:
             ppp.update(pp_assignment)
             ppp["ppUsageGames"] = pp_usage_games
@@ -2976,6 +3018,21 @@ async def get_pts_picks(
             ppp["ppToiAvgSec"] = pp_role_avg_sec
             if ppp["overOk"]: pp_picks.append(ppp)
             if ppp["underOk"]: pp_unders.append(ppp)
+
+        # Keep signed +/- values, and exclude missing stats rather than
+        # fabricating zero (which would incorrectly qualify an UNDER).
+        original_scope = logs, c_logs, r_logs
+        logs = [g for g in logs if g.get("plusMinus") is not None]
+        c_logs = [g for g in logs if g["homeRoad"] == hr and g["opponent"] == opp][:10]
+        r_logs = [g for g in logs if g["homeRoad"] == hr][:10]
+        if player["id"] in regular_ids and len(r_logs) >= (C_MIN_SAMPLE if c_mode else MIN_GAMES):
+            pmp = build_pick(
+                "plusMinus", PLUS_MINUS_LINE, HIT_THRESH_PM, {},
+                "Plus/Minus", model_only=True)
+            if pmp:
+                if pmp["overOk"]: pm_picks.append(pmp)
+                if pmp["underOk"]: pm_unders.append(pmp)
+        logs, c_logs, r_logs = original_scope
 
     if c_mode:
         pts_picks.sort(
@@ -3029,6 +3086,12 @@ async def get_pts_picks(
           f"{len(pp_picks)} power-play points | {len(pts_unders)} pts unders | "
           f"{len(ast_unders)} ast unders | {len(goal_unders)} goal unders | "
           f"{len(pp_unders)} power-play point unders")
+    pm_picks.sort(key=lambda p: (
+        p.get("confidenceScore" if c_mode else "dispScore", 0), p.get("gap", 0)), reverse=True)
+    pm_unders.sort(key=lambda p: (
+        p.get("underConfidence" if c_mode else "underRate", 0), p.get("underTotal", 0)), reverse=True)
+    if extra_markets is not None:
+        extra_markets.update({"pmPicks": pm_picks, "pmUnders": pm_unders})
     return (pts_picks, ast_picks, pts_unders, ast_unders, goal_picks, goal_unders,
             pp_picks, pp_unders)
 
@@ -3663,6 +3726,7 @@ async def _nhl_player_logs(pid: int, sem: asyncio.Semaphore,
                 "assists":    int(g.get("assists", 0) or 0),
                 "points":     int(g.get("goals", 0) or 0) + int(g.get("assists", 0) or 0),
                 "powerPlayPoints": int(g.get("powerPlayPoints", 0) or 0),
+                "plusMinus": (int(g["plusMinus"]) if g.get("plusMinus") is not None else None),
                 "toi_sec":    _parse_toi(g.get("toi", "0:00")),
                 "pp_toi_sec": _parse_toi(g.get("powerPlayToi", "0:00")),
                 "homeRoad":   g.get("homeRoadFlag", ""),
@@ -3718,6 +3782,8 @@ def _nhl_sim_prop_summary(result: dict, historical: bool = False) -> dict:
         ("ppPicks", "OVER", "Power Play Points"), ("ppRest", "OVER", "Power Play Points"),
         ("ppUnders", "UNDER", "Power Play Points"),
         ("ppUndersRest", "UNDER", "Power Play Points"),
+        ("pmPicks", "OVER", "Plus/Minus"), ("pmRest", "OVER", "Plus/Minus"),
+        ("pmUnders", "UNDER", "Plus/Minus"), ("pmUndersRest", "UNDER", "Plus/Minus"),
         ("astPicks", "OVER", "Assists"), ("astRest", "OVER", "Assists"),
         ("astUnders", "UNDER", "Assists"),
         ("astUndersRest", "UNDER", "Assists"),
@@ -4302,7 +4368,8 @@ async def run_picks(
         games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date, goal_lines_map,
         goalie_map=goalie_map, shared_logs=logs_map, shared_rosters=skater_rosters,
         schedule_context=schedule_context, system=system,
-        pp_units=pp_units, pp_rosters=pp_rosters)
+        pp_units=pp_units, pp_rosters=pp_rosters, extra_markets=(pm_bundle := {}))
+    pm_all, pm_unders = pm_bundle.get("pmPicks", []), pm_bundle.get("pmUnders", [])
     _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
     goalie_lookup_profiles = []
     saves_all, saves_unders = ([], []) if pp_only_pool else await get_saves_picks(
@@ -4338,6 +4405,8 @@ async def run_picks(
         goal_unders_all = [p for p in goal_unders_all if quoted(p, "UNDER")]
         saves_all = [p for p in saves_all if quoted(p, "OVER")]
         saves_unders = [p for p in saves_unders if quoted(p, "UNDER")]
+        # Plus/Minus remains visible without odds in every system, including
+        # D's existing published top-player pool.
         # Explicit PP-only exception: qualifying published PP1/PP2 members
         # stay visible as unpriced model plays, without changing other markets.
     # Admin comparison only: reproduce the attached pre-change system from the
@@ -4454,6 +4523,10 @@ async def run_picks(
         legacy_pp_unders.sort(key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
         _split("ppPicks", "ppRest", legacy_pp)
         _split("ppUnders", "ppUndersRest", legacy_pp_unders)
+        _split("pmPicks", "pmRest", pm_all)
+        _split("pmUnders", "pmUndersRest", pm_unders)
+        legacy_system["pmPicks"] = [_legacy_pick(p) for p in legacy_system["pmPicks"]]
+        legacy_system["pmRest"] = [_legacy_pick(p) for p in legacy_system["pmRest"]]
     archived_line_count = len({
         (pick.get("pid"), pick.get("mkt"), pick.get("realLine"))
         for group in (
@@ -4485,6 +4558,7 @@ async def run_picks(
         results_raw,
         pts_all, pts_unders,
         pp_all, pp_unders,
+        pm_all, pm_unders,
         ast_all, ast_unders,
         goal_all, goal_unders_all,
         saves_all, saves_unders,
@@ -4541,6 +4615,10 @@ async def run_picks(
         "ptsPicks":      pts_all[:TOP_N],
         "ptsRest":       pts_all[TOP_N:TOP_N*2],
         "ppPicks":       pp_all[:TOP_N],
+        "pmPicks":       pm_all[:TOP_N],
+        "pmRest":        pm_all[TOP_N:TOP_N*2],
+        "pmUnders":      pm_unders[:TOP_N],
+        "pmUndersRest":  pm_unders[TOP_N:TOP_N*2],
         "ppRest":        pp_all[TOP_N:TOP_N*2],
         "astPicks":      ast_all[:TOP_N],
         "astRest":       ast_all[TOP_N:TOP_N*2],
@@ -4571,6 +4649,7 @@ async def run_picks(
         "qualified":     len(picks),
         "ptsQualified":  len(pts_all),
         "ppQualified":   len(pp_all),
+        "pmQualified":   len(pm_all),
         "astQualified":  len(ast_all),
         "savesQualified": len(saves_all),
         "season":        season,
@@ -4595,6 +4674,7 @@ async def run_picks(
         p.get("realLine") is None
         for group in (
             picks, shot_unders, pts_all, pts_unders, pp_all, pp_unders,
+            pm_all, pm_unders,
             ast_all, ast_unders, goal_all, goal_unders_all,
             saves_all, saves_unders)
         for p in group
@@ -4776,6 +4856,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 "picks", "rest", "shotUnders", "shotUndersRest",
                 "ptsPicks", "ptsRest", "ptsUnders", "ptsUndersRest",
                 "ppPicks", "ppRest", "ppUnders", "ppUndersRest",
+                "pmPicks", "pmRest", "pmUnders", "pmUndersRest",
                 "astPicks", "astRest", "astUnders", "astUndersRest",
                 "goalPicks", "goalRest", "goalUnders", "goalUndersRest",
                 "savesPicks", "savesRest", "savesUnders", "savesUndersRest",
@@ -5368,7 +5449,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
         </label>
         <button type="button" class="frank-ai-send" onclick="_frankBuildParlay()">Build Coach Parlay</button>
       </div>
-      <div style="font-size:.67rem;color:#94a3b8;margin-top:8px">Power Play Points is normally model-only. Selecting it never invents a line or price; without a genuine priced play the builder shows no available legs.</div>
+      <div style="font-size:.67rem;color:#94a3b8;margin-top:8px">Power Play Points uses genuine 0.5 sportsbook quotes when available. Unpriced model picks remain visible; Coach only uses legs with a genuine price and positive edge.</div>
       <div id="frankParlayResult" aria-live="polite" style="margin-top:10px"></div>
     </details>
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
@@ -6773,7 +6854,7 @@ function _nhlLineupBadge(p){
 function _nhlQualText(p){
   if(p.savedSnapshot)return 'Original selection; split history and projection details were not stored.';
   var m=String(p.mkt||'');
-  var threshold=m==='Points (1+)'?60:(m==='Power Play Points (1+)'?50:(m==='Assists (1+)'?60:(m==='Goals (1+)'?50:(m==='Goalie Saves'?55:70))));
+  var threshold=(m==='Points (1+)'||m==='Plus/Minus')?60:(m==='Power Play Points (1+)'?50:(m==='Assists (1+)'?60:(m==='Goals (1+)'?50:(m==='Goalie Saves'?55:70))));
   var ha=p.homeRoad==='H'?'Home':'Away';
   var l10Hits=Number(p.hitsB||0),l10Total=Number(p.totB||0),l10Rate=Number(p.rateB||0);
   var oppHits=Number(p.hitsA||0),oppTotal=Number(p.totA||0),oppRate=Number(p.rateA||0);
@@ -6962,7 +7043,7 @@ function _nhlRecordMatches(p,target){
 function _nhlRecordsForPlayer(target){
   var raw=window.__NHL_RAW__||{}, keys=[
     'playerProfiles',
-    'picks','rest','ptsPicks','ptsRest','ppPicks','ppRest','astPicks','astRest',
+    'picks','rest','ptsPicks','ptsRest','ppPicks','ppRest','pmPicks','pmRest','pmUnders','pmUndersRest','astPicks','astRest',
     'goalPicks','goalRest','savesPicks','savesRest','shotUnders','shotUndersRest',
     'ptsUnders','ptsUndersRest','ppUnders','ppUndersRest','astUnders','astUndersRest',
     'goalUnders','goalUndersRest','savesUnders','savesUndersRest'
@@ -6994,7 +7075,7 @@ function _nhlMarketCard(label,record,opponent){
     return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">Not stored in the board snapshot. Full goalie logs load on request; see the history status above.</div></article>';
   var hasLine=record.dispLine!=null;
   var line=record.realLine!=null?'Book line '+record.realLine
-    :label==='Power Play Points (1+)'?'Model line 0.5'
+    :(label==='Power Play Points (1+)'||label==='Plus/Minus')?'Model line 0.5 · unpriced'
     :hasLine?'1+ history threshold · no book line':'No book line · raw history';
   var vs=record.totA?(hasLine?_rateHtml(record.rateA,record.hitsA,record.totA):'<span class="gray">No line to compare</span>'):'<span class="gray">No history</span>';
   var recent=record.totB?(hasLine?_rateHtml(record.rateB,record.hitsB,record.totB):'<span class="gray">No line to compare</span>'):'<span class="gray">No history</span>';
@@ -7020,7 +7101,7 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
   if(!p)return;
   closeNhlLadder();
   var records=freshRecords||_nhlRecordsForPlayer(p), opponent=p.opponent||'today\\'s opponent';
-  var categories=['Shots on Goal','Points (1+)','Power Play Points (1+)','Assists (1+)','Goals (1+)','Goalie Saves'];
+  var categories=['Shots on Goal','Points (1+)','Power Play Points (1+)','Plus/Minus','Assists (1+)','Goals (1+)','Goalie Saves'];
   var isGoalie=_nhlPositionGroup(p)==='G';
   var cards=categories.map(function(label){
     if((label==='Goalie Saves')!==isGoalie)
@@ -7402,7 +7483,7 @@ function _nhlRowUpcoming(p,raw){
 function _nhlUpcomingBoard(raw){
   if(!raw||raw.simulation||raw.historical)return raw||{};
   var d=Object.assign({},raw),total=0,visible=0;
-  ['picks','rest','ptsPicks','ptsRest','ppPicks','ppRest','astPicks','astRest',
+  ['picks','rest','ptsPicks','ptsRest','ppPicks','ppRest','pmPicks','pmRest','pmUnders','pmUndersRest','astPicks','astRest',
    'goalPicks','goalRest','savesPicks','savesRest','shotUnders','shotUndersRest',
    'ptsUnders','ptsUndersRest','ppUnders','ppUndersRest','astUnders','astUndersRest',
    'goalUnders','goalUndersRest','savesUnders','savesUndersRest'].forEach(function(k){
@@ -7491,7 +7572,7 @@ function _nhlSafe(value){
 function _nhlPlayerDirectory(){
   var raw=window.__NHL_RAW__||{}, keys=[
     'playerProfiles',
-    'picks','rest','ptsPicks','ptsRest','ppPicks','ppRest','astPicks','astRest',
+    'picks','rest','ptsPicks','ptsRest','ppPicks','ppRest','pmPicks','pmRest','pmUnders','pmUndersRest','astPicks','astRest',
     'goalPicks','goalRest','savesPicks','savesRest','shotUnders','shotUndersRest',
     'ptsUnders','ptsUndersRest','ppUnders','ppUndersRest','astUnders','astUndersRest',
     'goalUnders','goalUndersRest','savesUnders','savesUndersRest'
@@ -7560,6 +7641,7 @@ function _nhlPaint(q){
   d.rest=_f(raw.rest); d.ptsRest=_f(raw.ptsRest); d.ppRest=_f(raw.ppRest).filter(_ppRoleEligible); d.astRest=_f(raw.astRest); d.goalRest=_f(raw.goalRest); d.savesRest=_f(raw.savesRest);
   d.shotUnders=_f(raw.shotUnders); d.ptsUnders=_f(raw.ptsUnders); d.ppUnders=_f(raw.ppUnders).filter(_ppRoleEligible); d.astUnders=_f(raw.astUnders); d.goalUnders=_f(raw.goalUnders); d.savesUnders=_f(raw.savesUnders);
   d.shotUndersRest=_f(raw.shotUndersRest); d.ptsUndersRest=_f(raw.ptsUndersRest); d.ppUndersRest=_f(raw.ppUndersRest).filter(_ppRoleEligible); d.astUndersRest=_f(raw.astUndersRest); d.goalUndersRest=_f(raw.goalUndersRest); d.savesUndersRest=_f(raw.savesUndersRest);
+  ['pmPicks','pmRest','pmUnders','pmUndersRest'].forEach(function(k){d[k]=_f(raw[k]);});
   var h = '';
 
   if(d.simulation && d.simulationStats) h += renderNhlSimulationStats(d.simulationStats);
@@ -7571,6 +7653,7 @@ function _nhlPaint(q){
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToShots()" role="button" tabindex="0"><div class="val">' + ((d.picks||[]).length) + '</div><div class="lbl">Shots</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToPoints()" role="button" tabindex="0"><div class="val">' + ((d.ptsPicks||[]).length) + '</div><div class="lbl">Points</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToPpPoints()" role="button" tabindex="0"><div class="val">' + ((d.ppPicks||[]).length) + '</div><div class="lbl">PP Points</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="document.getElementById(&quot;nhl-section-plus-minus&quot;).scrollIntoView({behavior:&quot;smooth&quot;})" role="button" tabindex="0"><div class="val">'+((d.pmPicks||[]).length+(d.pmUnders||[]).length)+'</div><div class="lbl">Plus/Minus</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToAssists()" role="button" tabindex="0"><div class="val">' + ((d.astPicks||[]).length) + '</div><div class="lbl">Assists</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToGoals()" role="button" tabindex="0"><div class="val">' + ((d.goalPicks||[]).length) + '</div><div class="lbl">Goals</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToSaves()" role="button" tabindex="0"><div class="val">' + ((d.savesPicks||[]).length) + '</div><div class="lbl">Saves</div></div>' +
@@ -7608,8 +7691,8 @@ function _nhlPaint(q){
 
   // ── 🔒 80–100% Locks — cross-market picks hitting 80%+ ────────────────
   var _lockAll=[];
-  ['picks','ptsPicks','ppPicks','astPicks','goalPicks','savesPicks',
-   'shotUnders','ptsUnders','ppUnders','astUnders','goalUnders','savesUnders'].forEach(function(k){
+  ['picks','ptsPicks','ppPicks','pmPicks','astPicks','goalPicks','savesPicks',
+   'shotUnders','ptsUnders','ppUnders','pmUnders','astUnders','goalUnders','savesUnders'].forEach(function(k){
     (d[k]||[]).forEach(function(p){
       var sc=Number(p.dispScore||p.ptsScore||p.score||0);
       if(sc>=80) _lockAll.push(Object.assign({},p,{_lockScore:sc}));
@@ -7678,20 +7761,27 @@ function _nhlPaint(q){
     h+='<div class="gp-history-note">PP1/PP2 assignments were not stored in this older board. The next normal analysis uses published units; existing saved plays are unchanged.</div>';
   }
   if((d.ppPicks||[]).length){
-    h += '<div class="sec">⚡ Top ' + d.ppPicks.length + ' Power Play Points (1+) — MODEL</div>';
+    h += '<div class="sec">⚡ Top ' + d.ppPicks.length + ' Power Play Points (1+) — OVER</div>';
     h += nhlCardGrid(d.ppPicks);
     h += nhlRestBlock(d.ppRest, 'power play points', '#c084fc');
   }else{
     h+='<div class="sec">⚡ Power Play Points (1+) — OVER · MODEL</div><div class="no-picks">No qualifying visible PP Over plays in this saved board.</div>';
   }
   if((d.ppUnders||[]).length){
-    h += '<div class="sec">⬇ Top ' + d.ppUnders.length + ' Power Play Points (1+) — UNDER · MODEL</div>';
+    h += '<div class="sec">⬇ Top ' + d.ppUnders.length + ' Power Play Points (1+) — UNDER</div>';
     h += nhlUnderGrid(d.ppUnders);
     h += nhlUnderRestBlock(d.ppUndersRest, 'power play points under', '#f87171');
   }else{
     h+='<div class="sec">⬇ Power Play Points (1+) — UNDER · MODEL</div><div class="no-picks">No qualifying visible PP Under plays in this saved board.</div>';
   }
   // ASSISTS cards
+  h += '<div id="nhl-section-plus-minus" class="nhl-scroll-anchor"></div><div class="sec">Plus/Minus — OVER 0.5 · MODEL / UNPRICED</div>';
+  h += '<div style="color:#94a3b8;font-size:.74rem;margin-bottom:12px">Over: +1 or better. Under: zero or negative. Picks use opponent history at the applicable home/away venue and last-10 home/away form. Missing prices never hide qualifying picks.</div>';
+  h += (d.pmPicks||[]).length?nhlCardGrid(d.pmPicks):'<div class="no-picks">No qualifying Plus/Minus Over picks in this board.</div>';
+  h += nhlRestBlock(d.pmRest,'plus/minus','#38bdf8');
+  h += '<div class="sec">Plus/Minus — UNDER 0.5 · MODEL / UNPRICED</div>';
+  h += (d.pmUnders||[]).length?nhlUnderGrid(d.pmUnders):'<div class="no-picks">No qualifying Plus/Minus Under picks in this board.</div>';
+  h += nhlUnderRestBlock(d.pmUndersRest,'plus/minus under','#f87171');
   h += '<div id="nhl-section-assists" class="nhl-scroll-anchor"></div>';
   if((d.astPicks||[]).length){
     h += '<div class="sec">🅰️ Top ' + d.astPicks.length + ' Assists (1+)</div>';
@@ -7844,6 +7934,8 @@ function _nhlBetToast(msg){
 }
 function _nhlBetMkt(m){
   m=(m||'');
+  if(m.indexOf('Power Play Point')>=0) return ['PP_POINTS','Power Play Points'];
+  if(m.indexOf('Plus/Minus')>=0) return ['PLUS_MINUS','Plus/Minus'];
   if(m.indexOf('Shot')>=0) return ['SHOTS','Shots on Goal'];
   if(m.indexOf('Point')>=0) return ['POINTS','Points'];
   if(m.indexOf('Assist')>=0) return ['ASSISTS','Assists'];
@@ -7856,7 +7948,8 @@ function _nhlBetBtn(p,forceSide){
   if(p.realLine==null) return '';
   var mk=_nhlBetMkt(p.mkt); if(!mk[0]) return '';
   var side=forceSide||(p.pick==='UNDER'?'UNDER':'OVER');
-  var odds=side==='OVER'?(p.realOdds!=null?p.realOdds:p.realUnderOdds):(p.realUnderOdds!=null?p.realUnderOdds:p.realOdds);
+  var odds=side==='OVER'?p.realOdds:p.realUnderOdds;
+  if(odds==null||String(odds).trim()===''||Number(odds)===0||Number(odds)<-1000)return '';
   var k='nh'+(++_nhlBetN);
   window.__NHL_BET_SRC__[k]={
     name:p.name,pid:(p.pid!=null?String(p.pid):''),team:(p.team||''),opp:(p.opponent||''),
@@ -8019,6 +8112,37 @@ function downloadNhlMyBetsCSV(){
   document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
 }
 // ── NHL Track Record ──────────────────────────────────────────────────────────
+function _nhlPeriodValue(id){var el=document.getElementById(id);return el?el.value:'day';}
+function _nhlPeriodBounds(period,anchor){
+  anchor=anchor||_nhlGpToday();
+  var start=anchor,end=anchor,d=new Date(anchor+'T12:00:00Z');
+  if(period==='week'){d.setUTCDate(d.getUTCDate()-6);start=d.toISOString().slice(0,10);}
+  else if(period==='month'){start=anchor.slice(0,7)+'-01';d=new Date(start+'T12:00:00Z');d.setUTCMonth(d.getUTCMonth()+1);d.setUTCDate(0);end=d.toISOString().slice(0,10);}
+  else if(period==='all'){start='0001-01-01';end='9999-12-31';}
+  return {start:start,end:end};
+}
+function _nhlPeriodDays(days,period,anchor){
+  var bounds=_nhlPeriodBounds(period,anchor);
+  return (days||[]).filter(function(d){var dt=String(d.date||'').slice(0,10);return dt&&dt>=bounds.start&&dt<=bounds.end;});
+}
+function _nhlPeriodDay(days,period,anchor){
+  var selected=_nhlPeriodDays(days,period,anchor);
+  if(!selected.length)return null;
+  if(period==='day')return selected[0];
+  var detail=[],overflow=[];
+  selected.forEach(function(d){
+    _nhlMainRows(d).forEach(function(p){detail.push(Object.assign({},p,{date:d.date}));});
+    _nhlOverflowRows(d).forEach(function(p){overflow.push(Object.assign({},p,{date:d.date,is_overflow:true}));});
+  });
+  return {date:anchor,detail:detail,overflow_detail:overflow,period:period,dates:selected.map(function(d){return d.date;})};
+}
+function _nhlPeriodSelect(id,change){
+  return '<label style="color:#94a3b8;font-size:.72rem;font-weight:800">PERIOD <select id="'+id+'" onchange="'+change+'" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px;color:#fff"><option value="day">Day</option><option value="week">Week · last 7 days</option><option value="month">Month</option><option value="all">All Time</option></select></label>';
+}
+function _nhlPeriodCaption(period,anchor){
+  var bounds=_nhlPeriodBounds(period,anchor);
+  return period==='all'?'All Time':period==='day'?bounds.start:bounds.start+' through '+bounds.end;
+}
 var _nhlTrkData=null,_nhlTrkReplay=null,_nhlTrkTabMode='cat',_nhlOvfTabMode='cat';
 var _nhlTrkSystem='A',_nhlTrkDataBySystem={};
 function _nhlTrkDayName(){
@@ -8192,12 +8316,14 @@ function renderNhlTrackDay(){
   var dp=document.getElementById('nhlTrkDate');
   var selDate=dp?dp.value:'';
   var dates=_nhlTrkData.dates||[];
-  var savedDay=selDate?dates.find(function(d){return String(d.date||'').slice(0,10)===selDate;}):null;
-  var replayDay=selDate&&_nhlTrkReplay&&String(_nhlTrkReplay.date||'').slice(0,10)===selDate?_nhlTrkReplay:null;
+  var period=_nhlPeriodValue('nhlTrkPeriod');
+  var savedDay=_nhlPeriodDay(dates,period,selDate);
+  var replayDay=period==='day'&&selDate&&_nhlTrkReplay&&String(_nhlTrkReplay.date||'').slice(0,10)===selDate?_nhlTrkReplay:null;
   var dayData=replayDay||savedDay;
   var isReplay=!!replayDay;
   var sumEl=document.getElementById('nhlTrkSummary'),bodyEl=document.getElementById('nhlTrkBody');
   if(!sumEl||!bodyEl) return;
+  if(period!=='day'&&!savedDay){sumEl.innerHTML='<p style="color:#94a3b8;padding:12px">No saved official results for '+_nhlPeriodCaption(period,selDate)+'. Historical replays remain separate.</p>';bodyEl.innerHTML='';return;}
   if(selDate&&!dayData){
      sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 10px">No saved '+_nhlTrackSystemLabel(_nhlTrkSystem)+' pick snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.78rem;margin:0">Choose that date above and click <b style="color:#67e8f9">Get Picks</b> to show its historical pick board and replay Track Record.</p></div>';
     bodyEl.innerHTML='';
@@ -8241,18 +8367,21 @@ function renderNhlTrackDay(){
       +'</div>'+voidNotes;
   bodyEl.innerHTML=(isReplay&&dayData.gp?_nhlGpHtml(dayData.gp):'')
      +(_nhlTrkTabMode==='cat'?_nhlTrkCatHtml(rows,stake):_nhlTrkListHtml(rows));
+  sumEl.innerHTML='<div style="color:#93c5fd;font-size:.76rem;font-weight:800;margin-bottom:8px">'+_nhlPeriodCaption(period,selDate)+'</div>'+sumEl.innerHTML;
 }
 function renderNhlOverflowDay(){
   if(!_nhlTrkData)return;
   var dp=document.getElementById('nhlOvfDate');
   var selDate=dp?dp.value:'';
   var dates=_nhlTrkData.dates||[];
-  var savedDay=selDate?dates.find(function(d){return String(d.date||'').slice(0,10)===selDate;}):null;
-  var replayDay=selDate&&_nhlTrkReplay&&String(_nhlTrkReplay.date||'').slice(0,10)===selDate?_nhlTrkReplay:null;
+  var period=_nhlPeriodValue('nhlOvfPeriod');
+  var savedDay=_nhlPeriodDay(dates,period,selDate);
+  var replayDay=period==='day'&&selDate&&_nhlTrkReplay&&String(_nhlTrkReplay.date||'').slice(0,10)===selDate?_nhlTrkReplay:null;
   var dayData=replayDay||savedDay;
   var isReplay=!!replayDay;
   var sumEl=document.getElementById('nhlOvfSummary'),bodyEl=document.getElementById('nhlOvfBody');
   if(!sumEl||!bodyEl)return;
+  if(period!=='day'&&!savedDay){sumEl.innerHTML='<p style="color:#94a3b8;padding:12px">No saved official overflow results for '+_nhlPeriodCaption(period,selDate)+'. Historical replays remain separate.</p>';bodyEl.innerHTML='';return;}
   if(selDate&&!dayData){
      sumEl.innerHTML='<div style="padding:12px;text-align:center"><p style="color:#facc15;margin:0 0 10px">No saved '+_nhlTrackSystemLabel(_nhlTrkSystem)+' overflow snapshot exists for '+selDate+'.</p><p style="color:#94a3b8;font-size:.78rem;margin:0">Choose that date above and click <b style="color:#fbbf24">Get Picks</b> to show its historical overflow replay.</p></div>';
     bodyEl.innerHTML='';
@@ -8293,10 +8422,11 @@ function renderNhlOverflowDay(){
     +'<span style="color:#64748b;font-size:.8rem">$'+stake.toFixed(2)+'/play · '+withOdds.length+' priced plays</span>'
     +'</div>';
   bodyEl.innerHTML=_nhlOvfTabMode==='cat'?_nhlTrkCatHtml(rows,stake):_nhlTrkListHtml(rows,true);
+  sumEl.innerHTML='<div style="color:#fbbf24;font-size:.76rem;font-weight:800;margin-bottom:8px">'+_nhlPeriodCaption(period,selDate)+'</div>'+sumEl.innerHTML;
 }
  function _nhlTrkCatHtml(allRows,stake){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
-  var cats={},catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
+  var cats={},catOrder=['Shots on Goal','Points','Power Play Points','Plus/Minus','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
   allRows.forEach(function(r){
     var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase();
     var key=cat+'|'+side;
@@ -8374,7 +8504,7 @@ function renderNhlOverflowDay(){
  function _nhlTrkListHtml(allRows,showRank,showRankStats){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var stake=_nhlTrkStake();
-   var catOrder=['Shots on Goal','Points','Power Play Points','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
+   var catOrder=['Shots on Goal','Points','Power Play Points','Plus/Minus','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
    var catColors={'Shots on Goal':'#fbbf24','Points':'#60a5fa','Power Play Points':'#c084fc','Assists':'#a78bfa','Goals':'#fb7185','Goalie Saves':'#34d399','NHL Overflow':'#f59e0b','80-100% Locks':'#facc15'};
    var groups={},order=[];
    allRows.forEach(function(r){
@@ -8419,7 +8549,7 @@ function renderNhlOverflowDay(){
         if(ctx.length)note+='<br><span style="color:#93c5fd">'+ctx.join(' · ')+'</span>';
        return '<tr>'
          +(showRank?'<td style="color:#fbbf24;font-family:monospace;font-weight:900">#'+(r.rank!=null?r.rank:'—')+'</td>':'')
-          +'<td style="color:#f8fafc;font-weight:850;font-size:.82rem">'+r.name+'</td>'
+          +'<td style="color:#f8fafc;font-weight:850;font-size:.82rem">'+r.name+(r.date?'<div style="color:#94a3b8;font-size:.68rem">'+r.date+'</div>':'')+'</td>'
          +'<td style="color:#94a3b8;font-weight:800">'+r.team+'</td>'
           +'<td style="color:#e2e8f0;font-weight:800">'+(r.side||'')+(r.line!=null?' '+r.line:(r.model_line!=null?' model '+r.model_line:' —'))+'</td>'
          +'<td style="font-family:monospace;color:#cbd5e1;font-weight:700">'+odds+_nhlBookBadge(r,side)+'</td>'
@@ -8502,7 +8632,7 @@ document.addEventListener('DOMContentLoaded',function(){
 
 // ── Standalone NHL Game Predictor Record ─────────────────────────────────────
 var _nhlGpRecordData=null,_nhlGpRecordTab='daily',_nhlGpRecordDate='';
-function _nhlGpToday(){return new Date().toISOString().slice(0,10);}
+function _nhlGpToday(){return new Date().toLocaleDateString('en-CA',{timeZone:'America/Toronto'});}
 function _nhlGpDateLabel(dt){
   var a=(dt||'').split('-');
   if(a.length!==3) return dt||'';
@@ -8596,10 +8726,8 @@ function _nhlGpGamesHtml(games){
   return '<div style="overflow-x:auto"><table class="nhl-trk-tbl"><thead><tr><th>Matchup</th><th>Final</th><th>ML Pick</th><th>ML</th><th>Total Call</th><th>Total</th><th>O/U</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 function _nhlGpToolbar(){
-  var tabs=[['daily','Daily'],['weekly','Last 7 Days'],['monthly','This Month'],['alltime','All Time']];
-  var h='<div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px">';
-  tabs.forEach(function(t){var on=_nhlGpRecordTab===t[0];h+='<button onclick="_nhlGpSetTab(&#39;'+t[0]+'&#39;)" style="background:'+(on?'#065f46':'#1e293b')+';color:#fff;border:none;border-radius:8px;padding:8px 13px;font-weight:800;font-size:.76rem;cursor:pointer">'+t[1]+'</button>';});
-  return h+'</div>';
+  var tabs=[['daily','Day'],['weekly','Week · last 7 days'],['monthly','Month'],['alltime','All Time']];
+  return '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px"><label style="color:#94a3b8;font-size:.75rem">PERIOD <select onchange="_nhlGpSetTab(this.value)" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px;color:#fff">'+tabs.map(function(t){return '<option value="'+t[0]+'"'+(_nhlGpRecordTab===t[0]?' selected':'')+'>'+t[1]+'</option>';}).join('')+'</select></label><label style="color:#94a3b8;font-size:.75rem">DATE <input type="date" value="'+(_nhlGpRecordDate||_nhlGpToday())+'" onchange="_nhlGpRecordDate=this.value;_nhlGpRender()" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px;color:#fff"></label></div>';
 }
 function _nhlGpRender(){
   var head=document.getElementById('nhlGpRecordHead'),body=document.getElementById('nhlGpRecordBody');if(!head||!body)return;
@@ -8615,7 +8743,7 @@ function _nhlGpRender(){
     body.innerHTML=picker+_nhlGpSummary(a)+_nhlGpGamesHtml(day.games);
     return;
   }
-  var today=_nhlGpToday(),days=[];
+  var today=_nhlGpRecordDate||_nhlGpToday(),days=[];
   if(_nhlGpRecordTab==='weekly'){
     var start=new Date(today+'T12:00:00');start.setDate(start.getDate()-6);
     days=daily.filter(function(d){var x=new Date(d.date+'T12:00:00');return x>=start&&x<=new Date(today+'T23:59:59');});
@@ -8671,6 +8799,7 @@ function _nhlHistSetPeriod(period){
   _nhlHistPeriod=period;
   var month=document.getElementById('nhlHistMonth');
   if(month)month.style.display=period==='month'?'inline-block':'none';
+  var anchor=document.getElementById('nhlHistDate');if(anchor)anchor.style.display=(period==='day'||period==='week')?'inline-block':'none';
   renderNhlHistoricalAnalysis();
 }
 function _nhlHistSetTab(tab){
@@ -8682,6 +8811,10 @@ function _nhlHistSetTab(tab){
 }
 function _nhlHistSelectedDays(data){
   var days=(data&&data.dates)||[];
+  if(_nhlHistPeriod==='day'||_nhlHistPeriod==='week'){
+    return _nhlPeriodDays(days,_nhlHistPeriod,(document.getElementById('nhlHistDate')||{}).value||'2025-10-01');
+  }
+  if(_nhlHistPeriod==='all')return days.slice();
   if(_nhlHistPeriod==='month'){
     var month=(document.getElementById('nhlHistMonth')||{}).value||'2025-10';
     return days.filter(function(day){return String(day.date||'').slice(0,7)===month;});
@@ -8732,7 +8865,7 @@ function _nhlHistView(data,systemLabel,accent){
   var selectedMonth=(document.getElementById('nhlHistMonth')||{}).value||'';
   var label=_nhlHistPeriod==='month'
     ?(selectedMonth?new Date(selectedMonth+'-01T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'}):'Selected month')
-    :'2025–26 Season';
+    :_nhlHistPeriod==='season'?'2025–26 Season':_nhlPeriodCaption(_nhlHistPeriod,(document.getElementById('nhlHistDate')||{}).value||'2025-10-01');
   if(!days.length)return {
     summary:'<div style="padding:14px;border:1px solid '+accent+';border-radius:10px;color:#cbd5e1;flex:1;min-width:270px"><b style="color:'+accent+'">'+systemLabel+'</b><br>No saved '+label+' replay results yet.</div>',
     body:'<div style="padding:16px;color:#64748b">No saved '+systemLabel+' rows for '+label+'.</div>'
@@ -8758,7 +8891,7 @@ function renderNhlHistoricalAnalysis(){
   var selectedMonth=(document.getElementById('nhlHistMonth')||{}).value||'';
   var label=_nhlHistPeriod==='month'
     ?(selectedMonth?new Date(selectedMonth+'-01T12:00:00').toLocaleDateString(undefined,{month:'long',year:'numeric'}):'Selected month')
-    :'2025–26 Season';
+    :_nhlHistPeriod==='season'?'2025–26 Season':_nhlPeriodCaption(_nhlHistPeriod,(document.getElementById('nhlHistDate')||{}).value||'2025-10-01');
   var banner='<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(59,130,246,.4);border-radius:10px;background:#0c1830;color:#bfdbfe;font-size:.76rem;font-weight:700">REPLAY ARCHIVE · '+label+' · excluded from every official NHL record</div>';
   var a=_nhlHistView(_nhlHistDataA,'A · NEW','#60a5fa');
   var b=_nhlHistView(_nhlHistDataB,'B · OLD','#fbbf24');
@@ -8893,13 +9026,13 @@ function _nhlSetCoachTrackSystem(system){
 async function loadNhlCoachTrack(){
  var body=document.getElementById('nhlCoachTrackBody'),source=document.getElementById('nhlCoachTrkSource').value,date=document.getElementById('nhlCoachTrkDate').value;
  if(body)body.innerHTML='<p style="color:#94a3b8">Loading Coach results…</p>';
- try{var r=await fetch('/api/nhl/coach-track?source='+encodeURIComponent(source)+'&date_str='+encodeURIComponent(date)+'&system='+encodeURIComponent(_nhlCoachTrackSystem));var d=await r.json();if(!r.ok)throw new Error(d.detail||'Coach record unavailable');_nhlCoachTrackData=d;renderNhlCoachTrack();}
+ try{var r=await fetch('/api/nhl/coach-track?source='+encodeURIComponent(source)+'&date_str='+encodeURIComponent(date)+'&period='+encodeURIComponent(_nhlPeriodValue('nhlCoachTrkPeriod'))+'&system='+encodeURIComponent(_nhlCoachTrackSystem));var d=await r.json();if(!r.ok)throw new Error(d.detail||'Coach record unavailable');_nhlCoachTrackData=d;renderNhlCoachTrack();}
  catch(e){if(body)body.innerHTML='<p style="color:#f87171">'+(e.message||'Coach record unavailable')+'</p>';}
 }
 function renderNhlCoachTrack(){
  var body=document.getElementById('nhlCoachTrackBody'),sum=document.getElementById('nhlCoachTrackSummary');if(!body||!_nhlCoachTrackData)return;
  var stake=Number(document.getElementById('nhlCoachTrkStake').value)||100,groups={},all=[];
- (_nhlCoachTrackData.dates||[]).forEach(function(day){(day.detail||[]).forEach(function(x){x.date=day.date;all.push(x);var k=x.preset||x.category;(groups[k]||(groups[k]=[])).push(x);});});
+ _nhlPeriodDays(_nhlCoachTrackData.dates||[],_nhlPeriodValue('nhlCoachTrkPeriod'),document.getElementById('nhlCoachTrkDate').value).forEach(function(day){(day.detail||[]).forEach(function(x){x=Object.assign({},x,{date:day.date});all.push(x);var k=x.preset||x.category;(groups[k]||(groups[k]=[])).push(x);});});
  var tw=0,tl=0,tp=0,tv=0,tnet=0,tpriced=0,html='';
  var canonical=_nhlCoachTrackData.source==='official'&&!!groups['All Coach Edge Plays · uncapped'];
  Object.keys(groups).forEach(function(k){var rows=groups[k],w=0,l=0,p=0,v=0,pend=0,net=0,priced=0;
@@ -8934,6 +9067,7 @@ function renderNhlCoachTrack(){
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
       <label style="color:#94a3b8;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Date</label>
       <input type="date" id="nhlTrkDate" style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:.85rem;outline:none">
+      <select id="nhlTrkPeriod" onchange="renderNhlTrackDay()" aria-label="Track Record period" style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:7px;color:#fff"><option value="day">Day</option><option value="week">Week · last 7 days</option><option value="month">Month</option><option value="all">All Time</option></select>
       <span id="nhlTrkDayName" style="color:#34d399;font-weight:700;font-size:.9rem"></span>
       <button onclick="loadNhlTrackRecord(true)" style="background:#065f46;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">&#8635; Grade &amp; Get Results</button>
       <button id="nhlTrkBtnCat" onclick="nhlTrkSetTab('cat')" style="background:#065f46;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">By Category</button>
@@ -8958,7 +9092,8 @@ function renderNhlCoachTrack(){
     <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px">Detailed Coach results by System A/B/C/D. Historical W/L remains isolated from the official record and does not require odds.</p>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
       <label style="color:#94a3b8;font-size:.72rem;font-weight:800">RECORD <select id="nhlCoachTrkSource" style="background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:7px;color:#fff"><option value="official">Official Coach</option><option value="historical">Historical Edge Coach</option></select></label>
-      <label style="color:#94a3b8;font-size:.72rem;font-weight:800">DATE <input type="date" id="nhlCoachTrkDate" style="background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:7px;color:#fff"></label>
+      <label style="color:#94a3b8;font-size:.72rem;font-weight:800">DATE <input type="date" id="nhlCoachTrkDate" onchange="loadNhlCoachTrack()" style="background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:7px;color:#fff"></label>
+      <select id="nhlCoachTrkPeriod" onchange="loadNhlCoachTrack()" aria-label="Edge Coach record period" style="background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:7px;color:#fff"><option value="day">Day</option><option value="week">Week · last 7 days</option><option value="month">Month</option><option value="all">All Time</option></select>
       <label style="color:#94a3b8;font-size:.72rem;font-weight:800">BET $ <input type="number" id="nhlCoachTrkStake" value="100.00" min=".01" step="5" oninput="renderNhlCoachTrack()" style="width:92px;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:7px;color:#fff"></label>
       <button onclick="loadNhlCoachTrack()" style="background:#6d28d9;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-weight:800;cursor:pointer">Get Results</button>
     </div>
@@ -8986,9 +9121,13 @@ function renderNhlCoachTrack(){
       <select id="nhlHistSeason" style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0"><option value="2025-26">2025–26</option></select>
       <label style="color:#94a3b8;font-size:.72rem;font-weight:800">VIEW</label>
       <select onchange="_nhlHistSetPeriod(this.value)" style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0">
-        <option value="month">Month</option>
+        <option value="day">Day</option>
+        <option value="week">Week · last 7 days</option>
+        <option value="month" selected>Month</option>
+        <option value="all">All Time</option>
         <option value="season">Season</option>
       </select>
+      <input type="date" id="nhlHistDate" value="2025-10-01" onchange="renderNhlHistoricalAnalysis()" style="display:none;background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px;color:#fff" aria-label="Historical record date">
       <select id="nhlHistMonth" onchange="renderNhlHistoricalAnalysis()" style="background:#0f172a;border:1px solid #1d4ed8;border-radius:8px;padding:7px 11px;color:#e2e8f0">
         <option value="2025-10">October 2025</option>
       </select>
@@ -9018,6 +9157,7 @@ function renderNhlCoachTrack(){
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
       <label style="color:#94a3b8;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Date</label>
       <input type="date" id="nhlOvfDate" style="background:#0f172a;border:1px solid #78350f;border-radius:8px;padding:7px 11px;color:#e2e8f0;font-size:.85rem;outline:none">
+      <select id="nhlOvfPeriod" onchange="renderNhlOverflowDay()" aria-label="Overflow record period" style="background:#0f172a;border:1px solid #78350f;border-radius:8px;padding:7px;color:#fff"><option value="day">Day</option><option value="week">Week · last 7 days</option><option value="month">Month</option><option value="all">All Time</option></select>
       <span id="nhlOvfDayName" style="color:#fbbf24;font-weight:700;font-size:.9rem"></span>
       <button onclick="loadNhlTrackRecord(true)" style="background:#b45309;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">&#8635; Grade &amp; Get Results</button>
       <button id="nhlOvfBtnCat" onclick="nhlOvfSetTab('cat')" style="background:#b45309;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:700;cursor:pointer;font-size:.82rem">By Category</button>
@@ -9048,10 +9188,11 @@ import threading as _bt_th, uuid as _bt_uuid
 
 _NHL_BET_LOG_PATH = str(_CACHE_DIR / "_nhl_bet_log.json")
 _NHL_BET_LOCK = _bt_th.Lock()
-_NHL_BET_STAT_KEYS = ("SHOTS", "POINTS", "ASSISTS", "SAVES")
+_NHL_BET_STAT_KEYS = ("SHOTS", "POINTS", "ASSISTS", "SAVES", "PP_POINTS", "PLUS_MINUS")
 _NHL_STAT_LABEL = {"SHOTS": "Shots on Goal", "POINTS": "Points",
-                   "ASSISTS": "Assists", "SAVES": "Goalie Saves"}
-_NHL_CAT_ORDER = ["Shots on Goal", "Points", "Power Play Points", "Assists", "Goalie Saves"]
+                   "ASSISTS": "Assists", "SAVES": "Goalie Saves",
+                   "PP_POINTS": "Power Play Points", "PLUS_MINUS": "Plus/Minus"}
+_NHL_CAT_ORDER = ["Shots on Goal", "Points", "Power Play Points", "Plus/Minus", "Assists", "Goalie Saves"]
 _NHL_BOX_CACHE: dict = {}   # (pid, season) → (games_dict, timestamp, permanent)
 _NHL_BOX_LOCK = _bt_th.Lock()
 
@@ -9127,6 +9268,9 @@ def _nhl_extract_stat(g: dict, stat_key: str):
             return None
         if stat_key == "PP_POINTS":
             v = g.get("powerPlayPoints")
+            return float(v) if v is not None else None
+        if stat_key == "PLUS_MINUS":
+            v = g.get("plusMinus")
             return float(v) if v is not None else None
         if stat_key == "SAVES":
             if g.get("saves") is not None:
@@ -9388,6 +9532,10 @@ _NHL_TRK_LISTS = [
     ("ppRest",          "Power Play Points", "PP_POINTS", "OVER",  True),
     ("ppUnders",        "Power Play Points", "PP_POINTS", "UNDER", False),
     ("ppUndersRest",    "Power Play Points", "PP_POINTS", "UNDER", True),
+    ("pmPicks",        "Plus/Minus", "PLUS_MINUS", "OVER", False),
+    ("pmRest",         "Plus/Minus", "PLUS_MINUS", "OVER", True),
+    ("pmUnders",       "Plus/Minus", "PLUS_MINUS", "UNDER", False),
+    ("pmUndersRest",   "Plus/Minus", "PLUS_MINUS", "UNDER", True),
     ("astPicks",        "Assists",       "ASSISTS","OVER",  False),
     ("astRest",         "Assists",       "ASSISTS","OVER",  True),
     ("astUnders",       "Assists",       "ASSISTS","UNDER", False),
@@ -10437,17 +10585,37 @@ async def nhl_track_record(
 
 @app.get("/api/nhl/coach-track")
 async def nhl_coach_track(
-        date_str: str = "", source: str = "official", system: str = "A"):
+        date_str: str = "", source: str = "official", system: str = "A",
+        period: str = ""):
     """Detailed, read-only Edge Coach record isolated from other NHL records."""
     historical = str(source).lower() == "historical"
     record_system = str(system or "A").strip().upper()
     if record_system not in ("A", "B", "C", "D"):
         raise HTTPException(status_code=400, detail="System must be A, B, C, or D")
+    requested_period = period or ("day" if date_str else "all")
+    if requested_period not in ("day", "week", "month", "all"):
+        raise HTTPException(status_code=400, detail="Period must be day, week, month, or all")
+    try:
+        anchor = date.fromisoformat(date_str) if date_str else date.fromisoformat(_nhl_record_today())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Date must use YYYY-MM-DD")
+    start, end = anchor, anchor
+    if requested_period == "week":
+        start = anchor - timedelta(days=6)
+    elif requested_period == "month":
+        start = anchor.replace(day=1)
+        end = ((start.replace(year=start.year + 1, month=1)
+                if start.month == 12 else start.replace(month=start.month + 1))
+               - timedelta(days=1))
+    def selected_date(value):
+        return bool(value) and (
+            requested_period == "all"
+            or start.isoformat() <= str(value)[:10] <= end.isoformat())
     payload = (_nhl_historical_analysis_payload(record_system) if historical
                else _nhl_track_record_payload(record_system))
     days = []
     for day in payload.get("dates") or []:
-        if date_str and day.get("date") != date_str:
+        if not selected_date(day.get("date")):
             continue
         snapshot = ([] if historical else _nhl_load_picks_snapshot(
             day.get("date", ""), _NHL_SYSTEM_SNAP_CATS[record_system]))
@@ -10566,7 +10734,7 @@ async def nhl_coach_track(
         days_by_date = {d.get("date"): d for d in days}
         for snap in snapshots:
             ds = snap.get("date")
-            if not ds or (date_str and ds != date_str):
+            if not selected_date(ds):
                 continue
             alt = graded_by_date.get(ds)
             if alt is None:
