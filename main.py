@@ -78,6 +78,20 @@ HIT_THRESH_PTS     = 60.0  # % hit rate to qualify for Points
 HIT_THRESH_PP      = 50.0  # % hit rate to qualify for model-only Power Play Points
 HIT_THRESH_PM      = 60.0  # same opponent-first / venue-L10 gate as Assists
 PLUS_MINUS_LINE    = 0.5   # OVER = +1 or better; UNDER = zero or negative
+_NHL_FORM_SPECS = [
+    ("hotShots", "Hot Shots", "shots", "SHOTS", "OVER", "hot_shots"),
+    ("hotPoints", "Hot Points", "points", "POINTS", "OVER", "hot_points"),
+    ("coldShots", "Cold Shots", "shots", "SHOTS", "UNDER", "cold_shots"),
+    ("coldPoints", "Cold Points", "points", "POINTS", "UNDER", "cold_points"),
+    ("doubleColdShots", "Double Cold Shots", "shots", "SHOTS", "UNDER", "double_cold_shots"),
+    ("doubleColdPoints", "Double Cold Points", "points", "POINTS", "UNDER", "double_cold_points"),
+]
+_NHL_FORM_META = (
+    "formCategory", "formMarketKey", "form", "doubleCold", "matchupSupports",
+    "marketKey", "recentHits", "recentTotal", "recentAverage", "recentPushes",
+    "opponentHits", "opponentTotal", "opponentRate", "appProbability",
+    "impliedProbability", "edge", "hotColdRecentGames", "hotColdOpponentGames",
+)
 _NHL_STANDARD_PP_LINES: Dict[str, Dict] = {}
 PP_MIN_USAGE_GAMES = 2     # floor; PP time must also appear in >= half the recent sample
 PP_MIN_AVG_TOI_SEC = 30    # excludes one-off/end-of-power-play appearances
@@ -2651,7 +2665,7 @@ async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> Li
 
 
 def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
-    """Separate form display only; never changes model picks or record inputs."""
+    """Existing Shots/Points form qualifiers, independent of ordinary pick gates."""
     models = {}
     for profile in profiles:
         if profile and not profile.get("historyOnly"):
@@ -2773,6 +2787,55 @@ def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
                 }
                 output.append(row)
     return output
+
+
+def _nhl_form_pick_groups(board: dict) -> dict:
+    """Expose every generated form prop in its category; never invent a quote."""
+    groups = {key: list(board.get(key) or []) for key, *_ in _NHL_FORM_SPECS}
+    if not isinstance(board.get("hotColdPlayers"), list):
+        return groups
+    groups = {key: [] for key, *_ in _NHL_FORM_SPECS}
+    form_labels = {spec[1] for spec in _NHL_FORM_SPECS}
+    starts = {team: g.get("startTime") for g in board.get("games") or []
+              for team in (g.get("homeTeam"), g.get("awayTeam"))}
+    models = {}
+    for key, category, stat, side, _ in _NHL_TRK_LISTS:
+        if category in form_labels:
+            continue
+        for p in board.get(key) or []:
+            line = p.get("dispLine")
+            if line is None:
+                line = p.get("realLine")
+            probability = (p.get("underConfidence") or p.get("underRate")
+                           or p.get("underRateAny") or p.get("underRateVo")
+                           if side == "UNDER" else
+                           p.get("dispScore") or p.get("ptsScore") or p.get("score"))
+            models[(str(p.get("pid")), stat, side, line)] = probability
+    for row in board["hotColdPlayers"]:
+        for key, label, market, stat, side, coach_key in _NHL_FORM_SPECS:
+            if row.get("marketKey") != market or row.get("side") != side:
+                continue
+            if key.startswith("doubleCold") and not row.get("doubleCold"):
+                continue
+            probability = models.get((str(row.get("pid")), stat, side, row.get("dispLine")))
+            if probability is None and (board.get("system", "A") != "B" or row.get("savedSnapshot")):
+                probability = row.get("appProbability")
+            try:
+                probability = float(probability)
+                if not math.isfinite(probability) or not 0 < probability <= 100:
+                    probability = None
+            except (TypeError, ValueError):
+                probability = None
+            pick = {**row, "formCategory": label, "formMarketKey": coach_key,
+                    "pick": side, "game_start": row.get("game_start") or starts.get(row.get("team")),
+                    "appProbability": probability, "dispScore": probability,
+                    "score": probability, "ptsScore": probability,
+                    "underConfidence": probability if side == "UNDER" else None}
+            implied = pick.get("impliedProbability")
+            pick["edge"] = (round(probability - implied, 2)
+                            if probability is not None and implied is not None else None)
+            groups[key].append(pick)
+    return groups
 
 
 def _nhl_history_profile(player: Dict, full_logs: List[Dict],
@@ -4886,6 +4949,7 @@ async def run_picks(
                 "B_unavailable_categories": ["Power Play Points"],
             },
         })
+    _result.update(_nhl_form_pick_groups(_result))
     if simulate:
         _result["simulationStats"] = _nhl_simulation_stats(
             target_date, game_preds, _result)
@@ -4993,6 +5057,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
     b.update(a.get("legacySystem") or {})
     b["system"] = "B"
     b["comparisonSystem"] = "B Old/attached ZIP"
+    b.update(_nhl_form_pick_groups(b))
     preseason_slate = bool(a.get("preseason"))
     capture_ok = {"A": a.get("captureStatus") == "OFFICIAL_CAPTURE"}
     if not preseason_slate and a.get("officialCaptureAllowed", True):
@@ -5568,6 +5633,12 @@ body.is-admin .frank-ai-systems{display:flex!important}
         <option value="assists">Assists</option>
         <option value="goals">Goals</option>
         <option value="saves">Goalie Saves</option>
+        <option value="hot_shots">Hot Shots</option>
+        <option value="hot_points">Hot Points</option>
+        <option value="cold_shots">Cold Shots</option>
+        <option value="cold_points">Cold Points</option>
+        <option value="double_cold_shots">Double Cold Shots</option>
+        <option value="double_cold_points">Double Cold Points</option>
       </select>
       <div role="group" aria-label="Edge Coach side" style="display:inline-flex;gap:5px;flex-wrap:wrap">
         <button type="button" id="frankSideAll" class="frank-ai-side-btn active" aria-pressed="true" onclick="_frankSetSide('')">All</button>
@@ -5604,6 +5675,12 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goals under props')">Goals Unders · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goalie saves over props')">Saves Overs · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goalie saves under props')">Saves Unders · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot shots over props')">Hot Shots · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot points over props')">Hot Points · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold shots under props')">Cold Shots · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold points under props')">Cold Points · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold shots under props')">Double Cold Shots · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold points under props')">Double Cold Points · Top 10</button>
     </div>
     <div class="frank-ai-systems admin-only" id="frankAiSystems">
       <span style="color:#94a3b8;font-size:.65rem;font-weight:900;text-transform:uppercase;letter-spacing:.09em">Coach source</span>
@@ -5628,7 +5705,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
         <div role="group" aria-label="Coach parlay categories" style="color:#c4b5fd;font-size:.72rem;font-weight:800">
           Categories
           <details id="frankParlayCategories" style="position:relative;margin-top:4px">
-            <summary id="frankParlayCategoryCount" style="list-style:none;cursor:pointer;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:8px;color:#fff;min-width:175px">Categories (12/12) ▾</summary>
+            <summary id="frankParlayCategoryCount" style="list-style:none;cursor:pointer;background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:8px;color:#fff;min-width:175px">Categories (20/20) ▾</summary>
             <div style="position:absolute;z-index:60;top:calc(100% + 5px);left:0;max-height:min(420px,65vh);overflow-y:auto;width:max-content;max-width:min(310px,85vw);background:#11121b;border:1px solid #7c3aed;border-radius:9px;padding:10px;box-shadow:0 12px 30px rgba(0,0,0,.6)">
               <div style="display:flex;gap:6px;margin-bottom:6px">
                 <button type="button" onclick="_frankParlaySetAll(true)" style="cursor:pointer;background:#312e81;color:#fff;border:0;border-radius:5px;padding:5px 9px">Select all</button>
@@ -5640,12 +5717,20 @@ body.is-admin .frank-ai-systems{display:flex!important}
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="points|UNDER" checked onchange="_frankParlayCategoryChanged()"> Points — Under</label>
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="pp|OVER" checked onchange="_frankParlayCategoryChanged()"> Power Play Points — Over</label>
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="pp|UNDER" checked onchange="_frankParlayCategoryChanged()"> Power Play Points — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="pm|OVER" checked onchange="_frankParlayCategoryChanged()"> Plus/Minus — Over · priced only</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="pm|UNDER" checked onchange="_frankParlayCategoryChanged()"> Plus/Minus — Under · priced only</label>
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="assists|OVER" checked onchange="_frankParlayCategoryChanged()"> Assists — Over</label>
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="assists|UNDER" checked onchange="_frankParlayCategoryChanged()"> Assists — Under</label>
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="goals|OVER" checked onchange="_frankParlayCategoryChanged()"> Goals — Over</label>
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="goals|UNDER" checked onchange="_frankParlayCategoryChanged()"> Goals — Under</label>
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="saves|OVER" checked onchange="_frankParlayCategoryChanged()"> Goalie Saves — Over</label>
               <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="saves|UNDER" checked onchange="_frankParlayCategoryChanged()"> Goalie Saves — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="hot_shots|OVER" checked onchange="_frankParlayCategoryChanged()"> Hot Shots — Over</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="hot_points|OVER" checked onchange="_frankParlayCategoryChanged()"> Hot Points — Over</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="cold_shots|UNDER" checked onchange="_frankParlayCategoryChanged()"> Cold Shots — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="cold_points|UNDER" checked onchange="_frankParlayCategoryChanged()"> Cold Points — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="double_cold_shots|UNDER" checked onchange="_frankParlayCategoryChanged()"> Double Cold Shots — Under</label>
+              <label style="display:block;padding:5px;cursor:pointer;color:#e2e8f0"><input type="checkbox" class="frank-parlay-cat-cb" value="double_cold_points|UNDER" checked onchange="_frankParlayCategoryChanged()"> Double Cold Points — Under</label>
             </div>
           </details>
         </div>
@@ -5672,7 +5757,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
         </select>
       </label>
       <div style="position:relative;display:inline-block">
-        <button class="btn-run" id="nhl-parlay-cats-btn" onclick="toggleNhlCatMenu(event)" style="background:#1f2937">&#9776; Categories (12/12) &#9662;</button>
+        <button class="btn-run" id="nhl-parlay-cats-btn" onclick="toggleNhlCatMenu(event)" style="background:#1f2937">&#9776; Categories (20/20) &#9662;</button>
         <div id="nhl-parlay-cats-menu" style="display:none;position:absolute;z-index:60;top:calc(100% + 6px);left:0;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:10px;padding:10px 12px;min-width:220px;box-shadow:0 12px 34px rgba(0,0,0,.55);text-align:left">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
             <span style="font-size:.63rem;color:#888;font-weight:800;letter-spacing:.06em">PARLAY CATEGORIES</span>
@@ -5684,12 +5769,20 @@ body.is-admin .frank-ai-systems{display:flex!important}
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="POINTS_U" checked onchange="_nhlParlayCatChanged()"> Points (1+) — UNDER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="PP_O" checked onchange="_nhlParlayCatChanged()"> Power Play Points — OVER · MODEL</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="PP_U" checked onchange="_nhlParlayCatChanged()"> Power Play Points — UNDER · MODEL</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="PM_O" checked onchange="_nhlParlayCatChanged()"> Plus/Minus — OVER 0.5</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="PM_U" checked onchange="_nhlParlayCatChanged()"> Plus/Minus — UNDER 0.5</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="ASSISTS_O" checked onchange="_nhlParlayCatChanged()"> Assists (1+) — OVER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="ASSISTS_U" checked onchange="_nhlParlayCatChanged()"> Assists (1+) — UNDER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="GOALS_O" checked onchange="_nhlParlayCatChanged()"> Goals (1+) — OVER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="GOALS_U" checked onchange="_nhlParlayCatChanged()"> Goals (1+) — UNDER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="SAVES_O" checked onchange="_nhlParlayCatChanged()"> Goalie Saves — OVER</label>
           <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="SAVES_U" checked onchange="_nhlParlayCatChanged()"> Goalie Saves — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="HOT_SHOTS_O" checked onchange="_nhlParlayCatChanged()"> Hot Shots — OVER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="HOT_POINTS_O" checked onchange="_nhlParlayCatChanged()"> Hot Points — OVER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="COLD_SHOTS_U" checked onchange="_nhlParlayCatChanged()"> Cold Shots — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="COLD_POINTS_U" checked onchange="_nhlParlayCatChanged()"> Cold Points — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="DOUBLE_COLD_SHOTS_U" checked onchange="_nhlParlayCatChanged()"> Double Cold Shots — UNDER</label>
+          <label style="display:block;color:#d1d5db;font-size:.76rem;padding:5px 2px;cursor:pointer"><input type="checkbox" class="nhl-parlay-cat-cb" value="DOUBLE_COLD_POINTS_U" checked onchange="_nhlParlayCatChanged()"> Double Cold Points — UNDER</label>
         </div>
       </div>
     </div>
@@ -5705,7 +5798,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
       </details>
       <details style="border:1px solid rgba(34,197,94,.35);border-radius:10px;background:#111827;text-align:left">
         <summary style="display:flex;justify-content:space-between;gap:8px;padding:11px 12px;color:#86efac;font-size:.72rem;font-weight:900;cursor:pointer;list-style:none">
-          <span>COACH CATEGORIES</span><span id="nhlParlayCoachSummary" style="color:#94a3b8;font-size:.64rem">20/20</span>
+          <span>COACH CATEGORIES</span><span id="nhlParlayCoachSummary" style="color:#94a3b8;font-size:.64rem">26/26</span>
         </summary>
         <div style="border-top:1px solid rgba(34,197,94,.2);padding:9px 11px">
           <div style="text-align:right;margin-bottom:6px"><button type="button" onclick="_nhlParlayCoachSetAll(true)" style="background:none;border:0;color:#5eead4;cursor:pointer;font-weight:900">All</button><button type="button" onclick="_nhlParlayCoachSetAll(false)" style="background:none;border:0;color:#fb7185;cursor:pointer;font-weight:900">None</button></div>
@@ -5795,9 +5888,9 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
 function _amToDec(a){var s=String(a==null?'':a).replace('+','').trim();var n=parseFloat(s);if(!n||isNaN(n))return null;return n>0?1+n/100:1+100/Math.abs(n);}
 function _decToAm(d){if(!d||d<=1)return null;return d>=2?'+'+Math.round((d-1)*100):'-'+Math.round(100/(d-1));}
 function _fmtOdds(o){if(o==null||o==='')return null;var s=String(o).trim();if(!s||s==='0')return null;return (s.charAt(0)==='-'||s.charAt(0)==='+')?s:'+'+s;}
-function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(odds);if(isNaN(a)||a===0)return true;return a>=-500;}
+function _floorOk(odds){if(odds==null||odds==='')return true;var a=parseFloat(odds);if(isNaN(a)||a===0)return true;return a>=-1000;}
 function _legScore(c){return (c.hasOdds?1:0)*1e9+(c.rate||0)*1e4+(c.dec?Math.min(c.dec,11)*100:0);}
-window.NHL_PARLAY_CATS = {SHOTS_O:true,SHOTS_U:true,POINTS_O:true,POINTS_U:true,PP_O:true,PP_U:true,ASSISTS_O:true,ASSISTS_U:true,GOALS_O:true,GOALS_U:true,SAVES_O:true,SAVES_U:true};
+window.NHL_PARLAY_CATS = {SHOTS_O:true,SHOTS_U:true,POINTS_O:true,POINTS_U:true,PP_O:true,PP_U:true,PM_O:true,PM_U:true,ASSISTS_O:true,ASSISTS_U:true,GOALS_O:true,GOALS_U:true,SAVES_O:true,SAVES_U:true,HOT_SHOTS_O:true,HOT_POINTS_O:true,COLD_SHOTS_U:true,COLD_POINTS_U:true,DOUBLE_COLD_SHOTS_U:true,DOUBLE_COLD_POINTS_U:true};
 window.NHL_PARLAY_GAMES=window.NHL_PARLAY_GAMES||{};
 var _NHL_PARLAY_COACH_CATS=[
   {key:'coach_edge',label:'Coach Edge — Top 10'},{key:'safest_bets',label:'Safest Bets — Top 10'},
@@ -5809,7 +5902,10 @@ var _NHL_PARLAY_COACH_CATS=[
   {key:'pm_over',label:'Plus/Minus Overs — Top 10 (priced only)'},{key:'pm_under',label:'Plus/Minus Unders — Top 10 (priced only)'},
   {key:'assists_over',label:'Best Assists Overs — Top 5'},{key:'assists_under',label:'Best Assists Unders — Top 5'},
   {key:'goals_over',label:'Best Goals Overs — Top 5'},{key:'goals_under',label:'Best Goals Unders — Top 5'},
-  {key:'saves_over',label:'Best Saves Overs — Top 5'},{key:'saves_under',label:'Best Saves Unders — Top 5'}
+  {key:'saves_over',label:'Best Saves Overs — Top 5'},{key:'saves_under',label:'Best Saves Unders — Top 5'},
+  {key:'hot_shots_over',label:'Hot Shots — Top 10'},{key:'hot_points_over',label:'Hot Points — Top 10'},
+  {key:'cold_shots_under',label:'Cold Shots — Top 10'},{key:'cold_points_under',label:'Cold Points — Top 10'},
+  {key:'double_cold_shots_under',label:'Double Cold Shots — Top 10'},{key:'double_cold_points_under',label:'Double Cold Points — Top 10'}
 ];
 window.NHL_PARLAY_COACH_CATS=window.NHL_PARLAY_COACH_CATS||{};
 _NHL_PARLAY_COACH_CATS.forEach(function(c){if(!(c.key in window.NHL_PARLAY_COACH_CATS))window.NHL_PARLAY_COACH_CATS[c.key]=true;});
@@ -5877,20 +5973,20 @@ function _renderNhlParlayCoachCats(){
 }
 document.addEventListener('DOMContentLoaded',function(){_syncNhlParlayCats();_paintNhlParlayCatBtn();_renderNhlParlayGames();_renderNhlParlayCoachCats();});
 function _nhlLeg(p){
-  var market=p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
+  var market=p.formCategory||p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
   var modelOnly=p.realLine==null
     &&(p.lineSource==='Model'||p.lineSource==='No book line');
   var line=modelOnly?p.dispLine:p.realLine;
   if(line==null) return null;
   var dir=p._parlaySide==='UNDER'?'UNDER':'OVER';
-  var rate=dir==='UNDER'
+  var rate=p.formCategory?Number(p.recentHits||0)/Math.max(1,Number(p.recentTotal||5))*100:dir==='UNDER'
     ?(p.underRate||p.underRateAny||p.underRateVo||0)
     :(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
   var odds=modelOnly?'':dir==='UNDER'?(p.realUnderOdds||''):(p.realOdds||'');var dec=_amToDec(odds);
   return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,book:_nhlBookName(p,dir),dec:dec,hasOdds:!!dec,source:'normal',modelOnly:modelOnly};
 }
 function _nhlParlayCatKey(c){
-  var base={'Shots on Goal':'SHOTS','Points (1+)':'POINTS','Power Play Points (1+)':'PP','Assists (1+)':'ASSISTS','Goals (1+)':'GOALS','Goalie Saves':'SAVES'}[c.market]||'SHOTS';
+  var base={'Shots on Goal':'SHOTS','Points (1+)':'POINTS','Power Play Points (1+)':'PP','Plus/Minus':'PM','Assists (1+)':'ASSISTS','Goals (1+)':'GOALS','Goalie Saves':'SAVES','Hot Shots':'HOT_SHOTS','Hot Points':'HOT_POINTS','Cold Shots':'COLD_SHOTS','Cold Points':'COLD_POINTS','Double Cold Shots':'DOUBLE_COLD_SHOTS','Double Cold Points':'DOUBLE_COLD_POINTS'}[c.market]||'SHOTS';
   return base+(c.dir==='UNDER'?'_U':'_O');
 }
 function _nhlCoachParlayCandidates(){
@@ -5928,6 +6024,11 @@ function _nhlCoachParlayCandidates(){
   pools.alt_line_edge=(window.__NHL_ALT_COACH_ROWS__||[]).filter(function(p){
     return p&&p.edge>0&&Number(p.appProb)>=85&&Number(p.implied)>=70&&_floorOk(p.odds)&&_nhlParlayGameOn(p.team,p.opponent);
   }).slice(0,10);
+  _NHL_FORM_TYPES.forEach(function(form){
+    pools[form.market+'_'+form.side.toLowerCase()]=select(positive.filter(function(p){
+      return p.marketKey===form.market&&p.side===form.side;
+    }),byEdge,10);
+  });
   var merged={};
   Object.keys(pools).forEach(function(cat){
     pools[cat].forEach(function(p){
@@ -6133,7 +6234,10 @@ function _frankRawForSystem(system){
   if(system==='B'&&current.legacySystem){
     var legacy=Object.assign({},current);
     Object.keys(current.legacySystem||{}).forEach(function(key){legacy[key]=(current.legacySystem||{})[key];});
-    legacy.system='B';return legacy;
+    legacy.system='B';
+    _NHL_FORM_TYPES.forEach(function(form){delete legacy[form.key];});
+    Object.assign(legacy,_nhlFormGroups(legacy));
+    return legacy;
   }
   return null;
 }
@@ -6198,8 +6302,49 @@ function _frankImplied(american){
   if(a==null)return null;
   return a<0?((-a)/((-a)+100)*100):(100/(a+100)*100);
 }
+var _NHL_FORM_TYPES=[
+  {key:'hotShots',label:'Hot Shots',stat:'shots',side:'OVER',market:'hot_shots'},
+  {key:'hotPoints',label:'Hot Points',stat:'points',side:'OVER',market:'hot_points'},
+  {key:'coldShots',label:'Cold Shots',stat:'shots',side:'UNDER',market:'cold_shots'},
+  {key:'coldPoints',label:'Cold Points',stat:'points',side:'UNDER',market:'cold_points'},
+  {key:'doubleColdShots',label:'Double Cold Shots',stat:'shots',side:'UNDER',market:'double_cold_shots'},
+  {key:'doubleColdPoints',label:'Double Cold Points',stat:'points',side:'UNDER',market:'double_cold_points'}
+];
+function _nhlFormGroups(raw){
+  var groups={};
+  _NHL_FORM_TYPES.forEach(function(form){
+    if(Array.isArray(raw[form.key])){groups[form.key]=raw[form.key];return;}
+    groups[form.key]=(raw.hotColdPlayers||[]).filter(function(p){
+      return p.marketKey===form.stat&&p.side===form.side&&(form.key.indexOf('doubleCold')!==0||p.doubleCold);
+    }).map(function(p){
+      var probability=String(raw.system||'A')!=='B'?p.appProbability:null;
+      if(String(raw.system||'A')==='B'){
+        var keys=form.stat==='shots'
+          ?(form.side==='OVER'?['picks','rest']:['shotUnders','shotUndersRest'])
+          :(form.side==='OVER'?['ptsPicks','ptsRest']:['ptsUnders','ptsUndersRest']);
+        var models=[];
+        keys.forEach(function(key){models=models.concat(raw[key]||[]);});
+        var model=models.find(function(candidate){
+          var line=candidate.dispLine!=null?candidate.dispLine:candidate.realLine;
+          return String(candidate.pid)===String(p.pid)&&Number(line)===Number(p.dispLine);
+        });
+        if(model)probability=form.side==='UNDER'
+          ?model.underConfidence||model.underRate||model.underRateAny||model.underRateVo||null
+          :model.dispScore||model.ptsScore||model.score||null;
+      }
+      var implied=p.impliedProbability;
+      return Object.assign({},p,{formCategory:form.label,formMarketKey:form.market,pick:form.side,
+        appProbability:probability,dispScore:probability,score:probability,ptsScore:probability,
+        underConfidence:form.side==='UNDER'?probability:null,
+        edge:probability!=null&&implied!=null?Number(probability)-Number(implied):null});
+    });
+  });
+  return groups;
+}
 function _frankMarketKey(market){
   var m=String(market||'').toLowerCase();
+  var form=_NHL_FORM_TYPES.find(function(f){return m===f.label.toLowerCase();});
+  if(form)return form.market;
   if(m.indexOf('plus/minus')>=0||m.indexOf('plus minus')>=0)return 'pm';
   if(m.indexOf('power play')>=0)return 'pp';
   if(m.indexOf('shot')>=0)return 'shots';
@@ -6212,6 +6357,7 @@ function _frankMarketKey(market){
 function _frankAllProps(){
   var sourceSystem=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
   var raw=_frankRawForSystem(sourceSystem)||{};
+  raw=Object.assign({},raw,_nhlFormGroups(raw));
   var defs=[
     ['picks','OVER',false],['rest','OVER',true],['ptsPicks','OVER',false],['ptsRest','OVER',true],
     ['ppPicks','OVER',false],['ppRest','OVER',true],['astPicks','OVER',false],['astRest','OVER',true],
@@ -6222,11 +6368,12 @@ function _frankAllProps(){
     ['astUnders','UNDER',false],['astUndersRest','UNDER',true],['goalUnders','UNDER',false],
     ['goalUndersRest','UNDER',true],['savesUnders','UNDER',false],['savesUndersRest','UNDER',true]
   ];
+  _NHL_FORM_TYPES.forEach(function(form){defs.push([form.key,form.side,false]);});
   var seen={},out=[];
   defs.forEach(function(def){
     (raw[def[0]]||[]).forEach(function(p){
       if(!p||!p.name)return;
-      var side=def[1],isOverflow=!!def[2],market=p.mkt||'Player Prop';
+      var side=def[1],isOverflow=!!def[2],market=p.formCategory||p.mkt||'Player Prop';
       var line=p.realLine;
       var odds=side==='UNDER'?p.realUnderOdds:p.realOdds;
       var appProb=p.savedSnapshot?Number(p.savedCoachProbability):side==='UNDER'
@@ -6269,7 +6416,7 @@ function _frankParlaySelections(){
 }
 function _frankParlayCategoryChanged(){
   var count=document.getElementById('frankParlayCategoryCount');
-  if(count)count.textContent='Categories ('+_frankParlaySelections().length+'/12) ▾';
+  if(count)count.textContent='Categories ('+_frankParlaySelections().length+'/'+document.querySelectorAll('.frank-parlay-cat-cb').length+') ▾';
   var out=document.getElementById('frankParlayResult');
   if(out&&out.innerHTML.trim())_frankBuildParlay();
 }
@@ -6378,7 +6525,9 @@ function _frankParse(question,props){
   var top=q.match(/top +([0-9]{1,2})/);if(top)f.limit=Math.max(1,Math.min(10,Number(top[1])));
   if(padded.indexOf(' under ')>=0)f.side='UNDER';
   if(padded.indexOf(' over ')>=0)f.side='OVER';
-  if(q.indexOf('plus/minus')>=0||q.indexOf('plus minus')>=0)f.market='pm';
+  var form=_NHL_FORM_TYPES.slice().reverse().find(function(item){return q.indexOf(item.label.toLowerCase())>=0;});
+  if(form)f.market=form.market;
+  else if(q.indexOf('plus/minus')>=0||q.indexOf('plus minus')>=0)f.market='pm';
   else if(q.indexOf('power play')>=0)f.market='pp';
   else if(q.indexOf('shot')>=0)f.market='shots';
   else if(q.indexOf('assist')>=0)f.market='assists';
@@ -6558,7 +6707,8 @@ async function generateFrankSelected(){
   var category=document.getElementById('frankAiCategory'),game=document.getElementById('frankAiGame');
   var market=category?category.value:'',side=window.NHL_FRANK_SIDE||'';
   var labels={shots:'shots',points:'points',pp:'power play points',pm:'plus/minus',assists:'assists',goals:'goals',saves:'goalie saves'};
-  var limit=!market||market==='pm'?10:5;
+  _NHL_FORM_TYPES.forEach(function(form){labels[form.market]=form.label.toLowerCase();});
+  var limit=!market||market==='pm'||_NHL_FORM_TYPES.some(function(form){return form.market===market;})?10:5;
   var question='Show the top '+limit+' positive edge '+(side?side.toLowerCase()+' ':'')+(labels[market]?labels[market]+' props':'plays')+' at any eligible odds';
   var controls=[category,game].concat(Array.from(document.querySelectorAll('.frank-ai-side-btn'))).filter(Boolean);
   var disabled=controls.map(function(control){return control.disabled;});
@@ -6640,6 +6790,10 @@ async function askNhlAltCoach(){
   var categoryEl=document.getElementById('frankAiCategory');
   var market=categoryEl?categoryEl.value:'';
   var marketLabel=categoryEl&&categoryEl.selectedIndex>=0?categoryEl.options[categoryEl.selectedIndex].text:'All categories';
+  if(_NHL_FORM_TYPES.some(function(form){return form.market===market;})){
+    _frankCommit('<div class="frank-ai-summary">Hot/Cold categories use their generated standard-line props. Use Generate Picks or the form preset; no separate alternate-form market or price is invented.</div>');
+    return;
+  }
   if(market==='pm'){
     _frankCommit('<div class="frank-ai-summary">Plus/Minus model picks are available through Analyze. No genuine Plus/Minus alternate ladder is available in the feed, so alternate odds and priced edge cannot be quoted.</div>');
     return;
@@ -7229,7 +7383,8 @@ function _hcCard(raw,r){
     +'<div class="hc-row"><span>'+r.side+' odds</span><b>'+odds+'</b></div>'
     +'<div class="hc-row"><span>App estimate</span><b>'+prob+'</b></div>'
     +'<div class="hc-row"><span>Edge</span><b>'+edge+'</b></div>'
-    +'<button type="button" class="hc-gl" data-hc="'+_nhlSafe(id)+'">Game Log</button></article>';
+    +'<button type="button" class="hc-gl" data-hc="'+_nhlSafe(id)+'">Game Log</button>'
+    +_nhlBetBtn(Object.assign({},r,{formCategory:r.formCategory||(r.form==='HOT'?'Hot':_nhlHcForm==='DOUBLE'?'Double Cold':'Cold')+' '+(r.marketKey==='shots'?'Shots':'Points')}),r.side)+'</article>';
 }
 function nhlJumpToHotCold(){_nhlScrollTo('nhl-section-hotcold');}
 function _nhlHcSet(kind,val){
@@ -7246,8 +7401,13 @@ function _nhlHcBind(){
   });
 }
 function _nhlHotColdSection(raw,rows,q){
+  var groups=_nhlFormGroups(raw);
+  rows=rows.map(function(row){
+    var key=(row.form==='HOT'?'hot':_nhlHcForm==='DOUBLE'?'doubleCold':'cold')+(row.marketKey==='shots'?'Shots':'Points');
+    return (groups[key]||[]).find(function(p){return String(p.pid)===String(row.pid)&&p.dispLine===row.dispLine;})||row;
+  });
   var h='<div id="nhl-section-hotcold" class="nhl-scroll-anchor"></div><section class="hc-sec" aria-labelledby="hcTitle"><div class="sec" id="hcTitle">Hot and Cold Players</div>';
-  h+='<p class="hc-note">Form uses the true last five chronological games at all venues, before this game. 4/5 is history, not an 80% prediction. Pushes are not wins. This differs from the venue-matched Last 5 box in Game Log. Display only: not tracked, not in Coach, locks, bets or parlays.</p>';
+  h+='<p class="hc-note">Form uses the true last five chronological games at all venues, before this game. 4/5 is history, not an 80% prediction. Pushes are not wins. This differs from the venue-matched Last 5 box in Game Log. Every generated form prop is tracked in its category and available in the parlay builders. My Bets requires genuine odds; priced Coach lists also require positive model edge. Double Cold also appears in Cold.</p>';
   function grp(label,kind,cur,opts){
     return '<div class="hc-grp" role="group" aria-label="'+label+'"><span>'+label+'</span>'+opts.map(function(o){
       return '<button type="button" class="hc-btn" aria-pressed="'+(cur===o[0])+'" onclick="_nhlHcSet(&quot;'+kind+'&quot;,&quot;'+o[0]+'&quot;)">'+o[1]+'</button>';
@@ -8173,6 +8333,13 @@ function _nhlPaint(q){
     });
   });
   // De-dup by name+market in case a player appears in two lists
+  var formLocks=_nhlFormGroups(raw);
+  _NHL_FORM_TYPES.forEach(function(form){
+    _f(formLocks[form.key]).forEach(function(p){
+      var score=Number(p.appProbability||0);
+      if(score>=80)_lockAll.push(Object.assign({},p,{_lockScore:score}));
+    });
+  });
   var _lockSeen={}; _lockAll=_lockAll.filter(function(p){
     var k=(p.name||'')+'|'+(p.mkt||'')+'|'+(p.pick||'OVER');
     if(_lockSeen[k]) return false; _lockSeen[k]=true; return true;
@@ -8296,12 +8463,18 @@ function _nhlPaint(q){
   }
 
   // All Plays by Game - collapsible (shots + points detail tables)
+  var formGroups=_nhlFormGroups(raw);
+  var formPlays=[];
+  _NHL_FORM_TYPES.forEach(function(form){
+    formPlays=formPlays.concat(_f(formGroups[form.key]).map(function(p){return Object.assign({},p,{mkt:form.label});}));
+  });
   var allPlays = (d.picks||[]).concat(d.rest||[])
     .concat(d.ptsPicks||[]).concat(d.ptsRest||[])
     .concat(d.ppPicks||[]).concat(d.ppRest||[])
+    .concat(d.pmPicks||[]).concat(d.pmRest||[])
     .concat(d.astPicks||[]).concat(d.astRest||[])
     .concat(d.goalPicks||[]).concat(d.goalRest||[])
-    .concat(d.savesPicks||[]).concat(d.savesRest||[]);
+    .concat(d.savesPicks||[]).concat(d.savesRest||[]).concat(formPlays);
   window.__NHL_PLAYS__=allPlays;
   if(allPlays.length && d.games && d.games.length){
     h += '<div class="sec" style="margin-top:32px">All Plays by Game</div>';
@@ -8314,6 +8487,7 @@ function _nhlPaint(q){
       var shots = gamePlays.filter(function(p){return p.mkt==='Shots on Goal';});
       var pts   = gamePlays.filter(function(p){return p.mkt==='Points (1+)';});
       var pp    = gamePlays.filter(function(p){return p.mkt==='Power Play Points (1+)';});
+      var pm    = gamePlays.filter(function(p){return p.mkt==='Plus/Minus';});
       var ast   = gamePlays.filter(function(p){return p.mkt==='Assists (1+)';});
       var goals = gamePlays.filter(function(p){return p.mkt==='Goals (1+)';});
       var sv    = gamePlays.filter(function(p){return p.mkt==='Goalie Saves';});
@@ -8339,6 +8513,17 @@ function _nhlPaint(q){
         h += '<div style="font-size:.72rem;font-weight:700;color:#c084fc;text-transform:uppercase;letter-spacing:.1em;padding:8px 12px 4px">Power Play Points</div>';
         h += buildNormTable(pp, 1);
       }
+      if(pm.length){
+        h += '<div style="font-size:.72rem;font-weight:700;color:#38bdf8;padding:8px 12px 4px">Plus/Minus</div>';
+        h += buildNormTable(pm, 1);
+      }
+      _NHL_FORM_TYPES.forEach(function(form){
+        var rows=gamePlays.filter(function(p){return p.mkt===form.label;});
+        if(rows.length){
+          h+='<div style="font-size:.72rem;font-weight:700;color:#fb923c;padding:8px 12px 4px">'+form.label+' · '+form.side+'</div>';
+          h+='<div class="hc-grid">'+rows.map(function(p){return _hcCard(raw,p);}).join('')+'</div>';
+        }
+      });
       if(ast.length){
         h += '<div style="font-size:.72rem;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;padding:8px 12px 4px">Assists</div>';
         h += buildNormTable(ast, 1);
@@ -8365,15 +8550,20 @@ function _nhlPaint(q){
   window.__NHL_PLAYS__ = _nhlParlaySide(raw.picks,'OVER').concat(_nhlParlaySide(raw.rest,'OVER'))
     .concat(_nhlParlaySide(raw.ptsPicks,'OVER')).concat(_nhlParlaySide(raw.ptsRest,'OVER'))
     .concat(_nhlParlaySide(raw.ppPicks,'OVER')).concat(_nhlParlaySide(raw.ppRest,'OVER'))
+    .concat(_nhlParlaySide(raw.pmPicks,'OVER')).concat(_nhlParlaySide(raw.pmRest,'OVER'))
     .concat(_nhlParlaySide(raw.astPicks,'OVER')).concat(_nhlParlaySide(raw.astRest,'OVER'))
     .concat(_nhlParlaySide(raw.goalPicks,'OVER')).concat(_nhlParlaySide(raw.goalRest,'OVER'))
     .concat(_nhlParlaySide(raw.savesPicks,'OVER')).concat(_nhlParlaySide(raw.savesRest,'OVER'))
     .concat(_nhlParlaySide(raw.shotUnders,'UNDER')).concat(_nhlParlaySide(raw.shotUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.ptsUnders,'UNDER')).concat(_nhlParlaySide(raw.ptsUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.ppUnders,'UNDER')).concat(_nhlParlaySide(raw.ppUndersRest,'UNDER'))
+    .concat(_nhlParlaySide(raw.pmUnders,'UNDER')).concat(_nhlParlaySide(raw.pmUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.astUnders,'UNDER')).concat(_nhlParlaySide(raw.astUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.goalUnders,'UNDER')).concat(_nhlParlaySide(raw.goalUndersRest,'UNDER'))
     .concat(_nhlParlaySide(raw.savesUnders,'UNDER')).concat(_nhlParlaySide(raw.savesUndersRest,'UNDER'));
+  _NHL_FORM_TYPES.forEach(function(form){
+    window.__NHL_PLAYS__=window.__NHL_PLAYS__.concat(_nhlParlaySide(formGroups[form.key],form.side));
+  });
   _renderNhlParlayGames();
   _renderNhlParlayCoachCats();
 }
@@ -8414,6 +8604,7 @@ function _nhlBetMkt(m){
   if(m.indexOf('Shot')>=0) return ['SHOTS','Shots on Goal'];
   if(m.indexOf('Point')>=0) return ['POINTS','Points'];
   if(m.indexOf('Assist')>=0) return ['ASSISTS','Assists'];
+  if(m.indexOf('Goals')>=0) return ['GOALS','Goals'];
   if(m.indexOf('Save')>=0) return ['SAVES','Goalie Saves'];
   return ['',''];
 }
@@ -8428,7 +8619,7 @@ function _nhlBetBtn(p,forceSide){
   var k='nh'+(++_nhlBetN);
   window.__NHL_BET_SRC__[k]={
     name:p.name,pid:(p.pid!=null?String(p.pid):''),team:(p.team||''),opp:(p.opponent||''),
-    category:mk[1],side:side,stat_key:mk[0],stat_label:mk[1],
+    category:p.formCategory||mk[1],side:side,stat_key:mk[0],stat_label:mk[1],
     line:p.realLine,odds:(odds!=null?odds:null),book:_nhlBookName(p,side),date:(window.__NHL_DATE__||'')
   };
   return '<button data-betkey="'+k+'" class="admin-only" onclick="event.stopPropagation();_nhlBetForm(this.dataset.betkey)" style="background:#0e7490;color:#fff;border:none;border-radius:8px;padding:6px 10px;font-size:.7rem;font-weight:800;cursor:pointer">Track Bet</button>';
@@ -8902,6 +9093,7 @@ function renderNhlOverflowDay(){
  function _nhlTrkCatHtml(allRows,stake){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var cats={},catOrder=['Shots on Goal','Points','Power Play Points','Plus/Minus','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
+  catOrder=catOrder.concat(_NHL_FORM_TYPES.map(function(form){return form.label;}));
   allRows.forEach(function(r){
     var cat=r.category||'Other',side=(r.side||'OVER').toUpperCase();
     var key=cat+'|'+side;
@@ -8983,6 +9175,7 @@ function renderNhlOverflowDay(){
   if(!allRows.length) return '<p style="color:#475569;padding:20px;text-align:center">No graded picks yet.</p>';
   var stake=_nhlTrkStake();
    var catOrder=['Shots on Goal','Points','Power Play Points','Plus/Minus','Assists','Goals','Goalie Saves','NHL Overflow','80-100% Locks'];
+   catOrder=catOrder.concat(_NHL_FORM_TYPES.map(function(form){return form.label;}));
    var catColors={'Shots on Goal':'#fbbf24','Points':'#60a5fa','Power Play Points':'#c084fc','Assists':'#a78bfa','Goals':'#fb7185','Goalie Saves':'#34d399','NHL Overflow':'#f59e0b','80-100% Locks':'#facc15'};
    var groups={},order=[];
    allRows.forEach(function(r){
@@ -9667,11 +9860,11 @@ import threading as _bt_th, uuid as _bt_uuid
 
 _NHL_BET_LOG_PATH = str(_CACHE_DIR / "_nhl_bet_log.json")
 _NHL_BET_LOCK = _bt_th.Lock()
-_NHL_BET_STAT_KEYS = ("SHOTS", "POINTS", "ASSISTS", "SAVES", "PP_POINTS", "PLUS_MINUS")
+_NHL_BET_STAT_KEYS = ("SHOTS", "POINTS", "ASSISTS", "GOALS", "SAVES", "PP_POINTS", "PLUS_MINUS")
 _NHL_STAT_LABEL = {"SHOTS": "Shots on Goal", "POINTS": "Points",
-                   "ASSISTS": "Assists", "SAVES": "Goalie Saves",
+                   "ASSISTS": "Assists", "GOALS": "Goals", "SAVES": "Goalie Saves",
                    "PP_POINTS": "Power Play Points", "PLUS_MINUS": "Plus/Minus"}
-_NHL_CAT_ORDER = ["Shots on Goal", "Points", "Power Play Points", "Plus/Minus", "Assists", "Goalie Saves"]
+_NHL_CAT_ORDER = ["Shots on Goal", "Points", "Power Play Points", "Plus/Minus", "Assists", "Goals", "Goalie Saves"]
 _NHL_BOX_CACHE: dict = {}   # (pid, season) → (games_dict, timestamp, permanent)
 _NHL_BOX_LOCK = _bt_th.Lock()
 
@@ -9738,6 +9931,8 @@ def _nhl_extract_stat(g: dict, stat_key: str):
             return float(v) if v is not None else None
         if stat_key == "ASSISTS":
             return float(g["assists"]) if g.get("assists") is not None else None
+        if stat_key == "GOALS":
+            return float(g["goals"]) if g.get("goals") is not None else None
         if stat_key == "POINTS":
             if g.get("points") is not None:
                 return float(g["points"])
@@ -9975,11 +10170,13 @@ _NHL_COACH_PRESET_LABELS = [
     "Top 3", "Best Overs", "Best Unders",
     *[f"{market} {side} · Top {10 if market == 'Plus/Minus' else 5}" for market in _NHL_COACH_MARKETS
       for side in ("OVER", "UNDER")],
+    *[f"{label} {side} · Top 10" for _, label, _, _, side, _ in _NHL_FORM_SPECS],
 ]
 _NHL_COACH_STAT_KEYS = {
     "shots": "SHOTS", "points": "POINTS", "pp": "PP_POINTS",
     "pm": "PLUS_MINUS",
     "assists": "ASSISTS", "goals": "GOALS", "saves": "SAVES",
+    **{coach: stat for _, _, _, stat, _, coach in _NHL_FORM_SPECS},
 }
 _NHL_GP_CAT    = "__gp__"
 _NHL_HIST_DETAIL_CAT = "__historical_analysis_detail__"
@@ -10045,6 +10242,7 @@ _NHL_TRK_LISTS = [
     ("savesRest",       "Goalie Saves",  "SAVES",  "OVER",  True),
     ("savesUnders",     "Goalie Saves",  "SAVES",  "UNDER", False),
     ("savesUndersRest", "Goalie Saves",  "SAVES",  "UNDER", True),
+    *[(key, label, stat, side, False) for key, label, _, stat, side, _ in _NHL_FORM_SPECS],
 ]
 
 def _nhl_save_picks_snapshot(
@@ -10068,6 +10266,10 @@ def _nhl_save_picks_snapshot(
         (p.get("team"), p.get("side")) for p in existing
         if p.get("category") == "Goalie Saves"
     }
+    form_labels = {spec[1] for spec in _NHL_FORM_SPECS}
+    frozen_form_groups = {(p.get("team"), p.get("category"), str(p.get("pid")), p.get("side"))
+                          for p in existing if p.get("category") in form_labels}
+    result = {**result, **_nhl_form_pick_groups(result)}
     flat = []
     for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
         rank_start = _NHL_TRK_TOP + 1 if ovf else 1
@@ -10079,7 +10281,10 @@ def _nhl_save_picks_snapshot(
             # later can still enter the official Saves record before puck drop,
             # once per team/side; previously frozen goalie picks are untouched.
             if team in frozen_teams:
-                if sk == "PLUS_MINUS":
+                if cat in form_labels:
+                    if (team, cat, str(p.get("pid")), side) in frozen_form_groups:
+                        continue
+                elif sk == "PLUS_MINUS":
                     # Append this new market once per team/side before puck
                     # drop. Never recapture any already frozen market or side.
                     if (team, side) in frozen_pm_sides:
@@ -10112,6 +10317,8 @@ def _nhl_save_picks_snapshot(
                     "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
                     "ppUnitUpdatedAt", "ppUnitsVersion")} if sk == "PP_POINTS" else {}),
             })
+            if cat in form_labels:
+                flat[-1].update({key: p.get(key) for key in _NHL_FORM_META})
             if cat == "Goalie Saves":
                 frozen_goalie_sides.add((team, side))
     if flat or (pregame_teams and not existing):
@@ -10210,6 +10417,7 @@ def _nhl_coach_board_groups(board: dict) -> dict:
     candidates, pm_models, seen = [], [], set()
     games = {team: g for g in board.get("games") or []
              for team in (g.get("homeTeam"), g.get("awayTeam"))}
+    board = {**board, **_nhl_form_pick_groups(board)}
     for key, market, stat_key, side, overflow in _NHL_TRK_LISTS:
         for rank, p in enumerate(board.get(key) or [], 11 if overflow else 1):
             game = games.get(p.get("team")) or {}
@@ -10292,6 +10500,9 @@ def _nhl_coach_board_groups(board: dict) -> dict:
                 groups[f"{market} {side} · Top {limit}"] = rows[:limit]
             else:
                 groups[f"{market} {side} · Top {limit}"] = select(rows, limit)
+    for _, label, _, _, side, _ in _NHL_FORM_SPECS:
+        groups[f"{label} {side} · Top 10"] = select(
+            [p for p in candidates if p["category"] == label and p["side"] == side], 10)
     for side in ("OVER", "UNDER"):
         groups[f"Plus/Minus {side} · Model-only"] = [
             p for p in pm_models if p["side"] == side][:10]
@@ -10856,6 +11067,8 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
                     "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
                     "ppUnitUpdatedAt", "ppUnitsVersion")})
             row["is_overflow"] = bool(is_ovf)
+            if cat in {spec[1] for spec in _NHL_FORM_SPECS}:
+                row.update({key: p.get(key) for key in _NHL_FORM_META})
             if not is_ovf:
                 main_rows.append(row)
             else:
@@ -10863,8 +11076,13 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
             # Cross-market 80-100% Locks category
             lock_score = float(p.get("dispScore") or p.get("ptsScore") or p.get("score") or 0)
             if lock_score >= 80:
-                lock_rows.append({**row, "category": "80-100% Locks",
-                                  "is_overflow": bool(is_ovf)})
+                duplicate_form_lock = (
+                    cat in {spec[1] for spec in _NHL_FORM_SPECS}
+                    and any((old.get("name"), old.get("stat_key"), old.get("side"), old.get("line"))
+                            == (row.get("name"), sk, side, line_raw) for old in lock_rows))
+                if not duplicate_form_lock:
+                    lock_rows.append({**row, "category": "80-100% Locks",
+                                      "is_overflow": bool(is_ovf)})
     # A final schedule can precede publication of some player game logs. Never
     # lock if an entire snapshotted team still has no stat line on this date.
     snap_teams = {p.get("team") for p in snap if p.get("team")}
@@ -10914,6 +11132,9 @@ def _nhl_detail_graded(graded: dict) -> list:
         out.append({k: row.get(k) for k in
                     ("name","team","category","side","stat_key","line","odds","rank",
                      "result","actual","profit","is_overflow")})
+        if row.get("category") in {spec[1] for spec in _NHL_FORM_SPECS}:
+            out[-1].update({key: row.get(key) for key in _NHL_FORM_META})
+            out[-1]["book"] = row.get("book", "")
         if row.get("stat_key") == "PP_POINTS":
             out[-1].update({key: row.get(key) for key in (
                 "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
@@ -13536,8 +13757,9 @@ def _nhl_board_from_saved_selections(date_str: str, system: str):
     for key, category, stat_key, side, overflow in _NHL_TRK_LISTS:
         board[key] = []
         definitions[(category, side, overflow)] = (key, stat_key)
-    stat_categories = {stat_key: category
-                       for _, category, stat_key, _, _ in _NHL_TRK_LISTS}
+    stat_categories = {}
+    for _, category, stat_key, _, _ in _NHL_TRK_LISTS:
+        stat_categories.setdefault(stat_key, category)
     count = missing_probabilities = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -13590,6 +13812,21 @@ def _nhl_board_from_saved_selections(date_str: str, system: str):
                 "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
                 "ppUnitUpdatedAt", "ppUnitsVersion")})
         board[key].append(pick)
+        spec = next((s for s in _NHL_FORM_SPECS if s[1] == category), None)
+        if spec:
+            pick.update({field: row.get(field) for field in _NHL_FORM_META})
+            pick.update({
+                "formCategory": category, "formMarketKey": spec[5],
+                "marketKey": spec[2], "form": "HOT" if side == "OVER" else "COLD",
+                "doubleCold": bool(row.get("doubleCold") or spec[0].startswith("doubleCold")),
+                "appProbability": probability, "impliedProbability": _nhl_alt_implied(odds),
+                "mkt": "Shots on Goal" if spec[2] == "shots" else "Points (1+)",
+            })
+            implied = pick["impliedProbability"]
+            pick["edge"] = probability - implied if probability is not None and implied is not None else None
+            board["hotColdVersion"] = 1
+            if not spec[0].startswith("doubleCold"):
+                board.setdefault("hotColdPlayers", []).append(pick)
         count += 1
     if rows and not count:
         raise RuntimeError("Saved detail contains no recoverable base-category selections.")
