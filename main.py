@@ -5580,7 +5580,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
           <option value="">All games · load a board to choose</option>
         </select>
       </label>
-      <span style="color:#9ca3af;font-size:.68rem;font-weight:600">Applies to presets, Analyze, and Best Alt-Line Edge Plays.</span>
+      <button type="button" id="frankGeneratePicks" onclick="generateFrankSelected()" title="Generate standard-line picks from the selected saved board; no typed question needed" style="background:#f97316;color:#fff;border:1px solid #fb923c;border-radius:8px;padding:9px 14px;font-size:.78rem;font-weight:900;cursor:pointer">Generate Picks</button>
+      <span style="color:#9ca3af;font-size:.68rem;font-weight:600">Choose category, side and game, then Generate Picks. Also applies to presets, Analyze, and Best Alt-Line Edge Plays.</span>
     </div>
     <div class="frank-ai-presets">
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays at any eligible odds')">Coach Edge · Top 10</button>
@@ -6546,6 +6547,36 @@ function _frankRender(question,rows,totalPriced,mode){
     :'I checked '+totalPriced+' priced props from the loaded '+(window.IS_ADMIN?_frankSystemLabel(window.NHL_FRANK_SYSTEM||'A')+' ':'')+'board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.';
   _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div>'
     +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>Coach Edge</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
+}
+async function generateFrankSelected(){
+  var button=document.getElementById('frankGeneratePicks');
+  if(button&&button.disabled)return;
+  if(window.__NHL_ALT_COACH_ABORT__){
+    _frankCommit('<div class="frank-ai-summary">Cancel or finish the alternate-line scan before generating standard-line picks.</div>');
+    return;
+  }
+  var category=document.getElementById('frankAiCategory'),game=document.getElementById('frankAiGame');
+  var market=category?category.value:'',side=window.NHL_FRANK_SIDE||'';
+  var labels={shots:'shots',points:'points',pp:'power play points',pm:'plus/minus',assists:'assists',goals:'goals',saves:'goalie saves'};
+  var limit=!market||market==='pm'?10:5;
+  var question='Show the top '+limit+' positive edge '+(side?side.toLowerCase()+' ':'')+(labels[market]?labels[market]+' props':'plays')+' at any eligible odds';
+  var controls=[category,game].concat(Array.from(document.querySelectorAll('.frank-ai-side-btn'))).filter(Boolean);
+  var disabled=controls.map(function(control){return control.disabled;});
+  if(button){button.disabled=true;button.textContent='Generating…';button.setAttribute('aria-busy','true');}
+  controls.forEach(function(control){control.disabled=true;});
+  window.__NHL_ALT_COACH_ACTIVE__=false;
+  window.__FRANK_LAST_ROWS__=[];
+  try{
+    var input=document.getElementById('frankAiInput');
+    if(!input)throw new Error('Coach controls are unavailable. Reload the page and try again.');
+    input.value=question;
+    await askFrank();
+  }catch(error){
+    _frankCommit('<div class="frank-ai-summary">'+_frankEsc(error.message||'Could not generate the selected picks.')+'</div>');
+  }finally{
+    controls.forEach(function(control,i){control.disabled=disabled[i];});
+    if(button){button.disabled=false;button.textContent='Generate Picks';button.removeAttribute('aria-busy');}
+  }
 }
 function askFrankPreset(question){
   var input=document.getElementById('frankAiInput');if(input)input.value=question;askFrank();
