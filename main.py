@@ -2650,6 +2650,131 @@ async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> Li
     return logs
 
 
+def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
+    """Separate form display only; never changes model picks or record inputs."""
+    models = {}
+    for profile in profiles:
+        if profile and not profile.get("historyOnly"):
+            models.setdefault((profile.get("pid"), profile.get("mkt")), profile)
+
+    def valid_number(value):
+        try:
+            number = float(value) if value is not None and value != "" else None
+            return number if number is not None and math.isfinite(number) else None
+        except (TypeError, ValueError):
+            return None
+
+    def games_before(logs):
+        seen, result = set(), []
+        for game in sorted(_nhl_pre_game_logs(logs, target_date),
+                           key=lambda g: str(g.get("date") or ""), reverse=True):
+            identity = (game.get("date"), game.get("opponent"))
+            if not game.get("date") or identity in seen:
+                continue
+            seen.add(identity)
+            result.append(game)
+        return result
+
+    def values(sample, stat):
+        result = []
+        for game in sample:
+            actual = game.get("last5DisplayStats")
+            if not isinstance(actual, dict):
+                actual = _nhl_last5_display_stats(game)
+            number = valid_number(actual.get(stat))
+            if number is not None:
+                result.append(number)
+        return result
+
+    output = []
+    for player in pool:
+        history = games_before(logs_map.get(player["pid"], []))
+        recent_games = history[:5]  # True last five, not five older valid rows.
+        opponent_games = [g for g in history
+                          if g.get("opponent") == player.get("opponent")][:5]
+        point_quote = next(
+            (info for name, info in (points_lines or {}).items()
+             if _match_odds_name(name, [{"name": player["name"]}])), {})
+        for stat, market, quote in (
+            ("shots", "Shots on Goal", {
+                "line": player.get("realLine"),
+                "odds": player.get("realOdds"),
+                "under_odds": player.get("realUnderOdds"),
+                "over_book": player.get("over_book"),
+                "under_book": player.get("under_book"),
+                "source": player.get("lineSource"),
+            }),
+            ("points", "Points (1+)", point_quote),
+        ):
+            genuine = quote.get("source") not in (
+                "Model", "Simulation", "No book line", "History")
+            book_line = valid_number(quote.get("line")) if genuine else None
+            line = book_line if book_line is not None else (0.5 if stat == "points" else None)
+            if line is None:
+                continue  # Never guess a missing Shots line.
+            recent = values(recent_games, stat)
+            if len(recent_games) != 5 or len(recent) != 5:
+                continue
+            average = sum(recent) / 5
+            versus = values(opponent_games, stat)
+            model = models.get((player["pid"], market), {})
+            # Scores are reused only at their original standard line.
+            model_line = valid_number(model.get("dispLine"))
+            if model_line != line:
+                model = {}
+            for side, form in (("OVER", "HOT"), ("UNDER", "COLD")):
+                hits = sum(v > line if side == "OVER" else v < line for v in recent)
+                if hits < 4 or not (average > line if side == "OVER" else average < line):
+                    continue
+                opponent_hits = sum(v > line if side == "OVER" else v < line for v in versus)
+                opponent_rate = opponent_hits / len(versus) * 100 if versus else None
+                supports = bool(len(versus) >= 3 and opponent_rate >= 70)
+                probability = None
+                for field in (("dispScore", "ptsScore", "score") if side == "OVER"
+                              else ("underConfidence", "underRate", "underRateAny", "underRateVo")):
+                    value = valid_number(model.get(field))
+                    if value is not None and 0 < value <= 100:
+                        probability = value
+                        break
+                odds = valid_number(quote.get("odds" if side == "OVER" else "under_odds"))
+                if (book_line is None or odds is None or odds < -1000
+                        or not (odds <= -100 or odds >= 100)):
+                    odds = None
+                implied = _nhl_alt_implied(odds) if odds is not None else None
+                edge = probability - implied if probability is not None and implied is not None else None
+                row = {
+                    "name": player["name"], "pid": player["pid"],
+                    "team": player.get("team", ""), "opponent": player.get("opponent", ""),
+                    "homeRoad": player.get("homeRoad"), "positionGroup": player.get("positionGroup", "F"),
+                    "lineupStatus": player.get("lineupStatus"), "mkt": market, "marketKey": stat,
+                    "side": side, "form": form, "doubleCold": form == "COLD" and supports,
+                    "matchupSupports": supports, "dispLine": line, "realLine": book_line,
+                    "lineSource": "Book" if book_line is not None else "Model",
+                    "odds": odds, "book": _nhl_side_book(quote, side) if odds is not None else "",
+                    "realOdds": odds if side == "OVER" else None,
+                    "realUnderOdds": odds if side == "UNDER" else None,
+                    "recentHits": hits, "recentTotal": 5, "recentAverage": round(average, 2),
+                    "recentPushes": sum(v == line for v in recent),
+                    "opponentHits": opponent_hits, "opponentTotal": len(versus),
+                    "opponentRate": round(opponent_rate, 1) if opponent_rate is not None else None,
+                    "appProbability": probability, "impliedProbability": round(implied, 2) if implied is not None else None,
+                    "edge": round(edge, 2) if edge is not None else None,
+                    "hotColdRecentGames": [
+                        {"date": g["date"], "opponent": g.get("opponent", ""),
+                         "homeRoad": g.get("homeRoad", ""), "value": v}
+                        for g, v in zip(recent_games, recent)],
+                    "hotColdOpponentGames": [
+                        {"date": g["date"], "opponent": g.get("opponent", ""),
+                         "homeRoad": g.get("homeRoad", ""),
+                         "value": values([g], stat)[0]}
+                        for g in opponent_games if values([g], stat)],
+                    "last5VenueStats": _nhl_last5_venue_stats(
+                        logs_map.get(player["pid"], []), target_date, player.get("homeRoad", "")),
+                }
+                output.append(row)
+    return output
+
+
 def _nhl_history_profile(player: Dict, full_logs: List[Dict],
                          target_date: str, stat_key: str, market: str,
                          history_line: Optional[float] = None,
@@ -4209,6 +4334,7 @@ async def run_picks(
                 team for team, assignments in (pp_units or {}).items() if not assignments),
             "simulation": bool(simulate),
             "system": system, "games": games, "picks": [], "sa_ranks": sa_ranks,
+            "hotColdVersion": 1, "hotColdPlayers": [],
             "game_predictions": game_preds, "qualified": 0, "poolSize": 0,
             "preseason": slate_meta["preseason"],
             "gameTypeLabels": slate_meta["gameTypeLabels"],
@@ -4659,6 +4785,9 @@ async def run_picks(
             player_profiles.append(profile)
             profile_seen.add(key)
 
+    hot_cold_players = _nhl_hot_cold_players(
+        pool, logs_map, target_date, pts_lines_map, player_profiles)
+
     _result = {
         "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
         "ppUnitsVersion": 1 if pp_units is not None else None,
@@ -4669,10 +4798,10 @@ async def run_picks(
         "ptsPicks":      pts_all[:TOP_N],
         "ptsRest":       pts_all[TOP_N:TOP_N*2],
         "ppPicks":       pp_all[:TOP_N],
-        "pmPicks":       pm_all[:TOP_N],
-        "pmRest":        pm_all[TOP_N:TOP_N*2],
-        "pmUnders":      pm_unders[:TOP_N],
-        "pmUndersRest":  pm_unders[TOP_N:TOP_N*2],
+        "pmPicks":       pm_all[:10],
+        "pmRest":        pm_all[10:20],
+        "pmUnders":      pm_unders[:10],
+        "pmUndersRest":  pm_unders[10:20],
         "ppRest":        pp_all[TOP_N:TOP_N*2],
         "astPicks":      ast_all[:TOP_N],
         "astRest":       ast_all[TOP_N:TOP_N*2],
@@ -4693,6 +4822,8 @@ async def run_picks(
         "savesUnders":   saves_unders[:TOP_N],
         "savesUndersRest": saves_unders[TOP_N:TOP_N*2],
         "playerProfiles": player_profiles,
+        "hotColdVersion": 1,
+        "hotColdPlayers": hot_cold_players,
         "games":         games,
         "gameTypes":     slate_meta["gameTypes"],
         "gameTypeLabels": slate_meta["gameTypeLabels"],
@@ -5208,6 +5339,17 @@ body.is-admin #parlayCard{display:block}
 .lad-market-games .glchip{min-width:76px;padding:6px 7px}
 .lad-unavailable{color:#6b7280;font-size:.72rem;line-height:1.45;padding:8px 0 2px}
 @media(max-width:620px){.lad-market-grid{grid-template-columns:1fr}.nhl-lookup-row{align-items:stretch}.nhl-lookup-btn{padding-inline:10px}}
+.hc-sec{margin:14px 0}.hc-ctl{display:flex;flex-wrap:wrap;gap:10px 16px;margin:8px 0 10px}.hc-grp{display:flex;flex-wrap:wrap;align-items:center;gap:5px}.hc-grp>span{font-size:.6rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin-right:2px}
+.hc-btn{background:#1e293b;border:1px solid #475569;color:#cbd5e1;border-radius:7px;padding:6px 10px;font-size:.7rem;font-weight:800;cursor:pointer;min-height:32px}.hc-btn[aria-pressed=true]{background:#1d4ed8;border-color:#60a5fa;color:#fff}
+.hc-note{color:#94a3b8;font-size:.68rem;line-height:1.5;margin:0 0 10px;padding:9px 12px;border:1px solid #334155;border-radius:9px}
+.hc-sub{font-size:.72rem;font-weight:800;color:#f59e0b;text-transform:uppercase;letter-spacing:.1em;margin:12px 0 8px}
+.hc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:10px}
+.hc-card{background:#111827;border:1px solid #334155;border-radius:11px;padding:11px;display:flex;flex-direction:column;gap:7px;font-size:.72rem;color:#cbd5e1}
+.hc-top{display:flex;gap:9px;align-items:center}.hc-top .hs-wrap{width:46px;height:46px}.hc-nm{font-weight:900;color:#f1f5f9;font-size:.82rem}.hc-vs{display:flex;align-items:center;gap:5px;color:#9ca3af;font-size:.66rem}.hc-vs img{width:16px;height:16px}
+.hc-tag{display:inline-block;border-radius:5px;padding:2px 7px;font-size:.6rem;font-weight:900;letter-spacing:.06em;margin-right:4px}.hc-hot{background:rgba(249,115,22,.18);color:#fdba74}.hc-cold{background:rgba(56,189,248,.18);color:#7dd3fc}.hc-sup{background:rgba(52,211,153,.16);color:#6ee7b7}.hc-warn{background:rgba(251,191,36,.16);color:#fcd34d}
+.hc-row{display:flex;justify-content:space-between;gap:8px}.hc-row b{color:#e5e7eb;text-align:right}.hc-row span{color:#9ca3af}
+.hc-gl{background:#1e293b;border:1px solid #475569;color:#e5e7eb;border-radius:7px;padding:7px;font-weight:800;font-size:.7rem;cursor:pointer;margin-top:2px}
+.hc-tbl{width:100%;border-collapse:collapse;font-size:.68rem;margin:6px 0 10px}.hc-tbl th,.hc-tbl td{padding:4px 6px;border-bottom:1px solid #1f2937;text-align:left}.hc-tbl th{color:#9ca3af;font-size:.58rem;text-transform:uppercase}
 </style>
 </head>
 <body>
@@ -5453,8 +5595,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge points under props')">Points Unders · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge power play points over props')">PP Points Overs · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge power play points under props')">PP Points Unders · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPlusMinusPreset('OVER')" title="Model-only while genuine Plus/Minus odds are unavailable">Plus/Minus Overs · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPlusMinusPreset('UNDER')" title="Model-only while genuine Plus/Minus odds are unavailable">Plus/Minus Unders · Top 5</button>
+      <button class="frank-ai-preset" onclick="askFrankPlusMinusPreset('OVER')" title="Model-only while genuine Plus/Minus odds are unavailable">Plus/Minus Overs · Top 10</button>
+      <button class="frank-ai-preset" onclick="askFrankPlusMinusPreset('UNDER')" title="Model-only while genuine Plus/Minus odds are unavailable">Plus/Minus Unders · Top 10</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge assists over props')">Assists Overs · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge assists under props')">Assists Unders · Top 5</button>
       <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goals over props')">Goals Overs · Top 5</button>
@@ -5663,7 +5805,7 @@ var _NHL_PARLAY_COACH_CATS=[
   {key:'shots_over',label:'Best Shots Overs — Top 5'},{key:'shots_under',label:'Best Shots Unders — Top 5'},
   {key:'points_over',label:'Best Points Overs — Top 5'},{key:'points_under',label:'Best Points Unders — Top 5'},
   {key:'pp_over',label:'Best PP Points Overs — Top 5'},{key:'pp_under',label:'Best PP Points Unders — Top 5'},
-  {key:'pm_over',label:'Plus/Minus Overs — Top 5 (priced only)'},{key:'pm_under',label:'Plus/Minus Unders — Top 5 (priced only)'},
+  {key:'pm_over',label:'Plus/Minus Overs — Top 10 (priced only)'},{key:'pm_under',label:'Plus/Minus Unders — Top 10 (priced only)'},
   {key:'assists_over',label:'Best Assists Overs — Top 5'},{key:'assists_under',label:'Best Assists Unders — Top 5'},
   {key:'goals_over',label:'Best Goals Overs — Top 5'},{key:'goals_under',label:'Best Goals Unders — Top 5'},
   {key:'saves_over',label:'Best Saves Overs — Top 5'},{key:'saves_under',label:'Best Saves Unders — Top 5'}
@@ -5779,7 +5921,7 @@ function _nhlCoachParlayCandidates(){
   };
   ['shots','points','pp','pm','assists','goals','saves'].forEach(function(market){
     ['OVER','UNDER'].forEach(function(side){
-      pools[market+'_'+side.toLowerCase()]=select(positive.filter(function(p){return p.marketKey===market&&p.side===side;}),byEdge,5);
+      pools[market+'_'+side.toLowerCase()]=select(positive.filter(function(p){return p.marketKey===market&&p.side===side;}),byEdge,market==='pm'?10:5);
     });
   });
   pools.alt_line_edge=(window.__NHL_ALT_COACH_ROWS__||[]).filter(function(p){
@@ -6413,7 +6555,7 @@ async function askFrankPlusMinusPreset(side){
   var category=document.getElementById('frankAiCategory');
   if(category)category.value='pm';
   _frankSetSide(side);
-  var question='Show the top 5 plus/minus '+side.toLowerCase()+' props';
+  var question='Show the top 10 plus/minus '+side.toLowerCase()+' props';
   var input=document.getElementById('frankAiInput');if(input)input.value=question;
   var system=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
   try{
@@ -6430,7 +6572,7 @@ function _frankPlusMinusModel(question,system,game,selectedSide){
       props.push({player:p.name,team:p.team,opponent:p.opponent,side:def[1],isOverflow:def[2],source:p});
     });
   });
-  var filters=_frankParse(question,props),limit=/top +[0-9]/i.test(question)?filters.limit:10;
+  var filters=_frankParse(question,props),limit=Math.min(10,/top +[0-9]/i.test(question)?filters.limit:10);
   var html='<div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary">Plus/Minus · '+_frankEsc(_frankSystemLabel(system))+' · original qualified model picks. Over 0.5 means +1 or better; Under 0.5 means zero or negative. No genuine quote is available, so sportsbook-implied probability, priced Coach Edge, profit and ROI are unavailable. Existing priced Coach presets keep their positive-edge rule.</div>';
   ['OVER','UNDER'].forEach(function(side){
     if(selectedSide&&selectedSide!==side)return;
@@ -6442,12 +6584,10 @@ function _frankPlusMinusModel(question,system,game,selectedSide){
       if(filters.teams.length&&filters.teams.indexOf(String(p.team||'').toLowerCase())<0&&filters.teams.indexOf(String(p.opponent||'').toLowerCase())<0)return false;
       return true;
     });
-    var main=rows.filter(function(p){return !p.isOverflow;}).slice(0,limit).map(function(p){return p.source;});
-    var overflow=/top +5/i.test(question)?[]:rows.filter(function(p){return p.isOverflow;}).map(function(p){return p.source;});
-    html+='<div class="sec">Plus/Minus '+side+' 0.5 · MODEL / UNPRICED</div>';
+    var main=rows.slice(0,limit).map(function(p){return p.source;});
+    html+='<div class="sec">Plus/Minus '+side+' 0.5 · Top '+limit+' · MODEL / UNPRICED</div>';
     if(main.length)html+=side==='UNDER'?nhlUnderGrid(main):nhlCardGrid(main);
     else html+='<div class="frank-ai-empty">No saved qualifying Plus/Minus '+side+' picks match this selection. A new category cannot be recreated from an older board. A normal pregame analysis captures it going forward.</div>';
-    html+=side==='UNDER'?nhlUnderRestBlock(overflow,'Plus/Minus Under','#f87171'):nhlRestBlock(overflow,'Plus/Minus Over','#38bdf8');
   });
   window.__FRANK_LAST_ROWS__=[];
   _frankCommit(html);
@@ -7008,6 +7148,105 @@ function _nhlUnderWhy(p){
   return _nhlEsc(basis)+': '+Number(p.underHits||0)+'/'+Number(p.underTotal||0)+' ('+Number(p.underRate||0)+'%) ≥ 60%'+_nhlEsc(ppNote+roleNote);
 }
 var _nhlLast5Cache={},_nhlLast5Waiting={},_nhlLast5Queue=[],_nhlLast5Active=0;
+var _nhlHcMarket='ALL',_nhlHcForm='HOT',_nhlHcEdge='ALL',_nhlHcRegistry={};
+function _hcFmt(n,d){var v=Number(n);return Number.isFinite(v)?v.toFixed(d):'';}
+function _hcResult(v,line,side){
+  v=Number(v);line=Number(line);
+  if(v===line)return 'Push';
+  return ((side==='OVER')===(v>line))?'Win':'Loss';
+}
+function _hcId(raw,r){
+  return [raw.targetDate||raw.date||'',String(raw.system||'A').toUpperCase(),r.pid!=null?r.pid:r.name,r.team||'',r.opponent||'',r.marketKey,r.side].join('|');
+}
+function _hcCmp(a,b){
+  return String(a.name||'').localeCompare(String(b.name||''))||(Number(a.pid)||0)-(Number(b.pid)||0)||String(a.marketKey).localeCompare(String(b.marketKey))||String(a.side).localeCompare(String(b.side));
+}
+function _hcRows(rows,key){
+  var out=rows.filter(function(r){
+    if(r.marketKey!==key)return false;
+    if(_nhlHcForm==='HOT')return r.form==='HOT'&&r.side==='OVER';
+    if(_nhlHcForm==='COLD')return r.form==='COLD'&&r.side==='UNDER';
+    return r.doubleCold===true;
+  });
+  if(_nhlHcEdge==='POS'){
+    out=out.filter(function(r){return r.edge!=null&&Number(r.edge)>0;});
+    out.sort(function(a,b){return Number(b.edge)-Number(a.edge)||_hcCmp(a,b);});
+  }else{
+    out.sort(function(a,b){return (b.recentHits-a.recentHits)||((b.matchupSupports?1:0)-(a.matchupSupports?1:0))||_hcCmp(a,b);});
+  }
+  return out;
+}
+function _hcCard(raw,r){
+  var id=_hcId(raw,r);_nhlHcRegistry[id]=r;
+  var head='https://assets.nhle.com/mugs/nhl/'+(window.__NHL_SEASON__||'20252026')+'/'+(r.team||'')+'/'+(r.pid||'')+'.png';
+  var logo='https://assets.nhle.com/logos/nhl/svg/'+(r.opponent||'')+'_light.svg';
+  var line=r.realLine!=null?r.side+' '+_nhlSafe(r.realLine):r.side+' Model line '+_nhlSafe(r.dispLine)+' (no book line)';
+  var odds=r.odds!=null?(Number(r.odds)>0?'+':'')+_nhlSafe(r.odds)+' at '+_nhlSafe(r.book||'Book unavailable'):'Odds unavailable';
+  var prob=r.appProbability!=null?_hcFmt(r.appProbability,1)+'%':'App estimate unavailable';
+  var edge=r.edge!=null?(Number(r.edge)>0?'+':'')+_hcFmt(r.edge,1)+' pts':'Edge unavailable';
+  var conf=String(r.lineupStatus||'').toLowerCase()==='confirmed';
+  var lineup=conf?'Confirmed':'Unconfirmed'+(r.lineupStatus?' ('+_nhlSafe(r.lineupStatus)+')':'');
+  var opp=r.opponentTotal?r.opponentHits+'/'+r.opponentTotal+' '+(r.side==='OVER'?'Over':'Under')+(r.opponentRate!=null?' ('+_hcFmt(r.opponentRate,0)+'%)':''):'No meetings';
+  var warn=r.opponentTotal<3?' <span class="hc-tag hc-warn">Small sample</span>':'';
+  var push=Number(r.recentPushes)?' · '+r.recentPushes+' push (not a win)':'';
+  return '<article class="hc-card"><div class="hc-top"><div class="hs-wrap"><span class="hs-ini">'+_nhlSafe(_initials(r.name))+'</span><img class="hs-img" src="'+_nhlSafe(head)+'" alt="" onerror="this.style.display=&quot;none&quot;"/></div><div><div class="hc-nm">'+_nhlSafe(r.name)+'</div><div class="hc-vs">'+_nhlSafe(r.team)+' '+(r.homeRoad==='H'?'vs':'at')+' <img src="'+_nhlSafe(logo)+'" alt="" onerror="this.style.display=&quot;none&quot;"/> '+_nhlSafe(r.opponent)+'</div></div></div>'
+    +'<div><span class="hc-tag '+(r.form==='HOT'?'hc-hot':'hc-cold')+'">'+(r.doubleCold?'DOUBLE COLD':r.form)+'</span>'+(r.matchupSupports?'<span class="hc-tag hc-sup">Matchup supports</span>':'')+'</div>'
+    +'<div class="hc-row"><span>Market</span><b>'+_nhlSafe(r.mkt)+' · '+line+'</b></div>'
+    +'<div class="hc-row"><span>Last 5 (any venue)</span><b>'+_nhlSafe(r.recentHits)+'/'+_nhlSafe(r.recentTotal)+' '+(r.side==='OVER'?'Over':'Under')+' · avg '+_nhlSafe(r.recentAverage)+push+'</b></div>'
+    +'<div class="hc-row"><span>Vs '+_nhlSafe(r.opponent)+'</span><b>'+_nhlSafe(opp)+warn+'</b></div>'
+    +'<div class="hc-row"><span>Lineup</span><b>'+(conf?lineup:'<span class="hc-tag hc-warn">'+lineup+'</span>')+'</b></div>'
+    +'<div class="hc-row"><span>'+r.side+' odds</span><b>'+odds+'</b></div>'
+    +'<div class="hc-row"><span>App estimate</span><b>'+prob+'</b></div>'
+    +'<div class="hc-row"><span>Edge</span><b>'+edge+'</b></div>'
+    +'<button type="button" class="hc-gl" data-hc="'+_nhlSafe(id)+'">Game Log</button></article>';
+}
+function nhlJumpToHotCold(){_nhlScrollTo('nhl-section-hotcold');}
+function _nhlHcSet(kind,val){
+  if(kind==='m')_nhlHcMarket=val;else if(kind==='f')_nhlHcForm=val;else _nhlHcEdge=val;
+  var q=document.getElementById('nhlSearch');_nhlPaint(q?q.value:'');
+}
+function nhlHotColdOpen(id){
+  var r=_nhlHcRegistry[id];
+  if(r)openNhlPlayerSummary(r);
+}
+function _nhlHcBind(){
+  document.querySelectorAll('#nhlBody .hc-gl').forEach(function(b){
+    b.onclick=function(){nhlHotColdOpen(b.getAttribute('data-hc'));};
+  });
+}
+function _nhlHotColdSection(raw,rows,q){
+  var h='<div id="nhl-section-hotcold" class="nhl-scroll-anchor"></div><section class="hc-sec" aria-labelledby="hcTitle"><div class="sec" id="hcTitle">Hot and Cold Players</div>';
+  h+='<p class="hc-note">Form uses the true last five chronological games at all venues, before this game. 4/5 is history, not an 80% prediction. Pushes are not wins. This differs from the venue-matched Last 5 box in Game Log. Display only: not tracked, not in Coach, locks, bets or parlays.</p>';
+  function grp(label,kind,cur,opts){
+    return '<div class="hc-grp" role="group" aria-label="'+label+'"><span>'+label+'</span>'+opts.map(function(o){
+      return '<button type="button" class="hc-btn" aria-pressed="'+(cur===o[0])+'" onclick="_nhlHcSet(&quot;'+kind+'&quot;,&quot;'+o[0]+'&quot;)">'+o[1]+'</button>';
+    }).join('')+'</div>';
+  }
+  h+='<div class="hc-ctl">'+grp('Market','m',_nhlHcMarket,[['ALL','All'],['shots','Shots'],['points','Points']])
+    +grp('Form','f',_nhlHcForm,[['HOT','Hot'],['COLD','Cold'],['DOUBLE','Double Cold']])
+    +grp('Edge','e',_nhlHcEdge,[['ALL','All qualifying players'],['POS','Positive Edge Only']])+'</div>';
+  if(raw.hotColdVersion!==1||!Array.isArray(raw.hotColdPlayers)){
+    return h+'<div class="hc-note">Saved board predates this section; new analysis needed.</div></section>';
+  }
+  var lists=[['shots','Shots on Goal'],['points','Points (1+)']].filter(function(m){return _nhlHcMarket==='ALL'||_nhlHcMarket===m[0];});
+  lists.forEach(function(m){
+    var list=_hcRows(rows,m[0]);
+    h+='<div class="hc-sub">'+m[1]+' ('+list.length+')</div>';
+    h+=list.length?'<div class="hc-grid">'+list.map(function(r){return _hcCard(raw,r);}).join('')+'</div>':'<div class="hc-note">No qualifying players.</div>';
+  });
+  return h+'</section>';
+}
+function _nhlHcHistory(p){
+  if(!p||!p.hotColdRecentGames)return '';
+  function tbl(title,games){
+    if(!games.length)return '<div style="color:#94a3b8;font-size:.68rem">'+title+': no games available.</div>';
+    return '<div style="font-size:.68rem;font-weight:800;color:#e5e7eb;margin-top:6px">'+title+'</div><table class="hc-tbl"><thead><tr><th>Date</th><th>Opp</th><th>H/R</th><th>'+_nhlSafe(p.mkt)+'</th><th>Vs '+_nhlSafe(p.side)+' '+_nhlSafe(p.dispLine)+'</th></tr></thead><tbody>'+games.map(function(g){
+      return '<tr><td>'+_nhlSafe(_nhlGameDateLabel(g.date))+'</td><td>'+_nhlSafe(g.opponent)+'</td><td>'+(g.homeRoad==='H'?'Home':g.homeRoad?'Away':'')+'</td><td>'+_nhlSafe(g.value)+'</td><td>'+_hcResult(g.value,p.dispLine,p.side)+'</td></tr>';
+    }).join('')+'</tbody></table>';
+  }
+  return '<div class="hc-note"><b>'+_nhlSafe(p.form)+' form · '+_nhlSafe(p.mkt)+'</b><br/>True last five games at all venues (separate from the venue-matched Last 5 box). History only, not a prediction. Pushes are not wins.'
+    +tbl('Last five, all venues',p.hotColdRecentGames||[])+tbl('Meetings vs '+_nhlSafe(p.opponent),p.hotColdOpponentGames||[])+'</div>';
+}
 function _nhlLast5Box(p){
   var data=p.last5VenueStats,venue=(data&&data.venue)||p.homeRoad||p.last5HomeRoad||'';
   var raw=window.__NHL_RAW__||{},dt=(data&&data.asOf)||p.last5Date||raw.targetDate||raw.date||window.__NHL_DATE__||'';
@@ -7312,6 +7551,7 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
     +'<div style="font-size:.68rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin-bottom:8px">Category history vs '+_nhlSafe(opponent)+'</div>'
     +'<div style="color:#94a3b8;font-size:.65rem;margin-bottom:8px">'+(freshRecords?'Full pregame game-log history':errorText?_nhlSafe(errorText):'Loading full game-log history…')+'</div>'
     +_nhlLast5Box(Object.assign({},p,{last5VenueStats:last5}))
+    +_nhlHcHistory(p)
     +'<div class="lad-market-grid">'+cards+'</div></div>';
   var ov=document.createElement('div');
   ov.className='lad-ov'; ov.id='nhlLadOv'; ov.onclick=closeNhlLadder;
@@ -7697,6 +7937,8 @@ function _nhlUpcomingBoard(raw){
   });
   if((raw.game_predictions||[]).length&&!d.game_predictions.length)
     d.savedGamePredictorNote='No verified upcoming Game Predictor games. Started games are hidden from live Picks; this does not mean the saved forecast is missing.';
+  if(Array.isArray(raw.hotColdPlayers))d.hotColdPlayers=raw.hotColdPlayers.filter(function(p){return _nhlRowUpcoming(p,raw);});
+  d.liveHotColdCount=Array.isArray(d.hotColdPlayers)?d.hotColdPlayers.length:0;
   d.liveUpcomingPickCount=visible;
   if(total&&!visible)d.data_note='No upcoming saved plays. Started/finished games are hidden here; their picks remain in Track Record and Overflow.'
     +(raw.savedPickRecovery&&!(raw.games||[]).length?' Saved start times are unavailable, so these selections cannot be verified as upcoming.':'');
@@ -7722,7 +7964,7 @@ function renderResults(d){
   if(_nhlLiveRefreshTimer)clearInterval(_nhlLiveRefreshTimer);
   if(!d.simulation&&!d.historical)_nhlLiveRefreshTimer=setInterval(function(){
     var live=_nhlUpcomingBoard(window.__NHL_RAW__||{});
-    var signature=String(live.liveUpcomingPickCount)+'|'+String((live.games||[]).length);
+    var signature=String(live.liveUpcomingPickCount)+'|'+String((live.games||[]).length)+'|'+String(live.liveHotColdCount||0);
     if(signature===window.__NHL_UPCOMING_SIGNATURE__)return;
     window.__NHL_UPCOMING_SIGNATURE__=signature;
     var q=document.getElementById('nhlSearch');
@@ -7735,7 +7977,7 @@ function renderResults(d){
     }
   },1000);
   var initial=_nhlUpcomingBoard(d);
-  window.__NHL_UPCOMING_SIGNATURE__=String(initial.liveUpcomingPickCount)+'|'+String((initial.games||[]).length);
+  window.__NHL_UPCOMING_SIGNATURE__=String(initial.liveUpcomingPickCount)+'|'+String((initial.games||[]).length)+'|'+String(initial.liveHotColdCount||0);
 }
 var _nhlPositionFilter='ALL';
 function _nhlPositionGroup(p){
@@ -7839,7 +8081,7 @@ function _nhlPaint(q){
   d.rest=_f(raw.rest); d.ptsRest=_f(raw.ptsRest); d.ppRest=_f(raw.ppRest).filter(_ppRoleEligible); d.astRest=_f(raw.astRest); d.goalRest=_f(raw.goalRest); d.savesRest=_f(raw.savesRest);
   d.shotUnders=_f(raw.shotUnders); d.ptsUnders=_f(raw.ptsUnders); d.ppUnders=_f(raw.ppUnders).filter(_ppRoleEligible); d.astUnders=_f(raw.astUnders); d.goalUnders=_f(raw.goalUnders); d.savesUnders=_f(raw.savesUnders);
   d.shotUndersRest=_f(raw.shotUndersRest); d.ptsUndersRest=_f(raw.ptsUndersRest); d.ppUndersRest=_f(raw.ppUndersRest).filter(_ppRoleEligible); d.astUndersRest=_f(raw.astUndersRest); d.goalUndersRest=_f(raw.goalUndersRest); d.savesUndersRest=_f(raw.savesUndersRest);
-  ['pmPicks','pmRest','pmUnders','pmUndersRest'].forEach(function(k){d[k]=_f(raw[k]);});
+  ['pmPicks','pmRest','pmUnders','pmUndersRest'].forEach(function(k){d[k]=_f((raw[k]||[]).slice(0,10));});
   var h = '';
 
   if(d.simulation && d.simulationStats) h += renderNhlSimulationStats(d.simulationStats);
@@ -7855,7 +8097,10 @@ function _nhlPaint(q){
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToAssists()" role="button" tabindex="0"><div class="val">' + ((d.astPicks||[]).length) + '</div><div class="lbl">Assists</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToGoals()" role="button" tabindex="0"><div class="val">' + ((d.goalPicks||[]).length) + '</div><div class="lbl">Goals</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToSaves()" role="button" tabindex="0"><div class="val">' + ((d.savesPicks||[]).length) + '</div><div class="lbl">Saves</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToHotCold()" onkeydown="if(event.key===&quot;Enter&quot;||event.key===&quot; &quot;){event.preventDefault();nhlJumpToHotCold();}" role="button" tabindex="0" aria-label="Jump to Hot and Cold Players"><div class="val">' + (Array.isArray(d.hotColdPlayers)?d.hotColdPlayers.length:'n/a') + '</div><div class="lbl">Hot/Cold</div></div>' +
     '</div>';
+  _nhlHcRegistry={};
+  h += _nhlHotColdSection(d,(d.hotColdPlayers||[]).filter(_nhlPositionMatches).filter(function(p){return !q||(p.name||'').toLowerCase().indexOf(q)>=0;}),q);
 
   // Games
   h += '<div id="nhl-section-games" class="sec">- Games -- ' + (d.targetDate || '') + (_preseason?' <span style="color:#fbbf24;font-size:.7em">PRESEASON</span>':'') + '</div><div class="games">';
@@ -7973,11 +8218,11 @@ function _nhlPaint(q){
     h+='<div class="sec">⬇ Power Play Points (1+) — UNDER · MODEL</div><div class="no-picks">No qualifying visible PP Under plays in this saved board.</div>';
   }
   // ASSISTS cards
-  h += '<div id="nhl-section-plus-minus" class="nhl-scroll-anchor"></div><div class="sec">Plus/Minus — OVER 0.5 · MODEL / UNPRICED</div>';
+  h += '<div id="nhl-section-plus-minus" class="nhl-scroll-anchor"></div><div class="sec">Plus/Minus — OVER 0.5 · Top 10 · MODEL / UNPRICED</div>';
   h += '<div style="color:#94a3b8;font-size:.74rem;margin-bottom:12px">Over: +1 or better. Under: zero or negative. Picks use opponent history at the applicable home/away venue and last-10 home/away form. Missing prices never hide qualifying picks.</div>';
   h += (d.pmPicks||[]).length?nhlCardGrid(d.pmPicks):'<div class="no-picks">No qualifying Plus/Minus Over picks in this board.</div>';
   h += nhlRestBlock(d.pmRest,'plus/minus','#38bdf8');
-  h += '<div class="sec">Plus/Minus — UNDER 0.5 · MODEL / UNPRICED</div>';
+  h += '<div class="sec">Plus/Minus — UNDER 0.5 · Top 10 · MODEL / UNPRICED</div>';
   h += (d.pmUnders||[]).length?nhlUnderGrid(d.pmUnders):'<div class="no-picks">No qualifying Plus/Minus Under picks in this board.</div>';
   h += nhlUnderRestBlock(d.pmUndersRest,'plus/minus under','#f87171');
   h += '<div id="nhl-section-assists" class="nhl-scroll-anchor"></div>';
@@ -8080,6 +8325,7 @@ function _nhlPaint(q){
   }
 
   document.getElementById('nhlBody').innerHTML = h;
+  _nhlHcBind();
   document.querySelectorAll('#nhlBody .nhl-game-jump').forEach(function(card){
     card.onclick=function(){nhlScrollToGameId(card.getAttribute('data-game-id'));};
   });
@@ -9696,7 +9942,7 @@ _NHL_COACH_MARKETS = (
 _NHL_COACH_PRESET_LABELS = [
     "Coach Edge Top 10", "Safest Bets Top 10", "Best Alt-Line Edge Top 10",
     "Top 3", "Best Overs", "Best Unders",
-    *[f"{market} {side} · Top 5" for market in _NHL_COACH_MARKETS
+    *[f"{market} {side} · Top {10 if market == 'Plus/Minus' else 5}" for market in _NHL_COACH_MARKETS
       for side in ("OVER", "UNDER")],
 ]
 _NHL_COACH_STAT_KEYS = {
@@ -10008,15 +10254,16 @@ def _nhl_coach_board_groups(board: dict) -> dict:
     }
     for market in _NHL_COACH_MARKETS:
         for side in ("OVER", "UNDER"):
+            limit = 10 if market == "Plus/Minus" else 5
             rows = [p for p in candidates if p["category"] == market and p["side"] == side]
             if market == "Plus/Minus" and not rows:
                 rows = [p for p in pm_models if p["side"] == side]
-                groups[f"{market} {side} · Top 5"] = rows[:5]
+                groups[f"{market} {side} · Top {limit}"] = rows[:limit]
             else:
-                groups[f"{market} {side} · Top 5"] = select(rows, 5)
+                groups[f"{market} {side} · Top {limit}"] = select(rows, limit)
     for side in ("OVER", "UNDER"):
         groups[f"Plus/Minus {side} · Model-only"] = [
-            p for p in pm_models if p["side"] == side][:20]
+            p for p in pm_models if p["side"] == side][:10]
     return groups
 
 
@@ -10043,8 +10290,7 @@ def _nhl_store_coach_groups(date_str: str, system: str, groups: dict,
             if label not in updated:
                 updated[label] = []
                 changed = True
-        union_labels = {"All Coach Edge Plays · uncapped",
-                        "Plus/Minus OVER · Model-only", "Plus/Minus UNDER · Model-only"}
+        union_labels = {"All Coach Edge Plays · uncapped"}
         for label, rows in groups.items():
             eligible = [p for p in rows if _nhl_gp_is_pre_game(
                 {"startTime": p.get("game_start")})]
@@ -11296,7 +11542,7 @@ async def nhl_coach_track(
         for side in ("OVER", "UNDER"):
             add(f"Plus/Minus {side} · Model-only",
                 [x for x in pm_models if x.get("side") == side],
-                limit=20,
+                limit=10,
                 sort_key=lambda x: (
                     not bool(x.get("is_overflow")),
                     -int(x.get("rank") or 999),
