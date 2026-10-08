@@ -9760,9 +9760,12 @@ function _nhlSetCoachTrackSystem(system){
 }
 async function loadNhlCoachTrack(){
  var body=document.getElementById('nhlCoachTrackBody'),source=document.getElementById('nhlCoachTrkSource').value,date=document.getElementById('nhlCoachTrkDate').value;
- if(body)body.innerHTML='<p style="color:#94a3b8">Loading Coach results…</p>';
- try{var r=await fetch('/api/nhl/coach-track?source='+encodeURIComponent(source)+'&date_str='+encodeURIComponent(date)+'&period='+encodeURIComponent(_nhlPeriodValue('nhlCoachTrkPeriod'))+'&system='+encodeURIComponent(_nhlCoachTrackSystem));var d=await r.json();if(!r.ok)throw new Error(d.detail||'Coach record unavailable');_nhlCoachTrackData=d;renderNhlCoachTrack();}
- catch(e){if(body)body.innerHTML='<p style="color:#f87171">'+(e.message||'Coach record unavailable')+'</p>';}
+ var requestId=window.__nhlCoachTrackRequest=(window.__nhlCoachTrackRequest||0)+1;
+ _nhlCoachTrackData=null;
+ var summary=document.getElementById('nhlCoachTrackSummary');if(summary)summary.innerHTML='';
+ if(body)body.innerHTML='<p style="color:#94a3b8">'+(source==='official'?'Grading saved Coach picks and loading results…':'Loading Coach results…')+'</p>';
+ try{var r=await fetch('/api/nhl/coach-track?source='+encodeURIComponent(source)+'&date_str='+encodeURIComponent(date)+'&period='+encodeURIComponent(_nhlPeriodValue('nhlCoachTrkPeriod'))+'&system='+encodeURIComponent(_nhlCoachTrackSystem)+'&grade='+(source==='official'?'true':'false'));var d=await r.json();if(requestId!==window.__nhlCoachTrackRequest)return;if(!r.ok)throw new Error(d.detail||'Coach record unavailable');_nhlCoachTrackData=d;renderNhlCoachTrack();}
+ catch(e){if(body&&requestId===window.__nhlCoachTrackRequest)body.innerHTML='<p style="color:#f87171">'+_nhlEsc(e.message||'Coach record unavailable')+'</p>';}
 }
 function renderNhlCoachTrack(){
  var body=document.getElementById('nhlCoachTrackBody'),sum=document.getElementById('nhlCoachTrackSummary');if(!body||!_nhlCoachTrackData)return;
@@ -9779,7 +9782,10 @@ function renderNhlCoachTrack(){
   html+='<details style="border:1px solid #26334a;border-radius:10px;margin:8px 0;background:#0f172a"><summary style="cursor:pointer;padding:13px;color:#fff"><b>'+_nhlEsc(k)+'</b><span style="float:right;color:#94a3b8">'+w+'W · '+l+'L'+(p?' · '+p+'P':'')+(v?' · '+v+'V':'')+(pend?' · '+pend+' pending':'')+' · '+(rate==null?'—':rate.toFixed(1)+'%')+' · <b style="color:'+(net>=0?'#4ade80':'#f87171')+'">'+_nhlMoney(net)+'</b> · '+(roi==null?'—':roi.toFixed(1)+'% ROI')+'</span></summary><div style="overflow-x:auto"><table class="trk-tbl"><thead><tr><th>Date</th><th>Player</th><th>Market</th><th>Odds/Book</th><th>Actual</th><th>Result/P&L</th><th>Probabilities</th></tr></thead><tbody>'+trs+'</tbody></table></div></details>';
  });
  var troi=tpriced?100*tnet/(tpriced*stake):null;if(sum)sum.innerHTML='<div class="trk-summary"><b>'+tw+'W · '+tl+'L'+(tp?' · '+tp+'P':'')+(tv?' · '+tv+' VOID':'')+'</b> · Net <b style="color:'+(tnet>=0?'#4ade80':'#f87171')+'">'+_nhlMoney(tnet)+'</b> · '+(troi==null?'—':troi.toFixed(1)+'% ROI')+'</div>';
- body.innerHTML=html||'<p style="color:#94a3b8">No saved Coach or historical W/L rows for System '+_nhlEsc(_nhlCoachTrackSystem)+' on this date. Historical dates require a saved A/B/C/D Historical Analysis replay.</p>';
+ var notices=(_nhlCoachTrackData.gradingWarnings||[]).map(function(w){return '<p style="color:#fbbf24">'+_nhlEsc(w)+'</p>';}).join('');
+ var pendingTotal=all.filter(function(x){return ['WIN','LOSS','PUSH','VOID'].indexOf(String(x.result||'PENDING').toUpperCase())<0;}).length;
+ if(pendingTotal&&_nhlCoachTrackData.source==='official')notices+='<p style="color:#94a3b8">'+pendingTotal+' saved category entries remain pending. Their games are unfinished or a verified final player stat is not available yet. Completed plays are shown below; Get Results retries pending entries.</p>';
+ body.innerHTML=notices+(html||'<p style="color:#94a3b8">No saved Coach or historical W/L rows for System '+_nhlEsc(_nhlCoachTrackSystem)+' on this date. Historical dates require a saved A/B/C/D Historical Analysis replay.</p>');
 }
 </script>
 <!-- Standalone NHL Game Predictor Record -->
@@ -10693,57 +10699,188 @@ async def _nhl_capture_daily_coach(date_str: str, board: dict, system: str):
         logger.exception("NHL automatic Coach capture failed for %s %s", system, date_str)
 
 
-def _nhl_update_coach_presets_ledger(include_date: str = ""):
-    """Settle frozen preset membership automatically, independent of Coach UI."""
-    today = _nhl_record_today()
-    for system in ("A", "B", "C", "D"):
+_NHL_COACH_SETTLE_LOCK = _bt_th.Lock()
+
+
+def _nhl_coach_date_results(date_str: str, rows: list, cache: dict) -> dict:
+    """Grade frozen Coach lines from final games, without a whole-slate gate."""
+    from concurrent.futures import ThreadPoolExecutor
+    context = cache.setdefault(date_str, {"boxes": {}, "logs": {}, "warnings": []})
+    if "games" not in context:
+        games, _ = _nhl_gp_schedule_scores(date_str)
+        if not games:
+            raise RuntimeError(f"NHL final-game schedule unavailable for {date_str}")
+        context["games"] = games
+    by_team = {}
+    for game in context["games"].values():
+        for team in (game.get("homeTeam"), game.get("awayTeam")):
+            if team:
+                by_team[team] = game
+    needed = {
+        str(game["gameId"]): game
+        for p in rows for game in [by_team.get(p.get("team"))]
+        if game and game.get("gameState") in ("OFF", "FINAL")
+        and str(game["gameId"]) not in context["boxes"]
+    }
+    def fetch_box(item):
+        gid, game = item
         try:
-            snapshots = _nhl_coach_storage_rows(_NHL_COACH_PRESET_SNAP_CATS[system])
-            graded_rows = _nhl_coach_storage_rows(_NHL_COACH_PRESET_DETAIL_CATS[system])
-            existing = {r.get("date"): r.get("detail") or {} for r in graded_rows}
-            for saved in snapshots:
-                ds, payload = saved.get("date"), saved.get("detail") or {}
-                if not ds or ds > today or not isinstance(payload, dict):
-                    continue
-                old = existing.get(ds) or {}
-                if old.get("all_final") and old.get("revision") == payload.get("revision"):
-                    continue
-                rows = [p for values in (payload.get("presets") or {}).values()
-                        for p in values]
-                unique = {_nhl_coach_identity(p): p for p in rows}
-                if not unique:
-                    continue
-                graded = _nhl_grade_date(ds, list(unique.values()))
-                if not graded.get("all_final"):
-                    continue
-                results = {_nhl_coach_identity(p): p for p in
-                           graded.get("main", []) + graded.get("overflow", [])}
-                mature = (date.fromisoformat(today) - date.fromisoformat(ds)).days >= 2
-                detail, unresolved = [], False
-                for original in rows:
-                    result = results.get(_nhl_coach_identity(original)) or {}
-                    outcome = result.get("result")
-                    if outcome not in ("WIN", "LOSS", "PUSH"):
-                        if not mature:
-                            unresolved = True
-                            break
-                        outcome = "VOID"
-                    detail.append({**original, "result": outcome,
-                                   "actual": result.get("actual"),
-                                   "profit": (result.get("profit") if original.get("odds")
-                                              is not None else None)})
-                if unresolved:
-                    continue
-                if not _nhl_sb_upsert("mpa_track_ledger", [{
-                    "app": _NHL_TRK_APP, "date": ds,
-                    "category": _NHL_COACH_PRESET_DETAIL_CATS[system], "side": "ALL",
-                    "wins": 0, "losses": 0, "locked": True,
-                    "detail": {"revision": payload.get("revision"),
-                               "all_final": True, "rows": detail},
-                }], "app,date,category,side"):
-                    raise RuntimeError(f"Coach settlement could not be saved for {ds}")
-        except Exception:
-            logger.exception("NHL automatic Coach settlement failed for %s", system)
+            response = httpx.get(f"{NHL_API}/gamecenter/{gid}/boxscore",
+                                 follow_redirects=True, timeout=20)
+            response.raise_for_status()
+            box = response.json()
+            if str(box.get("id")) != gid:
+                raise ValueError("box score game ID does not match the saved date")
+            if box.get("gameState") not in ("OFF", "FINAL"):
+                raise ValueError("final box score not published")
+            players = {}
+            for side, team_key in (("homeTeam", "homeTeam"), ("awayTeam", "awayTeam")):
+                group = (box.get("playerByGameStats") or {}).get(side) or {}
+                if not group.get("forwards") or not group.get("goalies"):
+                    raise ValueError("incomplete final player box score")
+                for kind in ("forwards", "defense", "goalies"):
+                    for player in group.get(kind) or []:
+                        if player.get("playerId") is not None:
+                            players[(game[team_key], str(player["playerId"]))] = player
+            return gid, players, None
+        except Exception as exc:
+            return gid, None, f"{date_str} game {gid}: {exc}"
+    if needed:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for gid, players, warning in pool.map(fetch_box, needed.items()):
+                context["boxes"][gid] = players
+                if warning:
+                    context["warnings"].append(warning)
+    # Box scores publish the main markets immediately. PP points may require
+    # the dated player log; fetch only these missing fields, once per player.
+    need_logs = set()
+    for p in rows:
+        game = by_team.get(p.get("team"))
+        if not game or game.get("gameState") not in ("OFF", "FINAL"):
+            continue
+        players = context["boxes"].get(str(game["gameId"]))
+        player = (players or {}).get((p.get("team"), str(p.get("pid"))))
+        if player is not None and _nhl_grade_pick_stat(player, p.get("stat_key")) is None:
+            if p.get("pid") and str(p["pid"]) not in context["logs"]:
+                need_logs.add(str(p["pid"]))
+    def fetch_log(pid):
+        try:
+            logs, ok = _nhl_player_games_raw(pid, get_season_for_date(date.fromisoformat(date_str)))
+            return pid, logs.get(date_str), None if ok else f"{date_str}: player {pid} log unavailable"
+        except Exception as exc:
+            return pid, None, f"{date_str}: player {pid}: {exc}"
+    if need_logs:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for pid, log, warning in pool.map(fetch_log, sorted(need_logs)):
+                context["logs"][pid] = log
+                if warning:
+                    context["warnings"].append(warning)
+    mature = (date.fromisoformat(_nhl_record_today()) - date.fromisoformat(date_str)).days >= 2
+    results = {}
+    for p in rows:
+        result = {"result": "PENDING", "actual": None, "profit": None}
+        game = by_team.get(p.get("team"))
+        if game and game.get("gameState") in ("OFF", "FINAL") and p.get("pid"):
+            players = context["boxes"].get(str(game["gameId"]))
+            player = (players or {}).get((p.get("team"), str(p["pid"])))
+            did_not_play = (players is not None and (
+                player is None or str(player.get("toi", "")).strip() in ("0:00", "00:00")))
+            if did_not_play:
+                if mature:
+                    result.update(result="VOID", profit=0.0 if p.get("odds") is not None else None)
+            elif player is not None:
+                actual = _nhl_grade_pick_stat(player, p.get("stat_key"))
+                if actual is None:
+                    actual = _nhl_grade_pick_stat(context["logs"].get(str(p["pid"])) or {},
+                                                  p.get("stat_key"))
+                try:
+                    line = float(p["line"])
+                    side = str(p.get("side") or "OVER").upper()
+                    if actual is not None and math.isfinite(actual) and math.isfinite(line) and side in ("OVER", "UNDER"):
+                        outcome = ("PUSH" if actual == line else
+                                   "WIN" if ((actual > line) == (side == "OVER")) else "LOSS")
+                        profit = (round(_nhl_american_profit(p["odds"], _NHL_TRK_STAKE, outcome), 2)
+                                  if p.get("odds") not in (None, "", "0", 0) else None)
+                        result.update(result=outcome, actual=actual, profit=profit)
+                except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                    pass
+        results[_nhl_coach_identity(p)] = result
+    return results
+
+
+def _nhl_update_coach_presets_ledger(include_date: str = "", system: str = "",
+                                    start: str = "", end: str = "",
+                                    strict: bool = False):
+    """Save partial standard/alternate results; retry pending rows on every pass."""
+    today, cache, warnings = _nhl_record_today(), {}, []
+    filters = {"start": start, "end": end} if start and end else {}
+    terminal = {"WIN", "LOSS", "PUSH", "VOID"}
+    with _NHL_COACH_SETTLE_LOCK:
+        for current_system in ((system,) if system else ("A", "B", "C", "D")):
+            try:
+                for alternate in (False, True):
+                    snap_cat = (_NHL_COACH_ALT_SNAP_CATS if alternate else
+                                _NHL_COACH_PRESET_SNAP_CATS)[current_system]
+                    detail_cat = (_NHL_COACH_ALT_DETAIL_CATS if alternate else
+                                  _NHL_COACH_PRESET_DETAIL_CATS)[current_system]
+                    snapshots = _nhl_coach_storage_rows(snap_cat, **filters)
+                    settled = {r.get("date"): r.get("detail") for r in
+                               _nhl_coach_storage_rows(detail_cat, **filters)}
+                    for saved in snapshots:
+                        ds, payload = saved.get("date"), saved.get("detail")
+                        if not ds or ds > today:
+                            continue
+                        if alternate:
+                            rows = payload if isinstance(payload, list) else []
+                            old_rows = settled.get(ds) or []
+                            if not isinstance(old_rows, list):
+                                old_rows = []
+                        else:
+                            if not isinstance(payload, dict):
+                                continue
+                            rows = [p for values in (payload.get("presets") or {}).values() for p in values]
+                            previous = settled.get(ds) or {}
+                            old_rows = (previous.get("rows") or []) if isinstance(previous, dict) else []
+                            if (isinstance(previous, dict) and previous.get("all_final")
+                                    and previous.get("revision") == payload.get("revision")
+                                    and ds != include_date):
+                                continue
+                        if not rows:
+                            continue
+                        unique = {_nhl_coach_identity(p): p for p in rows}
+                        old = {_nhl_coach_identity(p): p for p in old_rows}
+                        if (alternate and set(unique) == set(old)
+                                and all(p.get("result") in terminal for p in old_rows)
+                                and ds != include_date):
+                            continue
+                        results = _nhl_coach_date_results(ds, list(unique.values()), cache)
+                        detail = []
+                        for original in rows:
+                            key = _nhl_coach_identity(original)
+                            result = results[key]
+                            # A transient API failure must not erase a saved result.
+                            if result["result"] == "PENDING" and old.get(key, {}).get("result") in terminal:
+                                result = {k: old[key].get(k) for k in ("result", "actual", "profit")}
+                            detail.append({**original, **result})
+                        all_final = all(p.get("result") in terminal for p in detail)
+                        stored = detail if alternate else {
+                            "revision": payload.get("revision"), "all_final": all_final,
+                            "rows": detail,
+                        }
+                        if not _nhl_sb_upsert("mpa_track_ledger", [{
+                            "app": _NHL_TRK_APP, "date": ds, "category": detail_cat,
+                            "side": "ALL", "wins": 0, "losses": 0,
+                            "locked": all_final, "detail": stored,
+                        }], "app,date,category,side"):
+                            raise RuntimeError(f"Coach settlement could not be saved for {ds}")
+            except Exception as exc:
+                logger.exception("NHL Coach settlement failed for %s", current_system)
+                if strict:
+                    raise
+                warnings.append(str(exc))
+    for context in cache.values():
+        warnings.extend(context.get("warnings") or [])
+    return list(dict.fromkeys(warnings))
 
 def _nhl_save_gp_snapshot(date_str: str, result: dict):
     """Freeze the day's game-predictor calls in the shared ledger.
@@ -11218,6 +11355,9 @@ _NHL_TRK_LOCK = _bt_th.Lock()
 def _nhl_update_track_ledger(include_date: str = ""):
     from datetime import date as _d
     today = _nhl_record_today()
+    # Coach has its own partial settlement; do not queue it behind full-slate
+    # A/B/C/D player-log catch-up or overwrite it with the old alternate gate.
+    _nhl_update_coach_presets_ledger(include_date)
     with _NHL_TRK_LOCK:
         upserts = []
         for system in ("A", "B", "C", "D"):
@@ -11284,83 +11424,10 @@ def _nhl_update_track_ledger(include_date: str = ""):
                      "category": detail_category, "side": "ALL",
                      "wins": 0, "losses": 0, "locked": True, "detail": det},
                 ]
-        # Alternate Coach recommendations are separate from the standard-line
-        # boards; grade each system's pregame captures without a Top 10 cutoff.
-        for system in ("A", "B", "C", "D"):
-            snap_category = _NHL_COACH_ALT_SNAP_CATS[system]
-            detail_category = _NHL_COACH_ALT_DETAIL_CATS[system]
-            existing_rows = _nhl_sb_get("mpa_track_ledger", {
-                "app": f"eq.{_NHL_TRK_APP}",
-                "category": f"eq.{detail_category}",
-                "select": "date,detail", "limit": "365"}) or []
-            already = {row["date"]: row.get("detail") or []
-                       for row in existing_rows if row.get("date")}
-            for d in _nhl_list_snap_dates(snap_category):
-                if d > today:
-                    continue
-                if d in already:
-                    try:
-                        if ((_d.fromisoformat(today) - _d.fromisoformat(d)).days > 7
-                                and d != include_date):
-                            continue
-                    except ValueError:
-                        continue
-                    if already[d] and all(
-                            r.get("result") in ("WIN", "LOSS", "PUSH", "VOID")
-                            for r in already[d]):
-                        continue
-                snap = _nhl_load_picks_snapshot(d, snap_category)
-                if not snap:
-                    continue
-                try:
-                    graded = _nhl_grade_date(d, snap)
-                except Exception as exc:
-                    print(f"[nhl_coach_alt:{system}] grade failed {d}: {exc}")
-                    continue
-                if not graded.get("any_game"):
-                    continue
-                # Missing box scores are not a completed Coach record; retry
-                # on later daily runs rather than permanently locking gaps.
-                if not graded.get("all_final"):
-                    continue
-                unresolved = any(
-                    r.get("result") not in ("WIN", "LOSS", "PUSH")
-                    for r in graded.get("main", []))
-                try:
-                    old_enough = (
-                        _d.fromisoformat(today) - _d.fromisoformat(d)).days >= 2
-                except ValueError:
-                    old_enough = False
-                if unresolved and not old_enough:
-                    continue  # let freshly finished player logs catch up
-                lookup = {
-                    (p.get("name"), p.get("stat_key"), p.get("side"),
-                     str(p.get("line")), str(p.get("odds"))): p
-                    for p in snap
-                }
-                detail = []
-                for row in graded.get("main", []):
-                    if row.get("result") not in ("WIN", "LOSS", "PUSH"):
-                        row = {**row, "result": "VOID", "profit": 0.0}
-                    key = (row.get("name"), row.get("stat_key"),
-                           row.get("side"), str(row.get("line")),
-                           str(row.get("odds")))
-                    original = lookup.get(key) or {}
-                    detail.append({**row, "book": original.get("book", ""),
-                                   "app_probability": original.get("app_probability"),
-                                   "implied_probability": original.get("implied_probability"),
-                                   "coach_edge": original.get("coach_edge"),
-                                   "preset": "Alternate-Line Coach"})
-                upserts.append({
-                    "app": _NHL_TRK_APP, "date": d,
-                    "category": detail_category, "side": "ALL",
-                    "wins": 0, "losses": 0, "locked": True, "detail": detail,
-                })
         if upserts:
             for i in range(0, len(upserts), 10):
                 _nhl_sb_upsert("mpa_track_ledger", upserts[i:i+10], "app,date,category,side")
             print(f"[nhl_track] wrote {len(upserts)} record rows")
-        _nhl_update_coach_presets_ledger(include_date)
     # GP uses its own row and read-only summary; grade it independently from
     # player-pick stake accounting.
     try:
@@ -11716,8 +11783,8 @@ async def nhl_track_record(
 @app.get("/api/nhl/coach-track")
 async def nhl_coach_track(
         date_str: str = "", source: str = "official", system: str = "A",
-        period: str = ""):
-    """Detailed, read-only Edge Coach record isolated from other NHL records."""
+        period: str = "", grade: bool = False):
+    """Coach-only records; explicit grading settles saved picks before reading."""
     historical = str(source).lower() == "historical"
     record_system = str(system or "A").strip().upper()
     if record_system not in ("A", "B", "C", "D"):
@@ -11737,6 +11804,23 @@ async def nhl_coach_track(
         end = ((start.replace(year=start.year + 1, month=1)
                 if start.month == 12 else start.replace(month=start.month + 1))
                - timedelta(days=1))
+    grading_warnings = []
+    if grade and not historical:
+        def settle_selected_coach():
+            return _nhl_update_coach_presets_ledger(
+                include_date=anchor.isoformat() if requested_period == "day" else "",
+                system=record_system,
+                start="" if requested_period == "all" else start.isoformat(),
+                end="" if requested_period == "all" else end.isoformat(),
+                strict=True)
+        try:
+            grading_warnings = await asyncio.get_running_loop().run_in_executor(
+                None, settle_selected_coach)
+        except Exception:
+            logger.exception("NHL requested Coach grading failed")
+            raise HTTPException(status_code=503, detail=(
+                "Coach grading could not complete or save its results. "
+                "Saved picks were not erased. Retry Get Results."))
     def selected_date(value):
         return bool(value) and (
             requested_period == "all"
@@ -11885,12 +11969,16 @@ async def nhl_coach_track(
     if not historical:
         snap_cat = _NHL_COACH_ALT_SNAP_CATS[record_system]
         detail_cat = _NHL_COACH_ALT_DETAIL_CATS[record_system]
-        snapshots = _nhl_sb_get_all("mpa_track_ledger", {
-            "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{snap_cat}",
-            "side": "eq.ALL", "select": "date,detail"})
-        graded_rows = _nhl_sb_get_all("mpa_track_ledger", {
-            "app": f"eq.{_NHL_TRK_APP}", "category": f"eq.{detail_cat}",
-            "side": "eq.ALL", "select": "date,detail"})
+        filters = {} if requested_period == "all" else {
+            "start": start.isoformat(), "end": end.isoformat()}
+        try:
+            snapshots = _nhl_coach_storage_rows(snap_cat, **filters)
+            graded_rows = _nhl_coach_storage_rows(detail_cat, **filters)
+        except Exception:
+            logger.exception("NHL alternate Coach records could not be read")
+            raise HTTPException(status_code=503, detail=(
+                "Saved alternate Coach results could not be read. "
+                "Retry Get Results; records were not erased."))
         graded_by_date = {r.get("date"): r.get("detail") or [] for r in graded_rows}
         days_by_date = {d.get("date"): d for d in days}
         for snap in snapshots:
@@ -11939,9 +12027,17 @@ async def nhl_coach_track(
             if graded.get("revision") == manifest.get("revision"):
                 rows = graded.get("rows") or []
             else:
-                rows = [{**p, "result": "PENDING", "actual": None, "profit": None}
-                        for values in (manifest.get("presets") or {}).values()
-                        for p in values]
+                # A later pregame capture may increment the manifest revision.
+                # Reuse outcomes only for the identical frozen line/side/price;
+                # newly captured entries remain pending, not the entire day.
+                prior_results = {_nhl_coach_identity(p): p for p in graded.get("rows") or []
+                                 if p.get("result") in ("WIN", "LOSS", "PUSH", "VOID")}
+                rows = []
+                for values in (manifest.get("presets") or {}).values():
+                    for p in values:
+                        prior = prior_results.get(_nhl_coach_identity(p)) or {}
+                        rows.append({**p, "result": prior.get("result", "PENDING"),
+                                     "actual": prior.get("actual"), "profit": prior.get("profit")})
             # Keep existing alternate audit rows. Frozen standard preset
             # membership replaces only this date's reconstructed Coach lists.
             audit = [p for p in (by_date.get(ds) or {}).get("detail", [])
@@ -11951,6 +12047,7 @@ async def nhl_coach_track(
         days = sorted(by_date.values(), key=lambda d: d.get("date") or "", reverse=True)
     return JSONResponse({"source": "historical" if historical else "official",
                          "system": record_system, "dates": days, "stake": 100.0,
+                         "gradingWarnings": grading_warnings,
                          "automaticPresetCapture": any(
                              day.get("automaticPresetCapture") for day in days),
                          "presetLabels": _NHL_COACH_PRESET_LABELS if not historical else []})
