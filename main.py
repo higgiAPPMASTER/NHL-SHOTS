@@ -1155,10 +1155,19 @@ def _nhl_last5_display_stats(game: dict) -> dict:
             "plusMinus": number("plusMinus"), "shots": number("shots")}
 
 
+def _nhl_current_season_logs(logs: List[Dict], target_date: str) -> List[Dict]:
+    """Never backfill current-season Last 5 samples with an older NHL season."""
+    season = get_season_for_date(date.fromisoformat(target_date))
+    season_start = f"{season[:4]}-07-01"
+    season_end = f"{season[4:]}-07-01"
+    return [g for g in _nhl_pre_game_logs(logs, target_date)
+            if season_start <= str(g.get("date") or "")[:10] < season_end]
+
+
 def _nhl_last5_venue_stats(logs: List[Dict], target_date: str, home_road: str) -> dict:
-    """Independent display sample: last five same-venue games, any opponent."""
+    """Current-season display sample: last five same-venue games, any opponent."""
     selected = sorted(
-        (g for g in _nhl_pre_game_logs(logs, target_date)
+        (g for g in _nhl_current_season_logs(logs, target_date)
          if g.get("date") and g.get("homeRoad") == home_road),
         key=lambda g: g["date"], reverse=True)
     rows, seen = [], set()
@@ -2703,7 +2712,7 @@ def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
     output = []
     for player in pool:
         history = games_before(logs_map.get(player["pid"], []))
-        recent_games = history[:5]  # True last five, not five older valid rows.
+        recent_games = _nhl_current_season_logs(history, target_date)[:5]
         opponent_games = [g for g in history
                           if g.get("opponent") == player.get("opponent")][:5]
         point_quote = next(
@@ -2836,6 +2845,11 @@ def _nhl_form_pick_groups(board: dict) -> dict:
                            p.get("dispScore") or p.get("ptsScore") or p.get("score"))
             models[(str(p.get("pid")), stat, side, line)] = probability
     for row in board["hotColdPlayers"]:
+        if not row.get("savedSnapshot"):
+            report_date = board.get("targetDate") or board.get("date") or ""
+            if (not report_date or len(_nhl_current_season_logs(
+                    row.get("hotColdRecentGames") or [], report_date)) != 5):
+                continue
         for key, label, market, stat, side, coach_key in _NHL_FORM_SPECS:
             if row.get("marketKey") != market or row.get("side") != side:
                 continue
@@ -3943,11 +3957,13 @@ def _nhl_log_cache_set(pid: int, season: str, game_type: int, data: dict):
 
 async def _nhl_cached_log_payloads(
         pid: int, sem: asyncio.Semaphore,
-        additional_season: str = "") -> Dict[Tuple[str, int], Dict]:
+        additional_season: str = "", only_season: bool = False) -> Dict[Tuple[str, int], Dict]:
     """Load configured player log endpoints, reusing raw responses safely."""
     payloads: Dict[Tuple[str, int], Dict] = {}
     missing: List[Tuple[str, int]] = []
-    for season in list(dict.fromkeys([*SEASONS, additional_season] if additional_season else SEASONS)):
+    seasons = ([additional_season] if only_season and additional_season else
+               list(dict.fromkeys([*SEASONS, additional_season] if additional_season else SEASONS)))
+    for season in seasons:
         for game_type in (2, 3):
             key = (season, game_type)
             cached = _nhl_log_cache_get(pid, season, game_type)
@@ -5450,6 +5466,7 @@ body.is-admin #parlayCard{display:block}
     <button type="button" class="nhl-nav-btn gp" onclick="openNhlGPRecord()">🔮 GP Record</button>
     <button type="button" class="nhl-nav-btn track" onclick="openNhlTrackRecord()">📊 Track Record</button>
     <button type="button" class="nhl-nav-btn overflow" onclick="openNhlOverflowRecord()">⭐ NHL Overflow</button>
+    <button type="button" class="nhl-nav-btn trk" onclick="openNhlDayReport()">By Day / Category</button>
     <button type="button" class="nhl-nav-btn history" onclick="toggleNhlHistoricalAnalysis()">📚 Historical Analysis</button>
     <button type="button" class="nhl-nav-btn bets" onclick="openNhlMyBets()">💰 My Bets</button>
   </div>
@@ -6368,6 +6385,7 @@ function _nhlFormGroups(raw){
   _NHL_FORM_TYPES.forEach(function(form){
     var seen={};
     var rows=(groups[form.key]||[]).filter(function(p){
+      if(!p.savedSnapshot&&_nhlCurrentSeasonGames(p.hotColdRecentGames,raw.targetDate||raw.date||'').length!==5)return false;
       var id=String(p.pid)+'|'+String(p.team)+'|'+String(p.side)+'|'+String(p.dispLine);
       if(seen[id])return false;seen[id]=true;return true;
     });
@@ -7434,7 +7452,7 @@ function _hcCard(raw,r){
   return '<article class="hc-card"><div class="hc-top"><div class="hs-wrap"><span class="hs-ini">'+_nhlSafe(_initials(r.name))+'</span><img class="hs-img" src="'+_nhlSafe(head)+'" alt="" onerror="this.style.display=&quot;none&quot;"/></div><div><div class="hc-nm">'+_nhlSafe(r.name)+'</div><div class="hc-vs">'+_nhlSafe(r.team)+' '+(r.homeRoad==='H'?'vs':'at')+' <img src="'+_nhlSafe(logo)+'" alt="" onerror="this.style.display=&quot;none&quot;"/> '+_nhlSafe(r.opponent)+'</div></div></div>'
     +'<div><span class="hc-tag '+(r.form==='HOT'?'hc-hot':'hc-cold')+'">'+(r.doubleCold?'DOUBLE COLD':r.form)+'</span>'+(r.matchupSupports?'<span class="hc-tag hc-sup">Matchup supports</span>':'')+'</div>'
     +'<div class="hc-row"><span>Market</span><b>'+_nhlSafe(r.mkt)+' · '+line+'</b></div>'
-    +'<div class="hc-row"><span>Last 5 (any venue)</span><b>'+_nhlSafe(r.recentHits)+'/'+_nhlSafe(r.recentTotal)+' '+(r.side==='OVER'?'Over':'Under')+' · avg '+_nhlSafe(r.recentAverage)+push+'</b></div>'
+    +'<div class="hc-row"><span>'+(r.savedSnapshot?'Saved form sample':'Last 5 this season (any venue)')+'</span><b>'+_nhlSafe(r.recentHits)+'/'+_nhlSafe(r.recentTotal)+' '+(r.side==='OVER'?'Over':'Under')+' · avg '+_nhlSafe(r.recentAverage)+push+'</b></div>'
     +'<div class="hc-row"><span>Vs '+_nhlSafe(r.opponent)+'</span><b>'+_nhlSafe(opp)+warn+'</b></div>'
     +'<div class="hc-row"><span>Lineup</span><b>'+(conf?lineup:'<span class="hc-tag hc-warn">'+lineup+'</span>')+'</b></div>'
     +'<div class="hc-row"><span>'+r.side+' odds</span><b>'+odds+'</b></div>'
@@ -7489,6 +7507,13 @@ function _nhlHotColdSection(raw,rows,q){
   });
   return h+'</section>';
 }
+function _nhlCurrentSeasonGames(games,dt){
+  var m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dt||'').slice(0,10));
+  if(!m)return [];
+  var year=Number(m[1])-(Number(m[2])<7?1:0),start=year+'-07-01',end=(year+1)+'-07-01';
+  return (games||[]).filter(function(g){var d=String(g&&g.date||'').slice(0,10);return d>=start&&d<end&&d<dt;})
+    .sort(function(a,b){return String(b.date).localeCompare(String(a.date));}).slice(0,5);
+}
 function _nhlHcHistory(p){
   if(!p||!p.hotColdRecentGames)return '';
   function tbl(title,games){
@@ -7497,8 +7522,9 @@ function _nhlHcHistory(p){
       return '<tr><td>'+_nhlSafe(_nhlGameDateLabel(g.date))+'</td><td>'+_nhlSafe(g.opponent)+'</td><td>'+(g.homeRoad==='H'?'Home':g.homeRoad?'Away':'')+'</td><td>'+_nhlSafe(g.value)+'</td><td>'+_hcResult(g.value,p.dispLine,p.side)+'</td></tr>';
     }).join('')+'</tbody></table>';
   }
-  return '<div class="hc-note"><b>'+_nhlSafe(p.form)+' form · '+_nhlSafe(p.mkt)+'</b><br/>True last five games at all venues (separate from the venue-matched Last 5 box). History only, not a prediction. Pushes are not wins.'
-    +tbl('Last five, all venues',p.hotColdRecentGames||[])+tbl('Meetings vs '+_nhlSafe(p.opponent),p.hotColdOpponentGames||[])+'</div>';
+  var raw=window.__NHL_RAW__||{},dt=raw.targetDate||raw.date||window.__NHL_DATE__||(p.last5VenueStats||{}).asOf||'';
+  return '<div class="hc-note"><b>'+_nhlSafe(p.form)+' form · '+_nhlSafe(p.mkt)+'</b><br/>Last five games this NHL season, all venues (separate from the venue-matched Last 5 box). No previous-season backfill. History only, not a prediction. Pushes are not wins.'
+    +tbl('Last five this season, all venues',_nhlCurrentSeasonGames(p.hotColdRecentGames,dt))+tbl('Meetings vs '+_nhlSafe(p.opponent),p.hotColdOpponentGames||[])+'</div>';
 }
 function _nhlLast5Box(p){
   var data=p.last5VenueStats,venue=(data&&data.venue)||p.homeRoad||p.last5HomeRoad||'';
@@ -7518,11 +7544,11 @@ function _nhlLast5Box(p){
     +_nhlLast5Content(data,venue,state==='pending'?'Loading last 5 game stats…':'Last 5 stats unavailable: game venue or player details were not saved.')+'</section>';
 }
 function _nhlLast5Content(data,venue,message){
-  var title='LAST 5 '+(venue==='H'?'HOME':venue==='R'?'AWAY':'HOME / AWAY')+' GAMES';
-  var head='<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;color:#7dd3fc;font-size:.69rem;font-weight:900;letter-spacing:.04em">'+title+(data?'<span style="color:#94a3b8;font-weight:500">'+(data.games||[]).length+' available</span>':'')+'</div>';
+  var title='LAST 5 '+(venue==='H'?'HOME':venue==='R'?'AWAY':'HOME / AWAY')+' GAMES · THIS SEASON';
+  var games=data?_nhlCurrentSeasonGames(data.games,data.asOf):[];
+  var head='<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;color:#7dd3fc;font-size:.69rem;font-weight:900;letter-spacing:.04em">'+title+(data?'<span style="color:#94a3b8;font-weight:500">'+games.length+' available</span>':'')+'</div>';
   if(!data)return head+'<div style="font-size:.7rem;color:#94a3b8">'+_nhlEsc(message)+'</div>';
-  var games=data.games||[];
-  if(!games.length)return head+'<div style="font-size:.7rem;color:#94a3b8">No earlier '+(venue==='H'?'home':'away')+' game stats available.</div>';
+  if(!games.length)return head+'<div style="font-size:.7rem;color:#94a3b8">No earlier '+(venue==='H'?'home':'away')+' games this NHL season. Previous seasons are not used to fill the Last 5.</div>';
   var cols=[['goals','G','Goals'],['points','P','Points'],['assists','A','Assists'],['powerPlayPoints','PPP','Power Play Points'],['plusMinus','+/−','Plus/Minus'],['shots','SOG','Shots on Goal']];
   var headers='<th scope="col" style="text-align:left;padding:5px 4px">Date</th><th scope="col" style="padding:5px 4px">Opp</th>'+cols.map(function(c){return '<th scope="col" title="'+c[2]+'" style="padding:5px 4px"><abbr title="'+c[2]+'" style="text-decoration:none">'+c[1]+'</abbr></th>';}).join('');
   var rows=games.map(function(g){
@@ -7535,7 +7561,7 @@ function _nhlLast5Content(data,venue,message){
     }).join('')+'</tr>';
   }).join('');
   return head+'<div style="overflow-x:auto"><table aria-label="'+title+' statistics" style="width:100%;min-width:300px;border-collapse:collapse;text-align:center;font-size:.67rem"><thead style="color:#94a3b8;border-bottom:1px solid #334155"><tr>'+headers+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
-    +'<div style="margin-top:6px;color:#64748b;font-size:.62rem">All opponents · before '+_nhlEsc(data.asOf)+' · G goals · P points · A assists · PPP power play points · SOG shots</div>';
+    +'<div style="margin-top:6px;color:#64748b;font-size:.62rem">This NHL season only · all opponents · before '+_nhlEsc(data.asOf)+' · no previous-season backfill · G goals · P points · A assists · PPP power play points · SOG shots</div>';
 }
 function _nhlLast5Pump(){
   while(_nhlLast5Active<4&&_nhlLast5Queue.length){
@@ -10179,6 +10205,30 @@ def _nhl_sb_get_all(table, params=None, page_size=1000):
         offset += page_size
     return out
 
+
+def _nhl_day_read_rows(table, params=None):
+    """Strict, fully paginated reads for analytics: no grading or writes."""
+    if not _NHL_SB_URL or not _NHL_SB_KEY:
+        raise RuntimeError("Saved record storage is not configured.")
+    out, offset = [], 0
+    with httpx.Client(timeout=12) as client:
+        while True:
+            query = dict(params or {})
+            query.update(limit="1000", offset=str(offset), order="date.desc")
+            response = client.get(
+                f"{_NHL_SB_URL}/rest/v1/{table}", params=query,
+                headers={"apikey": _NHL_SB_KEY,
+                         "Authorization": f"Bearer {_NHL_SB_KEY}"})
+            response.raise_for_status()
+            page = response.json()
+            if not isinstance(page, list):
+                raise ValueError("Saved record storage returned an unreadable response.")
+            out.extend(page)
+            if len(page) < 1000:
+                return out
+            offset += len(page)
+
+
 def _nhl_sb_upsert(table, rows, on_conflict=None):
     if not _NHL_SB_URL or not _NHL_SB_KEY or not rows:
         return False
@@ -11758,7 +11808,7 @@ async def nhl_player_last_five(pid: int, date_str: str, home_road: str):
         raise HTTPException(status_code=400, detail="Player and H/R venue are required")
     year = selected.year if selected.month >= 7 else selected.year - 1
     payloads = await _nhl_cached_log_payloads(
-        pid, asyncio.Semaphore(1), f"{year}{year + 1}")
+        pid, asyncio.Semaphore(1), f"{year}{year + 1}", only_season=True)
     available = [
         data for data in payloads.values()
         if isinstance(data, dict) and isinstance(data.get("gameLog"), list)
@@ -11835,6 +11885,25 @@ async def nhl_player_history(pid: int, date_str: str, team: str = "",
         for stat_key, market, history_line in specs
     }
     return JSONResponse({"records": records, "date": date_str})
+
+
+@app.get("/api/nhl/day-category-record")
+async def nhl_day_category_record(request: Request, system: str = "A",
+                                  token: str = "", admin: str = ""):
+    """Analytics reads stored official rows ONLY. Never start the grade thread."""
+    system = str(system or "A").strip().upper()
+    if system not in ("A", "B", "C", "D"):
+        raise HTTPException(status_code=400, detail="System must be A, B, C or D.")
+    if system != "A":
+        tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+        if not _nhl_bet_admin_ok(tok, admin):
+            raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        payload = await asyncio.to_thread(_nhl_track_record_payload, system, True)
+    except (httpx.HTTPError, ValueError, RuntimeError, TypeError):
+        logger.warning("NHL weekday report could not read complete saved history.")
+        raise HTTPException(status_code=503, detail="Saved history could not be read completely. Please retry; no grading was started.")
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/track-record")
@@ -12314,14 +12383,15 @@ def _nhl_historical_analysis_payload(system: str = "A") -> dict:
     }
 
 
-def _nhl_track_record_payload(system: str = "A") -> dict:
+def _nhl_track_record_payload(system: str = "A", analytics: bool = False) -> dict:
     """Build the read-only payload used by both the API and hub snapshots."""
     record_system = str(system or "A").strip().upper()
     if record_system not in _NHL_SYSTEM_SNAP_CATS:
         record_system = "A"
     snapshot_category = _NHL_SYSTEM_SNAP_CATS[record_system]
     detail_category = _NHL_SYSTEM_DETAIL_CATS[record_system]
-    ledger_rows = _nhl_sb_get("mpa_track_ledger", {
+    reader = _nhl_day_read_rows if analytics else _nhl_sb_get
+    ledger_rows = reader("mpa_track_ledger", {
         "app": f"eq.{_NHL_TRK_APP}",
         "category": f"eq.{_NHL_SYSTEM_LEDGER_CATS[record_system]}",
         "locked": "eq.true", "select": "date,detail", "limit": "365"})
@@ -12330,12 +12400,12 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
         if row.get("date") and isinstance(row.get("detail"), dict)
         and "__slate_final_v1__" in row["detail"]
     }
-    det_rows = _nhl_sb_get("mpa_track_ledger", {
+    det_rows = reader("mpa_track_ledger", {
         "app": f"eq.{_NHL_TRK_APP}",
         "category": f"eq.{detail_category}",
         "locked": "eq.true", "select": "date,detail", "limit": "365"})
     detail_by_date = {r["date"]: (r.get("detail") or []) for r in (det_rows or [])}
-    snap_rows = _nhl_sb_get("mpa_track_ledger", {
+    snap_rows = reader("mpa_track_ledger", {
         "app": f"eq.{_NHL_TRK_APP}",
         "category": f"eq.{snapshot_category}",
         "side": "eq.ALL", "select": "date,detail", "limit": "365"})
@@ -12343,7 +12413,7 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
     gp_by_date = ({
         row["date"]: (row.get("detail") or [])
         for row in _nhl_load_gp_snapshots() if row.get("date")
-    } if record_system == "A" else {})
+    } if record_system == "A" and not analytics else {})
     dates = sorted(set(detail_by_date) | set(snapshot_by_date) | set(gp_by_date), reverse=True)
 
     def _same_line(a, b):
@@ -12484,6 +12554,232 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
             "system": record_system}
 
 
+_NHL_DAY_REPORT_UI = r"""
+<style>
+.ndr{max-width:960px;margin:0 auto;padding:0 16px 40px}
+.ndr .ndr-card{padding:20px 22px}
+.ndr h2{font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff;margin:0}
+.ndr h3{color:#e2e8f0;font-size:.9rem;margin:18px 0 6px;text-transform:uppercase;letter-spacing:.08em}
+.ndr-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.ndr label{color:#94a3b8;font-size:.7rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em;display:flex;flex-direction:column;gap:3px}
+.ndr select,.ndr input{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:7px 10px;color:#e2e8f0;font-size:.85rem;min-height:36px}
+.ndr button{background:#1e293b;color:#fff;border:2px solid #475569;border-radius:9px;padding:7px 13px;font-weight:800;cursor:pointer;font-size:.8rem;min-height:36px}
+.ndr button[aria-pressed=true]{background:#1d4ed8;border-color:#60a5fa}
+.ndr button:disabled{opacity:.45;cursor:not-allowed}
+.ndr button:focus-visible,.ndr select:focus-visible,.ndr input:focus-visible{outline:2px solid #fbbf24;outline-offset:2px}
+.ndr-note{color:#94a3b8;font-size:.74rem;margin:4px 0 10px;line-height:1.45}
+.ndr-warn{color:#fbbf24}.ndr-err{color:#f87171}.ndr-wrap{overflow-x:auto}
+.ndr-tbl{width:100%;border-collapse:collapse;font-size:.8rem}
+.ndr-tbl th{padding:7px 9px;text-align:left;font-size:.68rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #1e293b;white-space:nowrap}
+.ndr-tbl td{padding:7px 9px;border-bottom:1px solid #0f172a;color:#e2e8f0;white-space:nowrap}
+.ndr-tbl td.l{white-space:normal}
+.ndr-tbl td.ndr-pos{color:#4ade80}.ndr-tbl td.ndr-neg{color:#f87171}.ndr-mut{color:#94a3b8}
+.ndr-cov{border:1px solid #26334a;border-radius:10px;padding:10px 12px;background:#0f172a;margin:10px 0}
+.ndr-skel{height:14px;border-radius:6px;background:#1e293b;margin:10px 0;animation:ndrp 1.2s ease-in-out infinite}
+@keyframes ndrp{50%{opacity:.4}}
+@media(max-width:600px){.ndr .ndr-card{padding:16px 12px}}
+@media(prefers-reduced-motion:reduce){.ndr-skel{animation:none}}
+</style>
+<div id="nhl-day-section" class="ndr" style="display:none">
+<div class="card ndr-card">
+  <div class="ndr-row" style="justify-content:space-between">
+    <h2>NHL By Day / Category</h2>
+    <button type="button" onclick="document.getElementById('nhl-day-section').style.display='none'" aria-label="Close By Day report">Close</button>
+  </div>
+  <p class="ndr-note">Weekday results by category from saved official picks only. This report never determines picks, changes models, rankings or thresholds, or starts grading. P/L is simulated using genuine saved odds, not actual betting payouts.</p>
+  <div class="ndr-row" role="group" aria-label="System">
+    <span class="ndr-mut" style="font-size:.7rem;font-weight:900">SYSTEM</span>
+    <button type="button" id="nhlDaySysA" aria-pressed="true" onclick="_nhlDaySetSystem('A')">A</button>
+    <button type="button" id="nhlDaySysB" class="admin-only" aria-pressed="false" onclick="_nhlDaySetSystem('B')">B</button>
+    <button type="button" id="nhlDaySysC" class="admin-only" aria-pressed="false" onclick="_nhlDaySetSystem('C')">C</button>
+    <button type="button" id="nhlDaySysD" class="admin-only" aria-pressed="false" onclick="_nhlDaySetSystem('D')">D</button>
+    <span class="ndr-note" style="margin:0">A is public; B/C/D are admin only</span>
+  </div>
+  <div class="ndr-row" role="group" aria-label="Lane">
+    <span class="ndr-mut" style="font-size:.7rem;font-weight:900">LANE</span>
+    <button type="button" id="nhlDayLaneMain" aria-pressed="true" onclick="_nhlDaySetLane('main')">Main</button>
+    <button type="button" id="nhlDayLaneOv" aria-pressed="false" onclick="_nhlDaySetLane('overflow')">Overflow</button>
+    <span class="ndr-note" style="margin:0">Isolated, never combined</span>
+  </div>
+  <div class="ndr-row">
+    <label>Category<select id="nhlDayCat" onchange="_nhlDayRender()"><option value="__ALL__">All (ordinary markets, no Locks)</option></select></label>
+    <label>Side<select id="nhlDaySide" onchange="_nhlDayRender()"><option value="">All</option><option value="OVER">Over</option><option value="UNDER">Under</option></select></label>
+    <label>Weekday<select id="nhlDayWeekday" onchange="_nhlDayRender()"><option value="">All weekdays</option><option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option></select></label>
+    <label>Range<select id="nhlDayRange" onchange="_nhlDayRangeChanged()"><option value="all">All time</option><option value="last7">Last 7 days</option><option value="month">Month</option><option value="custom">Custom</option></select></label>
+    <label id="nhlDayMonthWrap" style="display:none">Month<input type="month" id="nhlDayMonth" onchange="_nhlDayRender()"></label>
+    <label id="nhlDayFromWrap" style="display:none">From<input type="date" id="nhlDayFrom" onchange="_nhlDayRender()"></label>
+    <label id="nhlDayToWrap" style="display:none">To<input type="date" id="nhlDayTo" onchange="_nhlDayRender()"></label>
+    <label>Stake ($)<input type="number" id="nhlDayStake" value="100" min="1" step="1" style="width:90px" onchange="_nhlDayRender()"></label>
+    <button type="button" onclick="loadNhlDayReport(true)">Refresh saved data</button>
+    <button type="button" onclick="_nhlDayCsv()">CSV</button>
+  </div>
+  <div id="nhlDayStatus" role="status" aria-live="polite"></div>
+  <div id="nhlDayBody"><p class="ndr-note">Open the report to load saved data.</p></div>
+</div>
+</div>
+<script>
+(function(){
+var S={system:'A',lane:'main',data:null,req:0,loaded:false,loadedAt:0};
+var WD=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+function esc(s){var f=window._nhlSafe||window._nhlEsc;if(f)return f(s);return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function $(id){return document.getElementById(id);}
+function isLock(c){return /lock/i.test(String(c||''));}
+function money(v){var n=Number(v)||0;return (n<0?'-$':'$')+Math.abs(n).toFixed(2);}
+function pct(v){return v==null?'-':v.toFixed(1)+'%';}
+function validOdds(o){if(o==null||String(o).trim()==='')return null;var n=Number(String(o).replace('+',''));if(!isFinite(n)||n < -1000||Math.abs(n)<100)return null;return n;}
+function winProfit(o,stake){return o>0?stake*o/100:stake*100/Math.abs(o);}
+function resOf(r){var x=String(r.result||'PENDING').toUpperCase();if(x==='WON')x='WIN';if(x==='LOST')x='LOSS';return x;}
+function wdIdx(d){var t=new Date(String(d)+'T12:00:00');if(isNaN(t))return -1;return (t.getDay()+6)%7;}
+function agg(rows,stake){
+  var a={n:rows.length,w:0,l:0,push:0,v:0,pend:0,priced:0,net:0,dates:{},tg:{},tgKnown:true};
+  rows.forEach(function(r){
+    var x=resOf(r);a.dates[r._date]=1;
+    if(r.team)a.tg[r._date+'|'+r.team]=1;else a.tgKnown=false;
+    var o=validOdds(r.odds);
+    if(x==='WIN'){a.w++;if(o!=null){a.priced++;a.net+=winProfit(o,stake);}}
+    else if(x==='LOSS'){a.l++;if(o!=null){a.priced++;a.net-=stake;}}
+    else if(x==='PUSH')a.push++;else if(x==='VOID')a.v++;else a.pend++;
+  });
+  a.nd=Object.keys(a.dates).length;a.ntg=a.tgKnown&&rows.length?Object.keys(a.tg).length:null;
+  a.rate=a.w+a.l?100*a.w/(a.w+a.l):null;a.roi=a.priced?100*a.net/(a.priced*stake):null;
+  return a;
+}
+function aggRow(label,a){
+  var other=(a.push?a.push+' push':'')+(a.v?(a.push?', ':'')+a.v+' void':'')+(a.pend?((a.push||a.v)?', ':'')+a.pend+' pending':'');
+  return '<tr><td class="l"><b>'+esc(label)+'</b></td><td>'+a.n+'</td><td>'+a.nd+'</td><td>'+(a.ntg==null?'n/a':a.ntg)+'</td><td>'+a.w+'-'+a.l+'</td><td>'+pct(a.rate)+'</td><td class="ndr-mut">'+(other||'-')+'</td><td>'+a.priced+'</td><td class="'+(a.priced?(a.net>=0?'ndr-pos':'ndr-neg'):'ndr-mut')+'">'+(a.priced?money(a.net):'-')+'</td><td>'+pct(a.roi)+'</td></tr>';
+}
+function table(first,rowsHtml){
+  return '<div class="ndr-wrap"><table class="ndr-tbl"><thead><tr><th>'+esc(first)+'</th><th>Picks</th><th>Dates</th><th>Team-games</th><th>W-L</th><th>Hit %</th><th>Not decided</th><th>Priced</th><th>P/L</th><th>ROI</th></tr></thead><tbody>'+rowsHtml+'</tbody></table></div>';
+}
+function flatten(){
+  var out=[];
+  if(!S.data)return out;
+  (S.data.dates||[]).forEach(function(d){
+    ((S.lane==='overflow'?d.overflow_detail:d.detail)||[]).forEach(function(r){
+      var o=Object.assign({},r);o._date=d.date;out.push(o);
+    });
+  });
+  return out;
+}
+function today(){return new Intl.DateTimeFormat('en-CA',{timeZone:'America/Toronto',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
+function inRange(ds){
+  var m=$('nhlDayRange').value;
+  if(m==='all')return true;
+  if(m==='last7'){var e=today(),d=new Date(e+'T12:00:00Z');d.setUTCDate(d.getUTCDate()-6);return ds>=d.toISOString().slice(0,10)&&ds<=e;}
+  if(m==='month'){var mv=$('nhlDayMonth').value||today().slice(0,7);return String(ds).slice(0,7)===mv;}
+  var f=$('nhlDayFrom').value,t=$('nhlDayTo').value;
+  return (!f||ds>=f)&&(!t||ds<=t);
+}
+function filtered(){
+  var cat=$('nhlDayCat').value,side=$('nhlDaySide').value,weekday=$('nhlDayWeekday').value;
+  return flatten().filter(function(r){
+    if(!inRange(r._date))return false;
+    if(weekday!==''&&wdIdx(r._date)!==Number(weekday))return false;
+    if(cat==='__ALL__'){if(isLock(r.category))return false;}else if(String(r.category)!==cat)return false;
+    return !side||String(r.side||'').toUpperCase()===side;
+  });
+}
+function fillCats(){
+  var sel=$('nhlDayCat'),cur=sel.value,set={};
+  flatten().forEach(function(r){if(r.category)set[r.category]=1;});
+  if(!Object.keys(set).some(isLock))set['80-100% Locks']=1;
+  sel.innerHTML='<option value="__ALL__">All (ordinary markets, no Locks)</option>'+Object.keys(set).sort().map(function(c){return '<option value="'+esc(c)+'">'+esc(c)+'</option>';}).join('');
+  sel.value=set[cur]||cur==='__ALL__'?cur:'__ALL__';
+}
+function paint(){
+  ['A','B','C','D'].forEach(function(s){var b=$('nhlDaySys'+s);if(b){b.setAttribute('aria-pressed',S.system===s?'true':'false');if(s!=='A')b.disabled=!window.IS_ADMIN;}});
+  $('nhlDayLaneMain').setAttribute('aria-pressed',S.lane==='main'?'true':'false');
+  $('nhlDayLaneOv').setAttribute('aria-pressed',S.lane==='overflow'?'true':'false');
+}
+function groupBy(rows,fn){var g={};rows.forEach(function(r){var k=fn(r);(g[k]||(g[k]=[])).push(r);});return g;}
+function stakeValue(){var n=Number($('nhlDayStake').value);return isFinite(n)&&n>0?n:100;}
+window._nhlDayRender=function(){
+  var body=$('nhlDayBody');if(!body||!S.data)return;
+  var stake=stakeValue(),rows=filtered();
+  if($('nhlDayRange').value==='custom'&&$('nhlDayFrom').value&&$('nhlDayTo').value&&$('nhlDayFrom').value>$('nhlDayTo').value){body.innerHTML='<p class="ndr-err">From must be on or before To.</p>';return;}
+  if(!rows.length){body.innerHTML='<div class="ndr-cov"><b>No saved rows match these filters.</b><div class="ndr-note">Try All time, another category, or the other lane. Nothing is graded from this page.</div></div>';return;}
+  var tot=agg(rows,stake);
+  var h='<div class="ndr-cov"><div class="ndr-note" style="margin-bottom:0">W/L counts decided picks only; pending, push and void are separate. P/L and ROI simulate the selected stake using only genuine saved odds (-1000 or better). Unpriced picks count W/L but have no payout. All categories excludes Locks duplicates; form categories may overlap ordinary markets. Same-day and same-team picks are correlated: read Dates and Team-games, not just Picks. This is a results report, not a pick-selection rule.</div></div>';
+  h+='<h3>Overall</h3>'+table('Scope',aggRow('Filtered picks',tot));
+  var wg=groupBy(rows,function(r){return wdIdx(r._date);}),wh='';
+  WD.forEach(function(n,i){wh+=aggRow(n,agg(wg[i]||[],stake));});
+  h+='<h3>By weekday</h3>'+table('Weekday',wh);
+  var cg=groupBy(rows,function(r){return r.category||'Unknown';}),ch='';
+  Object.keys(cg).sort().forEach(function(k){ch+=aggRow(k,agg(cg[k],stake));});
+  h+='<details open><summary>Category and side breakdowns</summary><h3>By category</h3>'+table('Category',ch);
+  var sg=groupBy(rows,function(r){return String(r.side||'Unknown').toUpperCase();}),sh='';
+  Object.keys(sg).sort().forEach(function(k){sh+=aggRow(k,agg(sg[k],stake));});
+  h+='<h3>By side</h3>'+table('Side',sh);
+  var cs=groupBy(rows,function(r){return (r.category||'Unknown')+' / '+String(r.side||'Unknown').toUpperCase();}),csh='';
+  Object.keys(cs).sort().forEach(function(k){csh+=aggRow(k,agg(cs[k],stake));});
+  h+='<h3>Category and side</h3>'+table('Category / side',csh)+'</details>';
+  body.innerHTML=h;
+};
+window._nhlDayRangeChanged=function(){
+  var m=$('nhlDayRange').value;
+  $('nhlDayMonthWrap').style.display=m==='month'?'':'none';
+  $('nhlDayFromWrap').style.display=m==='custom'?'':'none';
+  $('nhlDayToWrap').style.display=m==='custom'?'':'none';
+  if(m==='month'&&!$('nhlDayMonth').value)$('nhlDayMonth').value=today().slice(0,7);
+  window._nhlDayRender();
+};
+window._nhlDaySetLane=function(l){S.lane=l==='overflow'?'overflow':'main';paint();fillCats();window._nhlDayRender();};
+window._nhlDaySetSystem=function(s){
+  s=String(s||'A').toUpperCase();if(['A','B','C','D'].indexOf(s)<0)s='A';
+  if(s!=='A'&&!window.IS_ADMIN){alert('Admin only');return;}
+  S.system=s;paint();window.loadNhlDayReport(true);
+};
+window.loadNhlDayReport=function(force){
+  if(!force&&S.loaded&&S.data)return;
+  var id=++S.req,sys=S.system,body=$('nhlDayBody'),st=$('nhlDayStatus');
+  S.data=null;S.loaded=false;
+  body.innerHTML='<div class="ndr-skel"></div><div class="ndr-skel" style="width:80%"></div>';
+  st.innerHTML='<span class="ndr-note">Loading saved System '+esc(sys)+' data...</span>';
+  var ctl=new AbortController(),timer=setTimeout(function(){ctl.abort();},45000);
+  var qs=typeof _nhlBetAuthQS==='function'?_nhlBetAuthQS():'?';
+  var url='/api/nhl/day-category-record'+qs+(qs.length>1?'&':'')+'system='+encodeURIComponent(sys);
+  fetch(url,{credentials:'include',signal:ctl.signal})
+    .then(function(r){return r.json().catch(function(){return {};}).then(function(d){if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));return d;});})
+    .then(function(d){
+      clearTimeout(timer);if(id!==S.req)return;
+      if(!d||!Array.isArray(d.dates)||d.system!==sys)throw new Error('Unexpected record response');
+      S.data=d;S.loaded=true;S.loadedAt=Date.now();st.innerHTML='<span class="ndr-note">System '+esc(sys)+' saved data loaded: '+d.dates.length+' dates.</span>';
+      fillCats();window._nhlDayRender();
+    })
+    .catch(function(e){
+      clearTimeout(timer);if(id!==S.req)return;
+      S.data=null;S.loaded=false;
+      var msg=e&&e.name==='AbortError'?'Saved-history request timed out; no grading was started':(e&&e.message)||'Failed to load';
+      st.innerHTML='';body.innerHTML='<div class="ndr-cov"><span class="ndr-err">'+esc(msg)+'</span> <button type="button" onclick="loadNhlDayReport(true)">Retry</button></div>';
+    });
+};
+window.openNhlDayReport=function(){
+  var s=$('nhl-day-section');if(!s)return;s.style.display='block';paint();
+  s.scrollIntoView({behavior:'smooth',block:'start'});
+  if(!S.loaded||Date.now()-S.loadedAt>60000)window.loadNhlDayReport(true);
+};
+function csvCell(v){var t=String(v==null?'':v);if(/^[=+@-]/.test(t)&&isNaN(Number(t)))t="'"+t;return '"'+t.split('"').join('""')+'"';}
+window._nhlDayCsv=function(){
+  if(!S.data)return;
+  var stake=stakeValue(),rows=filtered();
+  var head=['system','lane','date','weekday','name','team','category','side','line','result','odds','actual','priced_profit'];
+  var lines=[head.map(csvCell).join(',')];
+  rows.forEach(function(r){
+    var x=resOf(r),o=validOdds(r.odds),p='';
+    if(o!=null&&x==='WIN')p=winProfit(o,stake).toFixed(2);else if(o!=null&&x==='LOSS')p=(-stake).toFixed(2);
+    var wi=wdIdx(r._date);
+    lines.push([S.system,S.lane,r._date,wi<0?'':WD[wi],r.name,r.team,r.category,r.side,r.line,x,o==null?'':o,r.actual,p].map(csvCell).join(','));
+  });
+  var blob=new Blob([lines.join(String.fromCharCode(13,10))],{type:'text/csv;charset=utf-8'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='nhl_day_category_'+S.system+'_'+S.lane+'.csv';
+  document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},500);
+};
+})();
+</script>
+"""
+
+
 _DASHBOARD_FALLBACK_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NHL Money Shots</title></head>
@@ -12496,7 +12792,7 @@ _DASHBOARD_FALLBACK_HTML = """<!doctype html>
 def _render_dashboard_shell(is_admin: bool) -> str:
     """Render the member page without allowing a template error to become 500."""
     try:
-        page = HTML
+        page = HTML.replace("</body>", _NHL_DAY_REPORT_UI + "</body>", 1)
         if not isinstance(page, str) or not page.strip():
             raise RuntimeError("NHL dashboard HTML is empty or invalid")
         js_flag = "true" if is_admin else "false"
