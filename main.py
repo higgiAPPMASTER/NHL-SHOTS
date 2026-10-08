@@ -442,6 +442,214 @@ async def _attach_pregame_starting_goalies(games: List[Dict], target_date: str) 
             break
 
 
+_NHL_INJURY_CACHE = {}
+_NHL_INJURY_FIELDS = (
+    "injuryStatus", "injuryWarning", "injuryBlocked", "injurySource", "injuryCheckedAt",
+)
+
+
+def _nhl_injury_name(name):
+    text = unicodedata.normalize("NFKD", str(name or ""))
+    text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+    return re.sub(r"[^a-z0-9]", "", re.sub(r"\b(jr|sr|ii|iii|iv)\b", "", text))
+
+
+def _nhl_injury_team(group, athlete):
+    team = athlete.get("team") or group.get("team") or {}
+    aliases = {"LA": "LAK", "SJ": "SJS", "TB": "TBL", "NJ": "NJD",
+               "MON": "MTL", "UTAH": "UTA", "WSH": "WSH"}
+    for value in (team.get("abbreviation"), group.get("abbreviation")):
+        abbr = aliases.get(str(value or "").upper(), str(value or "").upper())
+        if abbr in _NHL_TEAM_FULL:
+            return abbr
+    for name in (team.get("displayName"), group.get("displayName"),
+                 group.get("name")):
+        key = _nhl_injury_name(name)
+        for abbr, full in _NHL_TEAM_FULL.items():
+            if key and key == _nhl_injury_name(full):
+                return abbr
+        if key in ("utahmammoth", "utahhockeyclub"):
+            return "UTA"
+    return None
+
+
+def _nhl_injury_status(value):
+    if isinstance(value, dict):
+        value = value.get("description") or value.get("name") or value.get("type") or value.get("abbreviation")
+    status = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    if status in ("out", "o"):
+        return "OUT"
+    if status in ("ir", "ir lt", "ltir", "injured reserve", "long term injured reserve"):
+        return "IR"
+    if status in ("q", "questionable"):
+        return "QUESTIONABLE"
+    if status in ("d", "doubtful"):
+        return "DOUBTFUL"
+    if status in ("day to day", "dtd"):
+        return "DAY_TO_DAY"
+    if status in ("active", "healthy", "probable", "p"):
+        return ""
+    return "REPORTED"
+
+
+async def _nhl_injury_report(target_date, simulate=False):
+    """One bounded public injury read, shared by the slate's four systems."""
+    if simulate or str(target_date or "") < _nhl_record_today():
+        return {"status": "NOT_APPLIED", "players": {}, "source": "ESPN"}
+    today = _nhl_record_today()
+    cached = _NHL_INJURY_CACHE.get(today)
+    if cached and time.monotonic() < cached["expires"]:
+        return cached["report"]
+    try:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+            response = await client.get(
+                "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/injuries")
+            response.raise_for_status()
+        if len(response.content) > 5_000_000:
+            raise ValueError("Injury report too large")
+        payload = response.json()
+        groups = payload.get("injuries") if isinstance(payload, dict) else None
+        if not isinstance(groups, list) or not groups:
+            raise ValueError("Injury report coverage could not be verified")
+        players = {}
+        entries = 0
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("injuries"), list):
+                raise ValueError("Unreadable team injury report")
+            for entry in group["injuries"]:
+                if not isinstance(entry, dict):
+                    raise ValueError("Unreadable player injury report")
+                athlete = entry.get("athlete") or {}
+                team = _nhl_injury_team(group, athlete)
+                name = athlete.get("fullName") or athlete.get("displayName")
+                if not team or not name:
+                    continue
+                entries += 1
+                status = _nhl_injury_status(entry.get("status"))
+                if not status:
+                    continue
+                key = team + "|" + _nhl_injury_name(name)
+                row = {"name": name, "team": team, "status": status}
+                # Conflicting duplicate entries cannot turn an explicit Out/IR
+                # into a questionable player through feed iteration order.
+                if key not in players or status in ("OUT", "IR"):
+                    players[key] = row
+        if not entries:
+            raise ValueError("No identifiable NHL injury entries")
+        report = {"status": "READY", "players": players, "source": "ESPN",
+                  "checkedAt": datetime.utcnow().isoformat() + "Z"}
+        _NHL_INJURY_CACHE.clear()
+        _NHL_INJURY_CACHE[today] = {
+            "report": report, "expires": time.monotonic() + 300,
+            "lastGood": report, "lastGoodAt": time.monotonic(),
+        }
+        return report
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        logger.warning("NHL injury feed unavailable; injury verification is not complete.")
+        previous = (cached or {}).get("lastGood")
+        age = time.monotonic() - (cached or {}).get("lastGoodAt", 0)
+        report = ({**previous, "status": "STALE"} if previous and age <= 1800 else
+                  {"status": "UNAVAILABLE", "players": {}, "source": "ESPN"})
+        _NHL_INJURY_CACHE[today] = {
+            "report": report, "expires": time.monotonic() + 30,
+            "lastGood": previous, "lastGoodAt": (cached or {}).get("lastGoodAt", 0),
+        }
+        return report
+
+
+def _nhl_injury_teams(games):
+    return {
+        team for game in games or []
+        if str(game.get("gameState") or "").upper() not in ("LIVE", "CRIT", "OFF", "FINAL")
+        and _nhl_gp_is_pre_game({"startTime": game.get("startTime")})
+        for team in (game.get("homeTeam"), game.get("awayTeam")) if team
+    }
+
+
+def _nhl_injury_player(player, team, report):
+    row = {k: v for k, v in player.items() if k not in _NHL_INJURY_FIELDS}
+    hit = (report.get("players") or {}).get(
+        team + "|" + _nhl_injury_name(player.get("name") or player.get("player")))
+    status = hit["status"] if hit else ""
+    labels = {"QUESTIONABLE": "Questionable", "DAY_TO_DAY": "Day-to-day",
+              "DOUBTFUL": "Doubtful", "REPORTED": "Injury reported"}
+    row.update({
+        "injuryStatus": status or ("NOT_REPORTED" if report.get("status") == "READY" else "UNKNOWN"),
+        "injuryBlocked": status in ("OUT", "IR"),
+        "injuryWarning": (labels[status] + " — verify lineup" if status in labels else ""),
+        "injurySource": report.get("source", "ESPN"),
+        "injuryCheckedAt": report.get("checkedAt"),
+    })
+    return row
+
+
+def _nhl_injury_rosters(games, rosters):
+    """Filter only upcoming game candidates; official participants still win."""
+    cached = _NHL_INJURY_CACHE.get(_nhl_record_today()) or {}
+    report = cached.get("report") or {}
+    if not report or report.get("status") == "NOT_APPLIED":
+        return rosters
+    upcoming = _nhl_injury_teams(games)
+    return {
+        team: [p for p in (_nhl_injury_player(row, team, report) for row in rows)
+               if not p.get("injuryBlocked")] if team in upcoming else rows
+        for team, rows in rosters.items()
+    }
+
+
+def _nhl_apply_injury_report(board, report):
+    """Sanitize live display pools only, never saved records or lookup profiles."""
+    if not isinstance(board, dict) or board.get("simulation") or board.get("historical"):
+        return board
+    target = str(board.get("targetDate") or board.get("date") or "")
+    if not target or target < _nhl_record_today() or report.get("status") == "NOT_APPLIED":
+        return board
+    upcoming = _nhl_injury_teams(board.get("games"))
+    out = dict(board)
+    keys = {spec[0] for spec in _NHL_TRK_LISTS} | {"hotColdPlayers", "candidates"}
+    # "picks" also covers alternate Coach, whose full candidates are separate.
+    for key in keys:
+        if not isinstance(board.get(key), list):
+            continue
+        rows = []
+        for player in board[key]:
+            team = player.get("team") if isinstance(player, dict) else None
+            if team not in upcoming:
+                rows.append(player)
+                continue
+            row = _nhl_injury_player(player, team, report)
+            if not row["injuryBlocked"]:
+                rows.append(row)
+        out[key] = rows
+    # Promote surviving Overflow players in their existing order, with exactly
+    # the same 10 Main + 10 Overflow limits. No model probability is changed.
+    for main, cat, stat, side, overflow in _NHL_TRK_LISTS:
+        if overflow or main not in out:
+            continue
+        rest = next((k for k, c, s, d, ov in _NHL_TRK_LISTS
+                     if ov and (c, s, d) == (cat, stat, side)), None)
+        if rest and rest in out:
+            rows = (out.get(main) or []) + (out.get(rest) or [])
+            out[main], out[rest] = rows[:_NHL_TRK_TOP], rows[_NHL_TRK_TOP:_NHL_TRK_TOP * 2]
+    if "hotColdPlayers" in out:
+        out.update(_nhl_form_pick_groups(out))
+    if isinstance(board.get("legacySystem"), dict):
+        legacy = {**board, **board["legacySystem"]}
+        legacy.pop("legacySystem", None)
+        sanitized = _nhl_apply_injury_report(legacy, report)
+        out["legacySystem"] = {key: sanitized.get(key, value)
+                               for key, value in board["legacySystem"].items()}
+    out["injuryReport"] = {key: value for key, value in report.items() if key != "players"}
+    return out
+
+
+async def _nhl_refresh_injury_board(board, target_date):
+    if not isinstance(board, dict) or board.get("simulation") or board.get("historical"):
+        return board
+    report = await _nhl_injury_report(target_date)
+    return _nhl_apply_injury_report(board, report)
+
+
 def _lineup_filtered_rosters(
     games: List[Dict],
     rosters: Dict[str, List[Dict]],
@@ -458,6 +666,7 @@ def _lineup_filtered_rosters(
     candidates, clearly marked unconfirmed. Live/final games still require
     official participants.
     """
+    rosters = _nhl_injury_rosters(games, rosters)
     game_by_team = {}
     for game in games:
         game_by_team[game.get("homeTeam", "")] = game
@@ -3914,11 +4123,24 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
     system = str(system or "A").upper()
     cached = _nhl_alt_coach_cache_get(date_str, system)
     if cached is not None:
-        return cached
+        if not cached.get("games"):
+            games = await get_today_games(date_str)
+            if not games:
+                return {"date": date_str, "system": system, "picks": [],
+                        "error": "Cannot verify games for the saved alternate Coach board."}
+            cached = {**cached, "games": games}
+        cached = await _nhl_refresh_injury_board(cached, date_str)
+        best = {}
+        for row in cached.get("candidates") or cached.get("picks") or []:
+            key = str(row["pid"])
+            if key not in best or (row["edge"], row["appProb"]) > (best[key]["edge"], best[key]["appProb"]):
+                best[key] = row
+        return {**cached, "picks": sorted(best.values(), key=lambda r: (r["edge"], r["appProb"]), reverse=True)[:10]}
     games = await get_today_games(date_str)
     if not games:
         return {"date": date_str, "system": system, "picks": [],
                 "error": "No NHL games found for this date."}
+    injury_report = await _nhl_injury_report(date_str)
 
     # get_shot_lines owns the live alternate cache.  It safely refreshes an old
     # An older cached payload may predate the alternates field.
@@ -4044,8 +4266,9 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
         if key not in best or (row["edge"], row["appProb"]) > (best[key]["edge"], best[key]["appProb"]):
             best[key] = row
     picks = sorted(best.values(), key=lambda r: (r["edge"], r["appProb"]), reverse=True)[:10]
-    payload = {"date": date_str, "system": system, "picks": picks,
+    payload = {"date": date_str, "system": system, "picks": picks, "games": games,
                "candidates": rows, "lines": len(rows)}
+    payload = _nhl_apply_injury_report(payload, injury_report)
     _nhl_alt_coach_cache_set(date_str, system, payload)
     return payload
 
@@ -4568,13 +4791,14 @@ async def run_picks(
         await _attach_pregame_starting_goalies(games, target_date)
 
     # Games exist — now fetch SA map, lines, and goalie SV% map in parallel.
-    sa_map, _lines_tuple, goalie_map, opponent_sf_map = await asyncio.gather(
+    sa_map, _lines_tuple, goalie_map, opponent_sf_map, injury_report = await asyncio.gather(
         get_team_sa_map(season),
         get_shot_lines(
             target_date, games,
             historical_cache_only=historical_odds_cache_only),
         get_opp_goalie_svpct(season),
         get_team_sf_map(season) if c_mode else asyncio.sleep(0, result={}),
+        _nhl_injury_report(target_date, simulate=simulate),
     )
     lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map = _lines_tuple
     unpriced_mode = not any((lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map))
@@ -5213,6 +5437,7 @@ async def run_picks(
                 "B_unavailable_categories": ["Power Play Points"],
             },
         })
+    _result = _nhl_apply_injury_report(_result, injury_report)
     _result.update(_nhl_form_pick_groups(_result))
     if simulate:
         _result["simulationStats"] = _nhl_simulation_stats(
@@ -6238,6 +6463,7 @@ function _renderNhlParlayCoachCats(){
 }
 document.addEventListener('DOMContentLoaded',function(){_syncNhlParlayCats();_paintNhlParlayCatBtn();_renderNhlParlayGames();_renderNhlParlayCoachCats();});
 function _nhlLeg(p){
+  if(_nhlInjuryBlocked(p))return null;
   var market=p.formCategory||p.mkt||((p.pts2Hits!=null||p.ptsHa10avg!=null)?'Points (1+)':'Shots on Goal');
   var modelOnly=p.realLine==null
     &&(p.lineSource==='Model'||p.lineSource==='No book line');
@@ -6248,7 +6474,7 @@ function _nhlLeg(p){
     ?(p.underRate||p.underRateAny||p.underRateVo||0)
     :(p.vsLineRate||p.rateB||p.rateA||p.step3Rate||p.pts3Rate||0);
   var odds=modelOnly?'':dir==='UNDER'?(p.realUnderOdds||''):(p.realOdds||'');var dec=_amToDec(odds);
-  return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,book:_nhlBookName(p,dir),dec:dec,hasOdds:!!dec,source:'normal',modelOnly:modelOnly};
+  return {player:p.name,playerKey:(p.pid!=null?String(p.pid):String(p.name||'')),team:p.team||'',opp:p.opponent||'',market:market,dir:dir,line:line,rate:Math.round(rate||0),odds:odds,book:_nhlBookName(p,dir),dec:dec,hasOdds:!!dec,source:'normal',modelOnly:modelOnly,injuryStatus:p.injuryStatus,injuryWarning:p.injuryWarning,injuryCheckedAt:p.injuryCheckedAt};
 }
 function _nhlParlayCatKey(c){
   var base={'Shots on Goal':'SHOTS','Points (1+)':'POINTS','Power Play Points (1+)':'PP','Plus/Minus':'PM','Assists (1+)':'ASSISTS','Goals (1+)':'GOALS','Goalie Saves':'SAVES','Hot Shots':'HOT_SHOTS','Hot Points':'HOT_POINTS','Cold Shots':'COLD_SHOTS','Cold Points':'COLD_POINTS','Double Cold Shots':'DOUBLE_COLD_SHOTS','Double Cold Points':'DOUBLE_COLD_POINTS'}[c.market]||'SHOTS';
@@ -6265,12 +6491,13 @@ function _nhlCoachParlayCandidates(){
   }
   function leg(p,isAlternate){
     var odds=Number(p.odds),dec=_amToDec(odds);
+    var injury=_nhlInjuryInfo(p);
     return {player:p.player,playerKey:String((p.source&&p.source.pid)||p.pid||p.player||''),team:p.team||'',opp:p.opponent||'',
       market:p.market||'NHL Prop',dir:p.side,line:p.line,rate:Math.round(Number(p.appProb||0)),odds:odds,dec:dec,
-      hasOdds:!!dec,book:_nhlBookName(p,p.side),edge:Number(p.edge||0),isAlternate:!!isAlternate,source:'coach',coachCats:[]};
+      hasOdds:!!dec,book:_nhlBookName(p,p.side),edge:Number(p.edge||0),isAlternate:!!isAlternate,source:'coach',coachCats:[],injuryStatus:injury.injuryStatus,injuryWarning:injury.injuryWarning,injuryCheckedAt:injury.injuryCheckedAt};
   }
   var positive=_frankAllProps().filter(function(p){
-    return p.edge>0&&_floorOk(p.odds)&&_nhlParlayGameOn(p.team,p.opponent);
+    return !_nhlInjuryBlocked(p)&&p.edge>0&&_floorOk(p.odds)&&_nhlParlayGameOn(p.team,p.opponent);
   });
   var byEdge=function(a,b){return b.edge-a.edge||b.appProb-a.appProb;};
   var bySafe=function(a,b){return b.implied-a.implied||b.appProb-a.appProb;};
@@ -6287,7 +6514,7 @@ function _nhlCoachParlayCandidates(){
     });
   });
   pools.alt_line_edge=(window.__NHL_ALT_COACH_ROWS__||[]).filter(function(p){
-    return p&&p.edge>0&&Number(p.appProb)>=85&&Number(p.implied)>=70&&_floorOk(p.odds)&&_nhlParlayGameOn(p.team,p.opponent);
+    return p&&!_nhlInjuryBlocked(p)&&p.edge>0&&Number(p.appProb)>=85&&Number(p.implied)>=70&&_floorOk(p.odds)&&_nhlParlayGameOn(p.team,p.opponent);
   }).slice(0,10);
   _NHL_FORM_TYPES.forEach(function(form){
     pools[form.market+'_'+form.side.toLowerCase()]=select(positive.filter(function(p){
@@ -6377,7 +6604,7 @@ function _paintNhlParlay(legs,n,randomize){
     +'<div style="display:flex;align-items:center;gap:8px;min-width:0">'
     +'<div style="min-width:0;flex:1">'
     +'<div style="font-weight:800;color:#fff;font-size:.85rem">'+(i+1)+'. '+l.player+' <span style="color:#777;font-size:.7rem">'+l.team+(l.opp?(' vs '+l.opp):'')+'</span></div>'
-     +'<div style="color:#999;font-size:.72rem;margin-top:2px">'+l.market+(l.line!=null?(' · '+(l.modelOnly?'model threshold ':'line ')+l.line):'')+(l.rate?(' · '+l.rate+'% hit'):'')+_nhlBookBadge(l,l.dir)+'</div>'
+     +'<div style="color:#999;font-size:.72rem;margin-top:2px">'+l.market+(l.line!=null?(' · '+(l.modelOnly?'model threshold ':'line ')+l.line):'')+(l.rate?(' · '+l.rate+'% hit'):'')+_nhlBookBadge(l,l.dir)+_nhlInjuryBadge(l)+'</div>'
     +'</div>'
     +'<button type="button" onclick="replaceNhlParlayLeg('+i+')" title="Generate a new player prop" aria-label="Generate a new player prop" style="flex:0 0 auto;background:#7c3aed;color:#fff;border:0;border-radius:6px;width:25px;height:25px;padding:0;cursor:pointer;font-size:.95rem;font-weight:900;line-height:25px">↻</button>'
     +'</div>'
@@ -6671,7 +6898,7 @@ function _frankAllProps(){
   var seen={},out=[];
   defs.forEach(function(def){
     (raw[def[0]]||[]).forEach(function(p){
-      if(!p||!p.name)return;
+      if(!p||!p.name||_nhlInjuryBlocked(p))return;
       var side=def[1],isOverflow=!!def[2],market=p.formCategory||p.mkt||'Player Prop';
       var line=p.realLine;
       var odds=side==='UNDER'?p.realUnderOdds:p.realOdds;
@@ -6943,7 +7170,7 @@ function _frankRender(question,rows,totalPriced,mode){
   }
   var table=rows.map(function(p,i){
     var sys=window.IS_ADMIN?'<span class="frank-ai-system-tag" style="color:#fb923c">'+_frankEsc(p.poolTag||((p.system||'A')+' T10'))+'</span>':'';
-    return '<tr><td>'+(i+1)+'</td><td><button type="button" class="frank-ai-player-link" onclick="_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button>'+sys+'<br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span></td>'
+    return '<tr><td>'+(i+1)+'</td><td><button type="button" class="frank-ai-player-link" onclick="_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button>'+sys+'<br><span style="color:#64748b">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</span>'+_nhlInjuryBadge(p)+'</td>'
       +'<td>'+_frankEsc(p.market)+'<br><b style="color:'+(p.side==='OVER'?'#4ade80':'#f87171')+'">'+p.side+' '+p.line+'</b></td>'
       +'<td>'+_frankOdds(p.odds)+_nhlBookBadge(p)+'</td><td>'+p.appProb.toFixed(1)+'%</td><td>'+p.implied.toFixed(1)+'%</td>'
       +'<td class="frank-ai-edge" style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'!important">'+_frankSigned(p.edge)+' pts</td></tr>';
@@ -6962,7 +7189,7 @@ function _frankRender(question,rows,totalPriced,mode){
       + '</div>'
       + '<div class="frank-ai-play-name-col" style="flex:1;min-width:0;">'
       + '<div style="font-size:1.4rem;font-weight:900;color:#fff;line-height:1.1;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:Georgia,serif;"><span style="color:#64748b;font-size:1rem;margin-right:6px;">'+(i+1)+'.</span><button type="button" class="frank-ai-player-link" onclick="event.stopPropagation();_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button> '+sys+'</div>'
-      + '<div style="color:#94a3b8;font-size:0.85rem;font-weight:700;">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+'</div>'
+      + '<div style="color:#94a3b8;font-size:0.85rem;font-weight:700;">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+_nhlInjuryBadge(p)+'</div>'
       + '</div>'
       + '<div class="frank-ai-play-side-col" style="text-align:right;flex:0 0 auto;">'
       + '<div style="font-size:1.8rem;font-weight:900;color:'+sideColor+';line-height:1;margin-bottom:4px;white-space:nowrap;">'+p.side+' '+p.line+'</div>'
@@ -7597,11 +7824,34 @@ function _nhlLineSourceBadge(p,side){
   }
   return book;
 }
+function _nhlInjuryInfo(p){
+  return p&&p.injuryStatus?p:(p&&p.source&&typeof p.source==='object'?p.source:(p||{}));
+}
+function _nhlInjuryBlocked(p){
+  var s=_nhlInjuryInfo(p);
+  return s.injuryBlocked===true||s.injuryStatus==='OUT'||s.injuryStatus==='IR';
+}
+function _nhlInjuryBadge(p){
+  var s=_nhlInjuryInfo(p);
+  if(!s.injuryWarning)return '';
+  return '<span style="display:inline-block;color:#fbbf24;font-size:.66rem;font-weight:800" title="'+_nhlSafe((s.injurySource||'ESPN')+' injury report · '+(s.injuryCheckedAt||'time unavailable'))+'"> · '+_nhlSafe(s.injuryWarning)+'</span>';
+}
+function _nhlInjuryNotice(d){
+  var r=d.injuryReport;
+  if(!r||r.status==='NOT_APPLIED')return '';
+  var checked=r.checkedAt?new Date(r.checkedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'not verified';
+  var text=r.status==='READY'
+    ?'Injury check: ESPN · '+checked+' · Out/IR excluded. Questionable/day-to-day players remain with warnings.'
+    :r.status==='STALE'?'Injury feed unavailable · using the report checked at '+checked+'. Verify lineups before betting.'
+    :'Injury check unavailable. Players are not verified healthy—check the confirmed lineup before betting.';
+  return '<div style="margin:0 0 12px;padding:9px 12px;border:1px solid #854d0e;border-radius:8px;color:#fde68a;font-size:.74rem">'+_nhlSafe(text)+'</div>';
+}
 function _nhlLineupBadge(p){
+  var injury=_nhlInjuryBadge(p);
   if(p.lineupStatus==='STARTER_CONFIRMED')
-    return '<span style="color:#34d399;font-size:.64rem;font-weight:800"> · STARTER — CONFIRMED</span>';
-  return p.lineupStatus==='ROSTER_UNCONFIRMED'
-    ?'<span style="color:#fbbf24;font-size:.64rem;font-weight:800"> · ROSTER — UNCONFIRMED</span>':'';
+    return injury+'<span style="color:#34d399;font-size:.64rem;font-weight:800"> · STARTER — CONFIRMED</span>';
+  return injury+(p.lineupStatus==='ROSTER_UNCONFIRMED'
+    ?'<span style="color:#fbbf24;font-size:.64rem;font-weight:800"> · ROSTER — UNCONFIRMED</span>':'');
 }
 function _nhlQualText(p){
   if(p.savedSnapshot)return 'Original selection; split history and projection details were not stored.';
@@ -7685,7 +7935,7 @@ function _hcCard(raw,r){
     +'<div class="hc-row"><span>Market</span><b>'+_nhlSafe(r.mkt)+' · '+line+'</b></div>'
     +'<div class="hc-row"><span>'+(r.savedSnapshot?'Saved form sample':'Last 5 this season (any venue)')+'</span><b>'+_nhlSafe(r.recentHits)+'/'+_nhlSafe(r.recentTotal)+' '+(r.side==='OVER'?'Over':'Under')+' · avg '+_nhlSafe(r.recentAverage)+push+'</b></div>'
     +'<div class="hc-row"><span>Vs '+_nhlSafe(r.opponent)+'</span><b>'+_nhlSafe(opp)+warn+'</b></div>'
-    +'<div class="hc-row"><span>Lineup</span><b>'+(conf?lineup:'<span class="hc-tag hc-warn">'+lineup+'</span>')+'</b></div>'
+    +'<div class="hc-row"><span>Lineup</span><b>'+(conf?lineup:'<span class="hc-tag hc-warn">'+lineup+'</span>')+_nhlInjuryBadge(r)+'</b></div>'
     +'<div class="hc-row"><span>'+r.side+' odds</span><b>'+odds+'</b></div>'
     +'<div class="hc-row"><span>App estimate</span><b>'+prob+'</b></div>'
     +'<div class="hc-row"><span>Edge</span><b>'+edge+'</b></div>'
@@ -8471,6 +8721,8 @@ function renderResults(d){
     if(['A','B','C','D'].indexOf(loadedSystem)>=0)window.NHL_FRANK_SYSTEM=loadedSystem;
     _frankPaintSystemButtons();
   }
+  var injuryNote=_nhlInjuryNotice(d);
+  if(injuryNote)document.getElementById('out').insertAdjacentHTML('afterbegin',injuryNote);
   _nhlLiveSystemVisibility();
   _nhlPaint('');
   if(_nhlLiveRefreshTimer)clearInterval(_nhlLiveRefreshTimer);
@@ -13436,6 +13688,7 @@ async def api_picks(request: Request, target_date: str = None, token: str = "",
     cached = None if simulate else _cache_get("nhl", key)
     if cached:
         cached = await asyncio.to_thread(_nhl_restore_saved_gp, cached, key)
+        cached = await _nhl_refresh_injury_board(cached, key)
         return JSONResponse(cached)
     result = await run_picks(target_date, simulate=simulate)
     if "error" not in result and not simulate:
@@ -15072,6 +15325,7 @@ async def api_nhl_system_board(
             detail=(f"No saved {system} display board or saved selections could be found for {ds}. "
                     "Both display storage and this system's Track Record sources were checked. "
                     "No model rerun was started."))
+    board = await _nhl_refresh_injury_board(board, ds)
     return JSONResponse(board, headers={"Cache-Control": "no-store"})
 
 
@@ -15128,6 +15382,7 @@ async def api_cached(request: Request, target_date: str = None, token: str = "")
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if cached:
+        cached = await _nhl_refresh_injury_board(cached, key)
         return JSONResponse(cached)
     raise HTTPException(status_code=404, detail="No saved picks or board for this date. Get Picks does not rerun models.")
 
