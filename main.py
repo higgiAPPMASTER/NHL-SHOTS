@@ -524,6 +524,230 @@ def _lineup_filtered_rosters(
     return filtered
 
 
+_NHL_DISPLAY_STATS_CACHE: Dict[Tuple, Tuple[float, Dict]] = {}
+
+
+def _nhl_display_number(value):
+    """Missing values remain missing; zero is a genuine reported value."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return number if math.isfinite(number) and number >= 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _nhl_display_selection(date_str: str, game_type: int):
+    try:
+        selected = date.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Date must use YYYY-MM-DD")
+    if selected.year < 2000 or selected.year > date.today().year + 2 or game_type not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail="Invalid NHL date or game type")
+    season = get_season_for_date(selected)
+    return {
+        "date": date_str, "season": season,
+        "seasonLabel": season[:4] + "–" + season[4:],
+        "gameTypeLabel": _NHL_GAME_TYPE_LABELS[game_type],
+        "gameType": game_type,
+        "throughDate": (selected - timedelta(days=1)).isoformat(),
+    }
+
+
+def _nhl_display_cached(key):
+    cached = _NHL_DISPLAY_STATS_CACHE.get(key)
+    if cached and time.monotonic() < cached[0]:
+        return cached[1]
+    return None
+
+
+def _nhl_display_store(key, payload):
+    # Briefly cache incomplete reads; never reuse a different season/date/type.
+    if len(_NHL_DISPLAY_STATS_CACHE) >= 128:
+        oldest = min(_NHL_DISPLAY_STATS_CACHE, key=lambda k: _NHL_DISPLAY_STATS_CACHE[k][0])
+        _NHL_DISPLAY_STATS_CACHE.pop(oldest, None)
+    ttl = 30 if payload.get("unavailable") else 600
+    _NHL_DISPLAY_STATS_CACHE[key] = (time.monotonic() + ttl, payload)
+    return payload
+
+
+async def _nhl_display_report(client, group, report, selection, pid=None):
+    """Separate display fetch. Exact season/type and completed prior dates only."""
+    import urllib.parse
+    expression = (
+        f"seasonId={selection['season']} and gameTypeId={selection['gameType']} "
+        f'and gameDate<="{selection["throughDate"]}"'
+    )
+    if pid is not None:
+        expression += f" and playerId={int(pid)}"
+    query = urllib.parse.urlencode({
+        "isAggregate": "true", "isGame": "false", "start": 0, "limit": 100,
+        "cayenneExp": expression,
+    })
+    try:
+        response = await client.get(f"{NHL_STATS}/{group}/{report}?{query}")
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            raise ValueError("NHL report is missing data")
+        total = _nhl_display_number(data.get("total"))
+        if total is not None and total > len(data["data"]):
+            raise ValueError("NHL display report is incomplete")
+        return data["data"]
+    except (httpx.HTTPError, ValueError, TypeError):
+        logger.warning("NHL display-only %s/%s report unavailable", group, report)
+        return None
+
+
+def _nhl_display_team_abbr(row):
+    abbr = str(row.get("teamAbbrev") or "").upper()
+    if abbr in _NHL_TEAM_FULL:
+        return abbr
+    # NHL IDs survive name changes (notably Utah); no word-overlap matching.
+    ids = {
+        1: "NJD", 2: "NYI", 3: "NYR", 4: "PHI", 5: "PIT", 6: "BOS",
+        7: "BUF", 8: "MTL", 9: "OTT", 10: "TOR", 12: "CAR", 13: "FLA",
+        14: "TBL", 15: "WSH", 16: "CHI", 17: "DET", 18: "NSH", 19: "STL",
+        20: "CGY", 21: "COL", 22: "EDM", 23: "VAN", 24: "ANA", 25: "DAL",
+        26: "LAK", 28: "SJS", 29: "CBJ", 30: "MIN", 52: "WPG",
+        54: "VGK", 55: "SEA", 59: "UTA",
+    }
+    ident = _nhl_display_number(row.get("teamId"))
+    if ident in ids:
+        return ids[ident]
+    name = _nhl_starter_name_key(row.get("teamFullName"))
+    for team, full_name in _NHL_TEAM_FULL.items():
+        if name and name == _nhl_starter_name_key(full_name):
+            return team
+    if name == "utah mammoth":
+        return "UTA"
+    return None
+
+
+def _nhl_display_ratio(numerator, denominator, percent=False, digits=2):
+    n, d = _nhl_display_number(numerator), _nhl_display_number(denominator)
+    if n is None or d is None or d <= 0:
+        return None
+    return round(n / d * (100 if percent else 1), digits)
+
+
+@app.get("/api/nhl/team-context")
+async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: bool = False):
+    """Current selected-season context only. Never run/modify any pick system."""
+    selection = _nhl_display_selection(date_str, game_type)
+    key = ("team-context", date_str, selection["season"], game_type)
+    cached = _nhl_display_cached(key)
+    if cached is not None and not refresh:
+        return JSONResponse(cached)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        reports = await asyncio.gather(*(
+            _nhl_display_report(client, "team", report, selection)
+            for report in ("summary", "powerplay", "penaltykill")
+        ))
+    if all(rows is None for rows in reports):
+        raise HTTPException(status_code=502, detail="Current-season NHL team stats unavailable; retry.")
+    teams = {
+        abbr: dict(abbr=abbr, name=name, gp=0 if reports[0] is not None else None,
+                   sfPG=None, saPG=None, gfPG=None, gaPG=None,
+                   ppForPct=None, ppAgainstPct=None, ppChancesPG=None,
+                   shorthandedPG=None, ppOpportunities=None, shorthandedOpportunities=None)
+        for abbr, name in _NHL_TEAM_FULL.items()
+    }
+    for index, rows in enumerate(reports):
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            abbr = _nhl_display_team_abbr(row)
+            if abbr not in teams:
+                continue
+            team = teams[abbr]
+            if row.get("teamFullName"):
+                team["name"] = str(row["teamFullName"])
+            gp = _nhl_display_number(row.get("gamesPlayed"))
+            if index == 0:
+                team["gp"] = int(gp) if gp is not None else None
+                if gp is not None and gp > 0:
+                    for field, source, total in (
+                        ("sfPG", "shotsForPerGame", "shotsFor"),
+                        ("saPG", "shotsAgainstPerGame", "shotsAgainst"),
+                        ("gfPG", "goalsForPerGame", "goalsFor"),
+                        ("gaPG", "goalsAgainstPerGame", "goalsAgainst"),
+                    ):
+                        value = _nhl_display_number(row.get(source))
+                        if value is None:
+                            value = _nhl_display_ratio(row.get(total), gp)
+                        team[field] = round(value, 2) if value is not None else None
+            else:
+                is_pp = index == 1
+                opportunities = _nhl_display_number(row.get(
+                    "powerPlayOpportunities" if is_pp else "timesShorthanded"))
+                goals = row.get("powerPlayGoalsFor" if is_pp else "powerPlayGoalsAgainst")
+                team["ppOpportunities" if is_pp else "shorthandedOpportunities"] = opportunities
+                rate = _nhl_display_ratio(goals, opportunities, percent=True)
+                if rate is None and opportunities is not None and opportunities > 0:
+                    # Same current-season report only; NHL percentages are fractions.
+                    reported = _nhl_display_number(row.get(
+                        "powerPlayPct" if is_pp else "penaltyKillPct"))
+                    if reported is not None and reported <= 100:
+                        reported = reported * 100 if reported <= 1 else reported
+                        rate = round(reported if is_pp else 100 - reported, 2)
+                team["ppForPct" if is_pp else "ppAgainstPct"] = rate if rate is None or 0 <= rate <= 100 else None
+                team["ppChancesPG" if is_pp else "shorthandedPG"] = _nhl_display_ratio(
+                    opportunities, gp)
+    payload = {**selection, "teams": list(teams.values()),
+               "unavailable": [name for name, rows in
+                               zip(("Team summary", "Power play", "Penalty kill"), reports)
+                               if rows is None]}
+    return JSONResponse(_nhl_display_store(key, payload))
+
+
+@app.get("/api/nhl/player-season-context")
+async def nhl_player_display_context(pid: int, date_str: str, position: str = "F",
+                                    game_type: int = 2, refresh: bool = False):
+    """Display-only season TOI/SV%; never borrow model/career log samples."""
+    selection = _nhl_display_selection(date_str, game_type)
+    if pid <= 0 or position not in ("F", "D", "G"):
+        raise HTTPException(status_code=400, detail="Invalid player or position")
+    key = ("player-context", pid, date_str, selection["season"], game_type, position)
+    cached = _nhl_display_cached(key)
+    if cached is not None and not refresh:
+        return JSONResponse(cached)
+    goalie = position == "G"
+    group = "goalie" if goalie else "skater"
+    names = ("summary",) if goalie else ("summary", "timeonice")
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        reports = await asyncio.gather(*(
+            _nhl_display_report(client, group, name, selection, pid) for name in names))
+    if all(rows is None for rows in reports):
+        raise HTTPException(status_code=502, detail="Current-season player stats unavailable; retry.")
+    # Aggregate report should return the player's single all-team season row.
+    matching = [
+        [row for row in rows or [] if isinstance(row, dict)
+         and str(row.get("playerId")) == str(pid)] for rows in reports
+    ]
+    row = matching[0][0] if len(matching[0]) == 1 else {}
+    gp = _nhl_display_number(row.get("gamesPlayed"))
+    payload = {**selection, "gp": int(gp) if gp is not None else (0 if reports[0] == [] else None),
+               "toiAvgSec": None, "ppToiAvgSec": None, "savePct": None,
+               "goalieGames": int(gp) if goalie and gp is not None else None,
+               "unavailable": [name for name, rows in zip(names, reports) if rows is None]}
+    if gp is not None and gp > 0:
+        if goalie:
+            payload["savePct"] = _nhl_display_ratio(row.get("saves"), row.get("shotsAgainst"), digits=4)
+            if payload["savePct"] is None:
+                payload["savePct"] = _nhl_display_number(row.get("savePct"))
+            if payload["savePct"] is not None and payload["savePct"] > 1:
+                payload["savePct"] = None
+        else:
+            toi = matching[1][0] if len(matching[1]) == 1 else {}
+            payload["toiAvgSec"] = _nhl_display_number(toi.get("timeOnIcePerGame"))
+            if payload["toiAvgSec"] is None:
+                payload["toiAvgSec"] = _nhl_display_number(row.get("timeOnIcePerGame"))
+            payload["ppToiAvgSec"] = _nhl_display_number(toi.get("ppTimeOnIcePerGame"))
+    return JSONResponse(_nhl_display_store(key, payload))
+
+
 async def get_team_sa_map(season: str = "20252026") -> Dict[str, float]:
     """Shots Against Per Game - joins /standings (abbrev) + /team/summary (SA/G)."""
     import urllib.parse
@@ -7829,6 +8053,7 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
     +'<div class="lad-profile"><div class="hs-wrap"><span class="hs-ini">'+_nhlSafe(_initials(p.name))+'</span><img class="hs-img" src="'+_nhlSafe(head)+'" onerror="this.style.display=\\'none\\'"/></div><div><h3>'+_nhlSafe(p.name)+'</h3><div class="lad-profile-team">'+_nhlSafe(p.team||'')+' vs '+_nhlSafe(opponent)+' · '+(p.homeRoad==='H'?'HOME':'AWAY')+'</div></div></div>'
     +'<div style="font-size:.68rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin-bottom:8px">Category history vs '+_nhlSafe(opponent)+'</div>'
     +'<div style="color:#94a3b8;font-size:.65rem;margin-bottom:8px">'+(freshRecords?'Full pregame game-log history':errorText?_nhlSafe(errorText):'Loading full game-log history…')+'</div>'
+    +'<div id="nhl-player-season-context"></div>'
     +_nhlLast5Box(Object.assign({},p,{last5VenueStats:last5}))
     +_nhlHcHistory(p)
     +'<div class="lad-market-grid">'+cards+'</div></div>';
@@ -7836,6 +8061,7 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
   ov.className='lad-ov'; ov.id='nhlLadOv'; ov.onclick=closeNhlLadder;
   ov.innerHTML=html;
   document.body.appendChild(ov);
+  if(typeof nhlPlayerContextMount==='function')nhlPlayerContextMount(p,ov);
   if(freshRecords||errorText)return;
   var raw=window.__NHL_RAW__||{}, dt=raw.targetDate||raw.date||window.__NHL_DATE__||'';
   if(!p.pid||!dt||!p.homeRoad){
@@ -8393,12 +8619,8 @@ function _nhlPaint(q){
   });
   h += '</div>';
 
-  // SA Rankings
-  h += '<div class="sec">- Shots Against / Game Rankings</div><div class="sa-list">';
-  (d.sa_ranks || []).forEach(function(item, i){
-    h += '<div class="sa-badge"><span class="rk">#' + (i+1) + ' ' + item[0] + '</span> <span class="sv">' + item[1].toFixed(1) + '</span></div>';
-  });
-  h += '</div>';
+  // Display-only current-season team stats, independent of model SA factors.
+  h += '<div id="nhl-team-stats"></div>';
 
   // ── Game Predictor ────────────────────────────────────────────────────────
   var _gpPreds = d.game_predictions || [];
@@ -8630,6 +8852,7 @@ function _nhlPaint(q){
   }
 
   document.getElementById('nhlBody').innerHTML = h;
+  nhlTeamStatsMount(raw);
   _nhlHcBind();
   document.querySelectorAll('#nhlBody .nhl-game-jump').forEach(function(card){
     card.onclick=function(){nhlScrollToGameId(card.getAttribute('data-game-id'));};
@@ -12554,6 +12777,253 @@ def _nhl_track_record_payload(system: str = "A", analytics: bool = False) -> dic
             "system": record_system}
 
 
+_NHL_TEAM_STATS_UI = r"""<style>
+.nts-wrap{margin:14px 0;padding:12px;background:#111318;border:1px solid #3a2f12;border-radius:10px;color:#e5e7eb}
+.nts-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-bottom:8px}
+.nts-title{font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#fbbf24}
+.nts-sub{font-size:.62rem;color:#94a3b8}
+.nts-tabs{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+.nts-tab{background:#1a1d24;border:1px solid #2d323c;color:#cbd5e1;border-radius:6px;padding:4px 8px;font-size:.66rem;font-weight:700;cursor:pointer}
+.nts-tab[aria-pressed=true]{background:#fbbf24;color:#1a1305;border-color:#fbbf24}
+.nts-sel{display:none;width:100%;background:#1a1d24;color:#f3f4f6;border:1px solid #fbbf24;border-radius:6px;padding:6px;font-size:.78rem;margin-bottom:8px}
+.nts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:5px}
+.nts-chip{display:flex;justify-content:space-between;gap:6px;align-items:center;background:#1a1d24;border:1px solid #2d323c;border-radius:6px;color:#e5e7eb;padding:5px 7px;font-size:.7rem;cursor:pointer;text-align:left}
+.nts-chip:hover,.nts-chip:focus-visible{border-color:#fbbf24;outline:none}
+.nts-rk{color:#94a3b8;font-size:.6rem;min-width:22px}
+.nts-ab{font-weight:800;flex:1}
+.nts-val{color:#fbbf24;font-weight:700;font-variant-numeric:tabular-nums}
+.nts-na{color:#6b7280;font-weight:600}
+.nts-msg{font-size:.72rem;color:#fca5a5;padding:6px 0}
+.nts-btn{background:#fbbf24;color:#1a1305;border:0;border-radius:6px;padding:4px 10px;font-weight:800;font-size:.68rem;cursor:pointer;margin-left:6px}
+.nts-sk{height:90px;border-radius:8px;background:#1a1d24;opacity:.7}
+.nts-ov{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:100000;display:flex;align-items:center;justify-content:center;padding:10px}
+.nts-modal{background:#14161c;border:1px solid #fbbf24;border-radius:12px;max-width:520px;width:100%;max-height:92dvh;overflow:auto;padding:14px;position:relative;color:#e5e7eb}
+.nts-modal h3{padding-right:55px}
+.nts-x{position:absolute;top:8px;right:8px;background:#1a1d24;border:1px solid #2d323c;color:#e5e7eb;border-radius:6px;padding:4px 9px;cursor:pointer;font-size:.72rem}
+.nts-tbl{width:100%;border-collapse:collapse;font-size:.74rem;margin-top:8px}
+.nts-tbl th,.nts-tbl td{padding:5px 4px;border-bottom:1px solid #262a33;text-align:right}
+.nts-tbl th:first-child,.nts-tbl td:first-child{text-align:left;color:#94a3b8}
+.nts-more{margin-top:8px;font-size:.7rem}.nts-more summary{cursor:pointer;color:#fbbf24}
+.nts-note{font-size:.66rem;color:#94a3b8;margin-top:6px}
+.nps-box{margin:10px 0;padding:8px 10px;background:#111318;border:1px solid #3a2f12;border-radius:8px;font-size:.7rem;color:#cbd5e1}
+.nps-box b{color:#fbbf24}
+.nps-row{display:flex;justify-content:space-between;gap:8px;padding:2px 0}
+@media(max-width:640px){.nts-tabs{display:none}.nts-sel{display:block}.nts-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:3px}.nts-chip{padding:5px 4px;gap:3px;font-size:.64rem}.nts-rk{min-width:17px;font-size:.55rem}.nts-ov{align-items:flex-end;padding:0}.nts-modal{border-radius:12px 12px 0 0}}
+</style>
+<script>
+var _ntsCache={};
+function _ntsEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function _ntsNum(v){return (typeof v==='number'&&isFinite(v))?v:null;}
+function _ntsGet(key,url,force){
+  var c=_ntsCache[key],now=Date.now();
+  if(c&&!force){
+    if(c.promise)return c.promise;
+    if(c.data&&now-c.ts<(c.data.unavailable&&c.data.unavailable.length?30000:600000))return Promise.resolve(c.data);
+  }
+   var p=fetch(url+(force?'&refresh=true':''),{credentials:'include'}).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(function(d){
+    _ntsCache[key]={data:d,ts:Date.now()};return d;
+  },function(e){
+    delete _ntsCache[key];throw e;
+  });
+  _ntsCache[key]={promise:p};
+  return p;
+}
+var _ntsStats=[
+ {k:'saPG',l:'Shots Against',f:1},{k:'sfPG',l:'Shots For',f:1},{k:'gfPG',l:'Goals For',f:2},
+ {k:'gaPG',l:'Goals Against',f:2},{k:'ppForPct',l:'PP For %',f:1,pct:1,den:'ppOpportunities'},
+ {k:'ppAgainstPct',l:'PP Against %',f:1,pct:1,den:'shorthandedOpportunities'}];
+function _ntsVal(t,s){
+  if(!t||_ntsNum(t.gp)===null||t.gp<=0)return null;
+  if(s.den&&!(_ntsNum(t[s.den])>0))return null;
+  return _ntsNum(t[s.k]);
+}
+function _ntsFmt(v,s){if(v===null)return null;return v.toFixed(s.f)+(s.pct?'%':'');}
+function _ntsGameType(raw){
+  var g=(raw&&raw.games)||[],v=null,i,t;
+  for(i=0;i<g.length;i++){
+    t=g[i].gameType;if(t==null)continue;t=String(t);
+    if(v===null)v=t;else if(v!==t)return '2';
+  }
+  return (v==='1'||v==='2'||v==='3')?v:'2';
+}
+function _ntsOpp(raw,ab){
+  var g=(raw&&raw.games)||[],i;
+  for(i=0;i<g.length;i++){
+    if(g[i].homeTeam===ab)return g[i].awayTeam;
+    if(g[i].awayTeam===ab)return g[i].homeTeam;
+  }
+  return null;
+}
+function nhlTeamStatsMount(raw){
+  var el=document.getElementById('nhl-team-stats');
+  if(!el)return;
+  raw=raw||window.__NHL_RAW__||{};
+  var date=raw.targetDate||raw.date||window.__NHL_DATE__||'';
+  var gt=_ntsGameType(raw);
+  var key='team|'+date+'|'+gt;
+  var open=document.getElementById('nts-ov');if(open&&open.__ntsContextKey!==key&&open.__ntsClose)open.__ntsClose();
+  var url='/api/nhl/team-context?date_str='+encodeURIComponent(date)+'&game_type='+gt;
+  el.__ntsKey=key;
+  var sel=0,data=null;
+  function live(){return document.getElementById('nhl-team-stats')===el&&el.__ntsKey===key;}
+  function shell(inner){return '<div class="nts-wrap"><div class="nts-head"><span class="nts-title">Team Matchup Stats</span><span class="nts-sub">'+(data?_ntsEsc(data.seasonLabel)+' - '+_ntsEsc(data.gameTypeLabel):'Current NHL season only')+'</span></div>'+inner+'</div>';}
+  function load(force){
+    el.innerHTML=shell('<div class="nts-sk"></div>');
+    _ntsGet(key,url,force).then(function(d){
+      if(!live())return;
+      if(!d||!d.teams)throw new Error('bad payload');
+      data=d;draw();
+    }).catch(function(){
+      if(!live())return;
+      el.innerHTML=shell('<div class="nts-msg">Team stats unavailable right now.<button type="button" class="nts-btn" id="nts-retry">Retry</button></div>');
+      var b=el.querySelector('#nts-retry');if(b)b.onclick=function(){load(true);};
+    });
+  }
+  function draw(){
+    var s=_ntsStats[sel];
+    var rows=data.teams.map(function(t){return {t:t,v:_ntsVal(t,s)};});
+    var ranked=rows.filter(function(r){return r.v!==null;}).sort(function(a,b){return b.v-a.v;});
+    var na=rows.filter(function(r){return r.v===null;}).sort(function(a,b){return String(a.t.abbr).localeCompare(String(b.t.abbr));});
+    var h='<div class="nts-tabs" role="group" aria-label="Stat">'+_ntsStats.map(function(x,i){return '<button type="button" class="nts-tab" data-i="'+i+'" aria-pressed="'+(i===sel)+'">'+x.l+'</button>';}).join('')+'</div>';
+    h+='<select class="nts-sel" aria-label="Stat">'+_ntsStats.map(function(x,i){return '<option value="'+i+'"'+(i===sel?' selected':'')+'>'+x.l+'</option>';}).join('')+'</select>';
+    h+='<div class="nts-grid">';
+    ranked.concat(na).forEach(function(r,i){
+      var ranked_=r.v!==null;
+      h+='<button type="button" class="nts-chip" data-ab="'+_ntsEsc(r.t.abbr)+'" aria-haspopup="dialog"><span class="nts-rk">'+(ranked_?'#'+(i+1):'--')+'</span><span class="nts-ab">'+_ntsEsc(r.t.abbr)+'</span>'+(ranked_?'<span class="nts-val">'+_ntsFmt(r.v,s)+'</span>':'<span class="nts-na">N/A</span>')+'</button>';
+    });
+    h+='</div><div class="nts-note">'+(s.pct?'Conversion rate':'Per game')+', ranked high to low. N/A teams are unranked. Stats through '+_ntsEsc(data.throughDate||'the day before this game')+'.'+(s.k==='ppAgainstPct'?' PP goals allowed / times shorthanded; lower is better defensively.':'')+(data.unavailable&&data.unavailable.length?' Unavailable: '+data.unavailable.map(_ntsEsc).join(', ')+'. <button type="button" class="nts-btn" id="nts-partial-retry">Retry missing stats</button>':'')+'</div>';
+    el.innerHTML=shell(h);
+    el.querySelectorAll('.nts-tab').forEach(function(b){b.onclick=function(){sel=+b.getAttribute('data-i');draw();};});
+    var se=el.querySelector('.nts-sel');if(se)se.onchange=function(){sel=+se.value;draw();};
+    el.querySelectorAll('.nts-chip').forEach(function(b){b.onclick=function(){openModal(b.getAttribute('data-ab'),b);};});
+    var retry=el.querySelector('#nts-partial-retry');if(retry)retry.onclick=function(){load(true);};
+  }
+  function openModal(ab,opener){
+    var prev=document.getElementById('nts-ov');if(prev){if(prev.__ntsClose)prev.__ntsClose();else prev.remove();}
+    var team=null,oppAb=_ntsOpp(raw,ab),opp=null;
+    data.teams.forEach(function(t){if(t.abbr===ab)team=t;if(t.abbr===oppAb)opp=t;});
+    if(!team)return;
+    var cols=[team];if(oppAb)cols.push(opp||{abbr:oppAb,missing:true});
+    function cell(t,s){if(t.missing)return '<span class="nts-na">N/A</span>';var f=_ntsFmt(_ntsVal(t,s),s);return f===null?'<span class="nts-na">N/A</span>':f;}
+    var order=[1,0,2,3,4,5];
+    var h='<h3 id="nts-ttl" style="margin:0 0 2px;font-size:.95rem;color:#fbbf24">'+_ntsEsc(team.name||team.abbr)+(oppAb?' vs '+_ntsEsc(opp&&opp.name?opp.name:oppAb):'')+'</h3>';
+    h+='<div class="nts-sub">'+_ntsEsc(data.seasonLabel)+' only - '+_ntsEsc(data.gameTypeLabel)+' - through '+_ntsEsc(data.throughDate||'previous day')+'</div>';
+    if(!oppAb)h+='<div class="nts-note">No game today for '+_ntsEsc(ab)+', so no opponent comparison. Showing team stats alone.</div>';
+    h+='<table class="nts-tbl"><thead><tr><th>Stat</th>'+cols.map(function(t){return '<th>'+_ntsEsc(t.abbr)+'</th>';}).join('')+'</tr></thead><tbody>';
+    order.forEach(function(i){var s=_ntsStats[i];h+='<tr><td>'+s.l+'</td>'+cols.map(function(t){return '<td>'+cell(t,s)+'</td>';}).join('')+'</tr>';});
+    h+='<tr><td>Games played</td>'+cols.map(function(t){var g=_ntsNum(t.gp);return '<td>'+(g===null?'<span class="nts-na">N/A</span>':g)+'</td>';}).join('')+'</tr></tbody></table>';
+    function ex(t,k){var v=_ntsNum(t[k]);return (t.missing||v===null||!(_ntsNum(t.gp)>0))?'<span class="nts-na">N/A</span>':v.toFixed(2);}
+    h+='<details class="nts-more"><summary>More context</summary><table class="nts-tbl"><tbody>'
+      +'<tr><td>PP opportunities / game</td>'+cols.map(function(t){return '<td>'+ex(t,'ppChancesPG')+'</td>';}).join('')+'</tr>'
+      +'<tr><td>Times shorthanded / game</td>'+cols.map(function(t){return '<td>'+ex(t,'shorthandedPG')+'</td>';}).join('')+'</tr></tbody></table></details>';
+    h+='<div class="nts-note">PP For = PP goals scored / opportunities. PP Against = PP goals allowed / times shorthanded (100% minus PK%). Missing data or no opportunities: N/A. Context only; picks and records unchanged.</div>';
+    var ov=document.createElement('div');ov.className='nts-ov';ov.id='nts-ov';
+    ov.__ntsContextKey=key;
+    ov.innerHTML='<div class="nts-modal" role="dialog" aria-modal="true" aria-labelledby="nts-ttl" tabindex="-1"><button type="button" class="nts-x" aria-label="Close">Close</button>'+h+'</div>';
+    document.body.appendChild(ov);
+    var m=ov.firstChild;
+    function close(){document.removeEventListener('keydown',onKey,true);ov.remove();if(opener&&opener.focus)opener.focus();}
+    ov.__ntsClose=close;
+    function onKey(e){
+      if(e.key==='Escape'){e.stopPropagation();close();return;}
+      if(e.key==='Tab'){
+        var f=m.querySelectorAll('button,summary,[tabindex]');if(!f.length)return;
+        var a=f[0],z=f[f.length-1];
+        if(e.shiftKey&&document.activeElement===a){e.preventDefault();z.focus();}
+        else if(!e.shiftKey&&document.activeElement===z){e.preventDefault();a.focus();}
+      }
+    }
+    document.addEventListener('keydown',onKey,true);
+    ov.onclick=function(e){if(e.target===ov)close();};
+    m.querySelector('.nts-x').onclick=close;
+    m.querySelector('.nts-x').focus();
+  }
+  load(false);
+}
+function _npsGroup(p){
+  if(typeof _nhlPositionGroup==='function')return _nhlPositionGroup(p);
+  var s=String(p.positionGroup||p.position||p.pos||'').toUpperCase().charAt(0);
+  return s==='G'?'G':s==='D'?'D':'F';
+}
+function _npsConfirmed(p,raw){
+  if(p.starterStatus==='confirmed'||p.starterConfirmed===true)return true;
+  if(p.lineupStatus==='STARTER_CONFIRMED'&&p.starterSource)return true;
+  var g=(raw&&raw.games)||[],i,sg,e,j;
+  for(i=0;i<g.length;i++){
+    if(g[i].homeTeam!==p.team&&g[i].awayTeam!==p.team)continue;
+    sg=g[i].startingGoalies&&g[i].startingGoalies[p.team];
+    if(!sg)continue;
+    e=Array.isArray(sg)?sg:[sg];
+    for(j=0;j<e.length;j++){
+      var x=e[j];
+      if(x&&String(x.pid||x.playerId||x.id)===String(p.pid)&&(x.confirmed===true||String(x.status||'').toLowerCase()==='confirmed'))return true;
+      if(x&&x.source==='Daily Faceoff'&&x.confirmedAt&&_npsName(x.name)===_npsName(p.name))return true;
+    }
+  }
+  return false;
+}
+function _npsName(v){return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();}
+function _npsMin(sec){var v=_ntsNum(sec);if(v===null||v<0)return null;var m=Math.floor(v/60),s=Math.round(v-m*60);if(s===60){m++;s=0;}return m+':'+(s<10?'0':'')+s;}
+function _npsPub(p,k,date){
+  var v=p[k];if(v==null||v==='')return null;
+  var src=k==='systemDUnit'?p.systemDLineSource:p.ppUnitSource;
+  var upd=k==='systemDUnit'?p.systemDLineUpdatedAt:p.ppUnitUpdatedAt;
+  var stamp=String(upd||'').slice(0,10),d=new Date(date+'T12:00:00Z'),u=new Date(stamp+'T12:00:00Z');
+  var start=d.getUTCFullYear()-(d.getUTCMonth()<6?1:0),days=(d-u)/86400000;
+  if(!src||!stamp||!isFinite(days)||days<-1||days>2||stamp<String(start)+'-07-01')return null;
+  return String(v);
+}
+function nhlPlayerContextMount(p,overlay){
+  if(!p||!overlay)return;
+  var el=overlay.querySelector('#nhl-player-season-context');
+  if(!el)return;
+  var raw=window.__NHL_RAW__||{};
+  var date=raw.targetDate||raw.date||window.__NHL_DATE__||'';
+  var gt=_ntsGameType(raw),pos=_npsGroup(p);
+  var key='player|'+p.pid+'|'+date+'|'+gt+'|'+pos;
+  el.__npsKey=key;
+  function live(){return overlay.isConnected&&overlay.contains(el)&&el.__npsKey===key;}
+  function row(l,v){return '<div class="nps-row"><span>'+l+'</span><span>'+(v===null||v===undefined?'<span class="nts-na">N/A</span>':_ntsEsc(v))+'</span></div>';}
+  function box(label,inner){el.innerHTML='<div class="nps-box"><b>Current season context</b>'+(label?' <span class="nts-sub">'+_ntsEsc(label)+'</span>':'')+inner+'</div>';}
+  if(pos==='G'&&!_npsConfirmed(p,raw)){
+    box('',row('Starter','Unconfirmed')+row('Season SV%',null)+row('Appearances',null));
+    return;
+  }
+  var url='/api/nhl/player-season-context?pid='+encodeURIComponent(p.pid)+'&date_str='+encodeURIComponent(date)+'&game_type='+gt+'&position='+pos;
+  function load(force){
+    box('','<div class="nts-sk" style="height:48px;margin-top:6px"></div>');
+    _ntsGet(key,url,force).then(function(d){
+      if(!live())return;
+      if(!d)throw new Error('bad payload');
+      var lab=(d.seasonLabel||'')+(d.gameTypeLabel?' - '+d.gameTypeLabel:'');
+      var gp=_ntsNum(d.gp)>0?d.gp:null;
+      if(pos==='G'){
+        var gg=_ntsNum(d.goalieGames)>0?d.goalieGames:null,sv=gg!==null?_ntsNum(d.savePct):null;
+        var svs=sv===null?null:(sv<=1?sv.toFixed(3):(sv/100).toFixed(3));
+        box(lab,row('Starter','Confirmed')+row('Season SV%',svs)+row('Appearances',gg));
+      }else{
+        var up=_npsPub(p,'ppUnit',date),dd=_npsPub(p,'systemDUnit',date);
+        box(lab,row('Games played',_ntsNum(d.gp))+row('Avg ice time',gp?_npsMin(d.toiAvgSec):null)+row('Avg PP ice time',gp?_npsMin(d.ppToiAvgSec):null)+row('PP unit',up)+row('Published line / pair',dd));
+      }
+      if(d.unavailable&&d.unavailable.length){
+        var note=document.createElement('div');note.className='nts-note';note.textContent='Unavailable: '+d.unavailable.join(', ')+'.';
+        var retry=document.createElement('button');retry.type='button';retry.className='nts-btn';retry.textContent='Retry missing stats';retry.onclick=function(e){e.stopPropagation();load(true);};note.appendChild(retry);el.appendChild(note);
+      }
+    }).catch(function(){
+      if(!live())return;
+      box('','<div class="nts-msg">Season context unavailable.<button type="button" class="nts-btn" id="nps-retry">Retry</button></div>');
+      var b=el.querySelector('#nps-retry');if(b)b.onclick=function(e){e.stopPropagation();load(true);};
+    });
+  }
+  load(false);
+}
+</script>
+"""
+
+
 _NHL_DAY_REPORT_UI = r"""
 <style>
 .ndr{max-width:960px;margin:0 auto;padding:0 16px 40px}
@@ -12792,7 +13262,8 @@ _DASHBOARD_FALLBACK_HTML = """<!doctype html>
 def _render_dashboard_shell(is_admin: bool) -> str:
     """Render the member page without allowing a template error to become 500."""
     try:
-        page = HTML.replace("</body>", _NHL_DAY_REPORT_UI + "</body>", 1)
+        page = HTML.replace("</head>", _NHL_TEAM_STATS_UI + "</head>", 1)
+        page = page.replace("</body>", _NHL_DAY_REPORT_UI + "</body>", 1)
         if not isinstance(page, str) or not page.strip():
             raise RuntimeError("NHL dashboard HTML is empty or invalid")
         js_flag = "true" if is_admin else "false"
