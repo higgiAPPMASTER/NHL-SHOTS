@@ -10317,6 +10317,79 @@ _NHL_TRK_LISTS = [
       for result_key, overflow in ((key, False), (key + "Rest", True))],
 ]
 
+def _nhl_cap_record_rows(rows: list) -> list:
+    """Daily category/side ownership: 10 main + next 10 overflow, including Locks."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    locks = defaultdict(list)
+    for index, original in enumerate(rows or []):
+        row = dict(original)
+        row["side"] = str(row.get("side") or "OVER").upper()
+        if row.get("category") == "80-100% Locks":
+            locks[(row["side"], bool(row.get("is_overflow")))].append((index, row))
+        else:
+            groups[(row.get("category"), row["side"])].append((index, row))
+
+    def rank_key(item):
+        index, row = item
+        overflow = bool(row.get("is_overflow"))
+        try:
+            rank = int(row.get("rank"))
+        except (TypeError, ValueError):
+            rank = index + 1
+        if overflow and rank <= _NHL_TRK_TOP:
+            rank += _NHL_TRK_TOP
+        return rank, overflow, index
+
+    def identity(row):
+        return (row.get("name") or str(row.get("pid") or ""),
+                row.get("team"), row.get("stat_key"), row.get("side"),
+                str(row.get("line")))
+
+    out = []
+    ownership = {}
+    for entries in groups.values():
+        seen = set()
+        counts = {False: 0, True: 0}
+        for _, row in sorted(entries, key=rank_key):
+            key = identity(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            overflow = bool(row.get("is_overflow")) or counts[False] >= _NHL_TRK_TOP
+            if counts[overflow] >= _NHL_TRK_TOP:
+                continue
+            counts[overflow] += 1
+            rank = counts[overflow] + (_NHL_TRK_TOP if overflow else 0)
+            row.update(rank=rank, is_overflow=overflow)
+            out.append(row)
+            ownership.setdefault(key, row["is_overflow"])
+
+    # Locks duplicate the source market but retain its pool. Never move a
+    # main-market pick into Overflow just to fill the Locks overflow list.
+    lock_groups = defaultdict(list)
+    for (side, overflow), entries in locks.items():
+        for index, row in entries:
+            key = identity(row)
+            if groups and key not in ownership:
+                continue
+            pool = ownership.get(key, overflow)
+            row["is_overflow"] = pool
+            lock_groups[(side, pool)].append((index, row))
+    for (side, overflow), entries in lock_groups.items():
+        seen = set()
+        for _, row in sorted(entries, key=rank_key):
+            key = identity(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            if len(seen) > _NHL_TRK_TOP:
+                break
+            row["rank"] = len(seen) + (_NHL_TRK_TOP if overflow else 0)
+            out.append(row)
+    return out
+
+
 def _nhl_save_picks_snapshot(
         date_str: str, result: dict, snapshot_category: str = _NHL_SNAP_CAT):
     """Freeze all pick lists to Supabase so they survive redeploys and can be graded."""
@@ -10329,7 +10402,8 @@ def _nhl_save_picks_snapshot(
         for team in (game.get("homeTeam"), game.get("awayTeam"))
         if team
     }
-    existing = _nhl_load_picks_snapshot(date_str, snapshot_category)
+    existing_raw = _nhl_load_picks_snapshot(date_str, snapshot_category)
+    existing = _nhl_cap_record_rows(existing_raw)
     frozen_teams = {p.get("team") for p in existing if p.get("team")}
     frozen_pm_sides = {
         (p.get("team"), str(p.get("side") or "OVER").upper())
@@ -10344,17 +10418,16 @@ def _nhl_save_picks_snapshot(
                           for p in existing if p.get("category") in form_labels}
     result = {**result, **_nhl_form_pick_groups(result)}
     flat = []
-    form_counts = defaultdict(int)
+    record_counts = defaultdict(int)
     for p in existing:
-        if p.get("category") in form_labels:
-            form_counts[(p.get("category"), p.get("side"), bool(p.get("is_overflow")))] += 1
+        record_counts[(p.get("category"), p.get("side"), bool(p.get("is_overflow")))] += 1
     for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
         rank_start = _NHL_TRK_TOP + 1 if ovf else 1
-        for rank, p in enumerate(result.get(rkey) or [], rank_start):
+        for rank, p in enumerate((result.get(rkey) or [])[:_NHL_TRK_TOP], rank_start):
             team = p.get("team")
             if team not in pregame_teams:
                 continue
-            if cat in form_labels and form_counts[(cat, side, ovf)] >= 10:
+            if record_counts[(cat, side, ovf)] >= _NHL_TRK_TOP:
                 continue
             # Skater picks remain frozen at first capture. A starter confirmed
             # later can still enter the official Saves record before puck drop,
@@ -10398,16 +10471,16 @@ def _nhl_save_picks_snapshot(
             })
             if cat in form_labels:
                 flat[-1].update({key: p.get(key) for key in _NHL_FORM_META})
-                form_counts[(cat, side, ovf)] += 1
+            record_counts[(cat, side, ovf)] += 1
             if cat == "Goalie Saves":
                 frozen_goalie_sides.add((team, side))
-    if flat or (pregame_teams and not existing):
+    if flat or existing != existing_raw or (pregame_teams and not existing):
         ok = _nhl_sb_upsert(
             "mpa_track_ledger",
             [{"app": _NHL_TRK_APP, "date": date_str,
               "category": snapshot_category,
               "side": "ALL", "wins": 0, "losses": 0, "locked": False,
-              "detail": existing + flat}],
+              "detail": _nhl_cap_record_rows(existing + flat)}],
             "app,date,category,side")
         print(f"[nhl_track] snapshot {'saved' if ok else 'FAILED'}: "
               f"{len(flat)} picks -> {date_str}")
@@ -11202,6 +11275,7 @@ def _nhl_slate_finished(date_str: str, snap: list) -> bool:
         return False
 
 def _nhl_grade_date(date_str: str, snap: list) -> dict:
+    snap = _nhl_cap_record_rows(snap)
     if not _nhl_slate_finished(date_str, snap):
         return {"any_game": bool(snap), "all_final": False,
                 "main": [], "overflow": [], "locks": []}
@@ -11307,6 +11381,12 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
             - date.fromisoformat(date_str)).days >= 2
     except ValueError:
         mature_logs = False
+    capped_rows = _nhl_cap_record_rows(main_rows + ovf_rows + lock_rows)
+    main_rows = [row for row in capped_rows
+                 if row["category"] != "80-100% Locks" and not row["is_overflow"]]
+    ovf_rows = [row for row in capped_rows
+               if row["category"] != "80-100% Locks" and row["is_overflow"]]
+    lock_rows = [row for row in capped_rows if row["category"] == "80-100% Locks"]
     return {"any_game": any_game,
             # Once the whole schedule is final and logs have had two days to
             # settle, a team with only scratched picks need not block forever.
@@ -12325,7 +12405,7 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
     result = []
     for d in dates:
         det = _split_detail(detail_by_date.get(d, []), snapshot_by_date.get(d, []))
-        snapshot = snapshot_by_date.get(d) or []
+        snapshot = _nhl_cap_record_rows(snapshot_by_date.get(d) or [])
         recorded_teams = {r.get("team") for r in det if r.get("team")}
         snapshot_teams = {p.get("team") for p in snapshot if p.get("team")}
         if snapshot and (not det or (d not in fully_graded_dates
@@ -12339,7 +12419,7 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
                         row.get("stat_key"), str(row.get("line")),
                         row.get("rank"), bool(row.get("is_overflow")))
             existing = {_key(row) for row in det}
-            for p in snapshot_by_date[d]:
+            for p in snapshot:
                 pending_row = {
                     "name": p.get("name", ""), "team": p.get("team", ""),
                     "category": p.get("category", "?"), "side": p.get("side", "OVER"),
@@ -12360,6 +12440,7 @@ def _nhl_track_record_payload(system: str = "A") -> dict:
                     if _key(lock_row) not in existing:
                         det.append(lock_row)
                         existing.add(_key(lock_row))
+        det = _nhl_cap_record_rows(det)
         main_det = [row for row in det if not row.get("is_overflow")]
         overflow_det = [row for row in det if row.get("is_overflow")]
         gp = _nhl_gp_summary(gp_by_date[d]) if d in gp_by_date else None
