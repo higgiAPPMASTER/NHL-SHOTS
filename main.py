@@ -2789,11 +2789,35 @@ def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
     return output
 
 
+def _nhl_limit_form_groups(groups: dict) -> dict:
+    """Same form ranking as the cards: 10 main, next 10 overflow per category."""
+    limited = {}
+    for key, *_ in _NHL_FORM_SPECS:
+        rows = list(groups.get(key) or []) + list(groups.get(key + "Rest") or [])
+        seen, unique = set(), []
+        for row in rows:
+            identity = (str(row.get("pid")), row.get("team"), row.get("side"),
+                        row.get("dispLine"))
+            if identity not in seen:
+                seen.add(identity)
+                unique.append(row)
+        if unique and all(row.get("savedSnapshot") for row in unique):
+            unique.sort(key=lambda row: float(row.get("savedRank") or 999999))
+        else:
+            unique.sort(key=lambda row: (
+                -float(row.get("recentHits") or 0), -bool(row.get("matchupSupports")),
+                str(row.get("name") or "").casefold(), int(row.get("pid") or 0)))
+        limited[key] = unique[:10]
+        limited[key + "Rest"] = unique[10:20]
+    return limited
+
+
 def _nhl_form_pick_groups(board: dict) -> dict:
     """Expose every generated form prop in its category; never invent a quote."""
-    groups = {key: list(board.get(key) or []) for key, *_ in _NHL_FORM_SPECS}
+    groups = {result_key: list(board.get(result_key) or [])
+              for key, *_ in _NHL_FORM_SPECS for result_key in (key, key + "Rest")}
     if not isinstance(board.get("hotColdPlayers"), list):
-        return groups
+        return _nhl_limit_form_groups(groups)
     groups = {key: [] for key, *_ in _NHL_FORM_SPECS}
     form_labels = {spec[1] for spec in _NHL_FORM_SPECS}
     starts = {team: g.get("startTime") for g in board.get("games") or []
@@ -2835,7 +2859,7 @@ def _nhl_form_pick_groups(board: dict) -> dict:
             pick["edge"] = (round(probability - implied, 2)
                             if probability is not None and implied is not None else None)
             groups[key].append(pick)
-    return groups
+    return _nhl_limit_form_groups(groups)
 
 
 def _nhl_history_profile(player: Dict, full_logs: List[Dict],
@@ -6313,7 +6337,9 @@ var _NHL_FORM_TYPES=[
 function _nhlFormGroups(raw){
   var groups={};
   _NHL_FORM_TYPES.forEach(function(form){
-    if(Array.isArray(raw[form.key])){groups[form.key]=raw[form.key];return;}
+    if(Array.isArray(raw[form.key])){
+      groups[form.key]=(raw[form.key]||[]).concat(raw[form.key+'Rest']||[]);return;
+    }
     groups[form.key]=(raw.hotColdPlayers||[]).filter(function(p){
       return p.marketKey===form.stat&&p.side===form.side&&(form.key.indexOf('doubleCold')!==0||p.doubleCold);
     }).map(function(p){
@@ -6339,7 +6365,35 @@ function _nhlFormGroups(raw){
         edge:probability!=null&&implied!=null?Number(probability)-Number(implied):null});
     });
   });
+  _NHL_FORM_TYPES.forEach(function(form){
+    var seen={};
+    var rows=(groups[form.key]||[]).filter(function(p){
+      var id=String(p.pid)+'|'+String(p.team)+'|'+String(p.side)+'|'+String(p.dispLine);
+      if(seen[id])return false;seen[id]=true;return true;
+    });
+    if(rows.length&&rows.every(function(p){return p.savedSnapshot;})){
+      rows.sort(function(a,b){return Number(a.savedRank||999999)-Number(b.savedRank||999999);});
+    }else{
+      rows.sort(function(a,b){
+        return Number(b.recentHits||0)-Number(a.recentHits||0)
+          ||Number(!!b.matchupSupports)-Number(!!a.matchupSupports)||_hcCmp(a,b);
+      });
+    }
+    groups[form.key]=rows.slice(0,10);
+    groups[form.key+'Rest']=rows.slice(10,20);
+  });
   return groups;
+}
+function _nhlFormVisibleRows(raw,overflow){
+  var groups=_nhlFormGroups(raw),rows=[];
+  _NHL_FORM_TYPES.forEach(function(form){
+    if(_nhlHcForm==='HOT'&&form.key.indexOf('hot')!==0)return;
+    if(_nhlHcForm==='COLD'&&form.key.indexOf('cold')!==0)return;
+    if(_nhlHcForm==='DOUBLE'&&form.key.indexOf('doubleCold')!==0)return;
+    if(_nhlHcMarket!=='ALL'&&form.stat!==_nhlHcMarket)return;
+    rows=rows.concat(groups[form.key+(overflow?'Rest':'')]||[]);
+  });
+  return rows.filter(function(p){return _nhlRowUpcoming(p,raw)&&_nhlPositionMatches(p);});
 }
 function _frankMarketKey(market){
   var m=String(market||'').toLowerCase();
@@ -6368,7 +6422,10 @@ function _frankAllProps(){
     ['astUnders','UNDER',false],['astUndersRest','UNDER',true],['goalUnders','UNDER',false],
     ['goalUndersRest','UNDER',true],['savesUnders','UNDER',false],['savesUndersRest','UNDER',true]
   ];
-  _NHL_FORM_TYPES.forEach(function(form){defs.push([form.key,form.side,false]);});
+  _NHL_FORM_TYPES.forEach(function(form){
+    defs.push([form.key,form.side,false]);
+    defs.push([form.key+'Rest',form.side,true]);
+  });
   var seen={},out=[];
   defs.forEach(function(def){
     (raw[def[0]]||[]).forEach(function(p){
@@ -7401,13 +7458,11 @@ function _nhlHcBind(){
   });
 }
 function _nhlHotColdSection(raw,rows,q){
-  var groups=_nhlFormGroups(raw);
-  rows=rows.map(function(row){
-    var key=(row.form==='HOT'?'hot':_nhlHcForm==='DOUBLE'?'doubleCold':'cold')+(row.marketKey==='shots'?'Shots':'Points');
-    return (groups[key]||[]).find(function(p){return String(p.pid)===String(row.pid)&&p.dispLine===row.dispLine;})||row;
+  rows=_nhlFormVisibleRows(raw,false).filter(function(p){
+    return !q||String(p.name||'').toLowerCase().indexOf(q)>=0;
   });
   var h='<div id="nhl-section-hotcold" class="nhl-scroll-anchor"></div><section class="hc-sec" aria-labelledby="hcTitle"><div class="sec" id="hcTitle">Hot and Cold Players</div>';
-  h+='<p class="hc-note">Form uses the true last five chronological games at all venues, before this game. 4/5 is history, not an 80% prediction. Pushes are not wins. This differs from the venue-matched Last 5 box in Game Log. Every generated form prop is tracked in its category and available in the parlay builders. My Bets requires genuine odds; priced Coach lists also require positive model edge. Double Cold also appears in Cold.</p>';
+  h+='<p class="hc-note">Top 10 per category; ranks 11–20 are in Overflow. Only these 20 plays per category enter tracking and parlay pools. Form uses the true last five chronological games at all venues, before this game. 4/5 is history, not an 80% prediction. Pushes are not wins. This differs from the venue-matched Last 5 box in Game Log. My Bets requires genuine odds; priced Coach lists also require positive model edge. Double Cold also appears in Cold.</p>';
   function grp(label,kind,cur,opts){
     return '<div class="hc-grp" role="group" aria-label="'+label+'"><span>'+label+'</span>'+opts.map(function(o){
       return '<button type="button" class="hc-btn" aria-pressed="'+(cur===o[0])+'" onclick="_nhlHcSet(&quot;'+kind+'&quot;,&quot;'+o[0]+'&quot;)">'+o[1]+'</button>';
@@ -7422,8 +7477,15 @@ function _nhlHotColdSection(raw,rows,q){
   var lists=[['shots','Shots on Goal'],['points','Points (1+)']].filter(function(m){return _nhlHcMarket==='ALL'||_nhlHcMarket===m[0];});
   lists.forEach(function(m){
     var list=_hcRows(rows,m[0]);
-    h+='<div class="hc-sub">'+m[1]+' ('+list.length+')</div>';
+    h+='<div class="hc-sub">'+m[1]+' · Top 10 ('+list.length+')</div>';
     h+=list.length?'<div class="hc-grid">'+list.map(function(r){return _hcCard(raw,r);}).join('')+'</div>':'<div class="hc-note">No qualifying players.</div>';
+    var overflow=_hcRows(_nhlFormVisibleRows(raw,true).filter(function(p){
+      return !q||String(p.name||'').toLowerCase().indexOf(q)>=0;
+    }),m[0]);
+    if(overflow.length){
+      h+='<details style="margin:12px 0"><summary style="cursor:pointer;color:#fb923c;font-weight:700;font-size:.78rem">Overflow · ranks 11–20 ('+overflow.length+')</summary>'
+        +'<div class="hc-grid" style="margin-top:12px">'+overflow.map(function(r){return _hcCard(raw,r);}).join('')+'</div></details>';
+    }
   });
   return h+'</section>';
 }
@@ -8288,7 +8350,7 @@ function _nhlPaint(q){
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToAssists()" role="button" tabindex="0"><div class="val">' + ((d.astPicks||[]).length) + '</div><div class="lbl">Assists</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToGoals()" role="button" tabindex="0"><div class="val">' + ((d.goalPicks||[]).length) + '</div><div class="lbl">Goals</div></div>' +
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToSaves()" role="button" tabindex="0"><div class="val">' + ((d.savesPicks||[]).length) + '</div><div class="lbl">Saves</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToHotCold()" onkeydown="if(event.key===&quot;Enter&quot;||event.key===&quot; &quot;){event.preventDefault();nhlJumpToHotCold();}" role="button" tabindex="0" aria-label="Jump to Hot and Cold Players"><div class="val">' + (Array.isArray(d.hotColdPlayers)?d.hotColdPlayers.length:'n/a') + '</div><div class="lbl">Hot/Cold</div></div>' +
+    '<div class="chip nhl-jump-chip" onclick="nhlJumpToHotCold()" onkeydown="if(event.key===&quot;Enter&quot;||event.key===&quot; &quot;){event.preventDefault();nhlJumpToHotCold();}" role="button" tabindex="0" aria-label="Jump to Hot and Cold Players"><div class="val">' + _nhlFormVisibleRows(d,false).length + '</div><div class="lbl">Hot/Cold</div></div>' +
     '</div>';
   _nhlHcRegistry={};
   h += _nhlHotColdSection(d,(d.hotColdPlayers||[]).filter(_nhlPositionMatches).filter(function(p){return !q||(p.name||'').toLowerCase().indexOf(q)>=0;}),q);
@@ -8467,6 +8529,7 @@ function _nhlPaint(q){
   var formPlays=[];
   _NHL_FORM_TYPES.forEach(function(form){
     formPlays=formPlays.concat(_f(formGroups[form.key]).map(function(p){return Object.assign({},p,{mkt:form.label});}));
+    formPlays=formPlays.concat(_f(formGroups[form.key+'Rest']).map(function(p){return Object.assign({},p,{mkt:form.label,formOverflow:true});}));
   });
   var allPlays = (d.picks||[]).concat(d.rest||[])
     .concat(d.ptsPicks||[]).concat(d.ptsRest||[])
@@ -8563,6 +8626,7 @@ function _nhlPaint(q){
     .concat(_nhlParlaySide(raw.savesUnders,'UNDER')).concat(_nhlParlaySide(raw.savesUndersRest,'UNDER'));
   _NHL_FORM_TYPES.forEach(function(form){
     window.__NHL_PLAYS__=window.__NHL_PLAYS__.concat(_nhlParlaySide(formGroups[form.key],form.side));
+    window.__NHL_PLAYS__=window.__NHL_PLAYS__.concat(_nhlParlaySide(formGroups[form.key+'Rest'],form.side));
   });
   _renderNhlParlayGames();
   _renderNhlParlayCoachCats();
@@ -10242,7 +10306,9 @@ _NHL_TRK_LISTS = [
     ("savesRest",       "Goalie Saves",  "SAVES",  "OVER",  True),
     ("savesUnders",     "Goalie Saves",  "SAVES",  "UNDER", False),
     ("savesUndersRest", "Goalie Saves",  "SAVES",  "UNDER", True),
-    *[(key, label, stat, side, False) for key, label, _, stat, side, _ in _NHL_FORM_SPECS],
+    *[(result_key, label, stat, side, overflow)
+      for key, label, _, stat, side, _ in _NHL_FORM_SPECS
+      for result_key, overflow in ((key, False), (key + "Rest", True))],
 ]
 
 def _nhl_save_picks_snapshot(
@@ -10271,11 +10337,17 @@ def _nhl_save_picks_snapshot(
                           for p in existing if p.get("category") in form_labels}
     result = {**result, **_nhl_form_pick_groups(result)}
     flat = []
+    form_counts = defaultdict(int)
+    for p in existing:
+        if p.get("category") in form_labels:
+            form_counts[(p.get("category"), p.get("side"), bool(p.get("is_overflow")))] += 1
     for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
         rank_start = _NHL_TRK_TOP + 1 if ovf else 1
         for rank, p in enumerate(result.get(rkey) or [], rank_start):
             team = p.get("team")
             if team not in pregame_teams:
+                continue
+            if cat in form_labels and form_counts[(cat, side, ovf)] >= 10:
                 continue
             # Skater picks remain frozen at first capture. A starter confirmed
             # later can still enter the official Saves record before puck drop,
@@ -10319,6 +10391,7 @@ def _nhl_save_picks_snapshot(
             })
             if cat in form_labels:
                 flat[-1].update({key: p.get(key) for key in _NHL_FORM_META})
+                form_counts[(cat, side, ovf)] += 1
             if cat == "Goalie Saves":
                 frozen_goalie_sides.add((team, side))
     if flat or (pregame_teams and not existing):
@@ -13769,7 +13842,7 @@ def _nhl_board_from_saved_selections(date_str: str, system: str):
             continue
         category = str(row.get("category") or "")
         if category == "NHL Overflow":
-            category = stat_categories.get(row.get("stat_key"), "")
+            category = row.get("formCategory") or stat_categories.get(row.get("stat_key"), "")
         side = str(row.get("side") or "").upper()
         rank = _nhl_saved_number(row.get("rank"))
         overflow = (bool(row["is_overflow"]) if "is_overflow" in row else
