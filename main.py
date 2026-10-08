@@ -10320,6 +10320,7 @@ _NHL_TRK_LISTS = [
 def _nhl_save_picks_snapshot(
         date_str: str, result: dict, snapshot_category: str = _NHL_SNAP_CAT):
     """Freeze all pick lists to Supabase so they survive redeploys and can be graded."""
+    from collections import defaultdict
     games = result.get("games") or []
     pregame_teams = {
         team for game in games
