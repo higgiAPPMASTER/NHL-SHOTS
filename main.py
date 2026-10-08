@@ -7394,7 +7394,14 @@ async function runAllNhlSystems(){
     if(st)st.textContent=(data.preseason
       ?'PRESEASON tuning complete · official records not written · '
       :'Complete for '+dt+' · ')+parts.join(' · ');
+    var refreshRecord=!!_nhlTrkData;
+    if(!data.preseason){
+      _nhlTrkRunRevision++;
+      _nhlTrkData=null;_nhlTrkDataBySystem={};_nhlTrkReplay=null;
+      window.__INITIAL_TRACK_RECORD__=null;
+    }
     await getPicks();
+    if(refreshRecord&&!data.preseason)await loadNhlTrackRecord(false,_nhlTrkSystem);
   }catch(e){
     if(st){st.style.color='#f87171';st.textContent=e.message||'The four-system run failed.';}
   }finally{
@@ -9124,6 +9131,7 @@ function _nhlPeriodCaption(period,anchor){
 }
 var _nhlTrkData=null,_nhlTrkReplay=null,_nhlTrkTabMode='cat',_nhlOvfTabMode='cat';
 var _nhlTrkSystem='A',_nhlTrkDataBySystem={};
+var _nhlTrkRunRevision=0;
 function _nhlTrkDayName(){
   var dp=document.getElementById('nhlTrkDate'),dn=document.getElementById('nhlTrkDayName');
   if(!dp||!dn) return;
@@ -9222,6 +9230,7 @@ function _nhlTrackRecordQuery(manualGrade,system,dateValue){
   return params.length?'?'+params.join('&'):'';
 }
 async function loadNhlTrackRecord(manualGrade,requestedSystem){
+  var revision=_nhlTrkRunRevision;
   var system=(requestedSystem||_nhlTrkSystem||'A').toUpperCase();
   if(['A','B','C','D'].indexOf(system)<0)system='A';
   var body=document.getElementById('nhlTrkBody');
@@ -9240,8 +9249,11 @@ async function loadNhlTrackRecord(manualGrade,requestedSystem){
     var qs=_nhlTrackRecordQuery(manualGrade,system,dp&&dp.value?dp.value:'');
     var r=await fetch('/api/track-record'+qs);
     if(!r.ok) throw new Error(await r.text());
-    _nhlUseTrackSystemData(await r.json(),system);
+    var latest=await r.json();
+    if(revision!==_nhlTrkRunRevision)return;
+    _nhlUseTrackSystemData(latest,system);
   }catch(e){
+    if(revision!==_nhlTrkRunRevision)return;
     if(body) body.innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading track record')+'</p>';
     if(ovfBody) ovfBody.innerHTML='<p style="color:#f87171;padding:16px">'+(e.message||'Error loading overflow track record')+'</p>';
   }
@@ -10471,6 +10483,7 @@ def _nhl_sb_upsert(table, rows, on_conflict=None):
 _NHL_TRK_APP   = "nhl"
 _NHL_TRK_STAKE = 20.0
 _NHL_TRK_TOP   = 10
+_NHL_SNAPSHOT_CAPTURE_LOCK = _bt_th.Lock()
 _NHL_SNAP_CAT  = "__picks__"
 _NHL_SYSTEM_SNAP_CATS = {
     "A": _NHL_SNAP_CAT,
@@ -10665,34 +10678,66 @@ def _nhl_cap_record_rows(rows: list) -> list:
 
 def _nhl_save_picks_snapshot(
         date_str: str, result: dict, snapshot_category: str = _NHL_SNAP_CAT):
-    """Freeze all pick lists to Supabase so they survive redeploys and can be graded."""
+    """Latest saved pregame run owns pending records; started games stay frozen."""
+    with _NHL_SNAPSHOT_CAPTURE_LOCK:
+        try:
+            return _nhl_save_latest_picks_snapshot(date_str, result, snapshot_category)
+        except (httpx.HTTPError, ValueError, RuntimeError, TypeError):
+            logger.exception("NHL latest-run record capture failed for %s/%s; previous snapshot retained.",
+                             date_str, snapshot_category)
+            return False
+
+
+def _nhl_save_latest_picks_snapshot(date_str: str, result: dict, snapshot_category: str):
     from collections import defaultdict
     games = result.get("games") or []
+    if (result.get("error") or result.get("no_games")
+            or result.get("simulation") or result.get("historical")
+            or not _nhl_slate_meta(games)["officialCaptureAllowed"]):
+        return False
+    system = next((key for key, category in _NHL_SYSTEM_SNAP_CATS.items()
+                   if category == snapshot_category), None)
+    if system is None:
+        raise ValueError("Unknown NHL record snapshot category")
+    # Replacement must fail closed: the permissive historical loader returns
+    # [] on network errors and cannot safely distinguish that from a new date.
+    ledger_category = _NHL_SYSTEM_LEDGER_CATS[system]
+    stored = _nhl_day_read_rows("mpa_track_ledger", {
+        "app": f"eq.{_NHL_TRK_APP}", "date": f"eq.{date_str}",
+        "category": f"in.({snapshot_category},{ledger_category})",
+        "side": "eq.ALL", "select": "category,detail,locked",
+    })
+    snapshots = [row for row in stored if row.get("category") == snapshot_category]
+    if len(snapshots) > 1:
+        raise ValueError("Ambiguous NHL record snapshot")
+    existing_raw = snapshots[0].get("detail") if snapshots else []
+    if not isinstance(existing_raw, list) or any(not isinstance(p, dict) for p in existing_raw):
+        raise ValueError("Unreadable NHL record snapshot")
+    if any(row.get("category") == ledger_category and row.get("locked") for row in stored):
+        return bool(snapshots)
+    # Check the clock after the storage read, not before its network wait.
     pregame_teams = {
         team for game in games
         if game.get("gameType") in (2, 3)
+        and str(game.get("gameState") or "").upper() not in ("LIVE", "CRIT", "OFF", "FINAL")
         and _nhl_gp_is_pre_game({"startTime": game.get("startTime")})
         for team in (game.get("homeTeam"), game.get("awayTeam"))
         if team
     }
-    existing_raw = _nhl_load_picks_snapshot(date_str, snapshot_category)
+    if not pregame_teams:
+        return bool(snapshots)
     existing = _nhl_cap_record_rows(existing_raw)
-    frozen_teams = {p.get("team") for p in existing if p.get("team")}
-    frozen_pm_sides = {
-        (p.get("team"), str(p.get("side") or "OVER").upper())
-        for p in existing if p.get("stat_key") == "PLUS_MINUS"
-    }
-    frozen_goalie_sides = {
-        (p.get("team"), p.get("side")) for p in existing
-        if p.get("category") == "Goalie Saves"
-    }
+    # Remove ALL earlier pending picks for the known unstarted games, including
+    # plays absent from the newest run. Keep started or unidentified games.
+    retained = [p for p in existing if p.get("team") not in pregame_teams]
     form_labels = {spec[1] for spec in _NHL_FORM_SPECS}
-    frozen_form_groups = {(p.get("team"), p.get("category"), str(p.get("pid")), p.get("side"))
-                          for p in existing if p.get("category") in form_labels}
     result = {**result, **_nhl_form_pick_groups(result)}
     flat = []
+    captured_at = datetime.utcnow().isoformat() + "Z"
+    starts = {team: game.get("startTime") for game in games
+              for team in (game.get("homeTeam"), game.get("awayTeam")) if team}
     record_counts = defaultdict(int)
-    for p in existing:
+    for p in retained:
         record_counts[(p.get("category"), p.get("side"), bool(p.get("is_overflow")))] += 1
     for (rkey, cat, sk, side, ovf) in _NHL_TRK_LISTS:
         rank_start = _NHL_TRK_TOP + 1 if ovf else 1
@@ -10702,20 +10747,6 @@ def _nhl_save_picks_snapshot(
                 continue
             if record_counts[(cat, side, ovf)] >= _NHL_TRK_TOP:
                 continue
-            # Skater picks remain frozen at first capture. A starter confirmed
-            # later can still enter the official Saves record before puck drop,
-            # once per team/side; previously frozen goalie picks are untouched.
-            if team in frozen_teams:
-                if cat in form_labels:
-                    if (team, cat, str(p.get("pid")), side) in frozen_form_groups:
-                        continue
-                elif sk == "PLUS_MINUS":
-                    # Append this new market once per team/side before puck
-                    # drop. Never recapture any already frozen market or side.
-                    if (team, side) in frozen_pm_sides:
-                        continue
-                elif cat != "Goalie Saves" or (team, side) in frozen_goalie_sides:
-                    continue
             raw_odds = p.get("realOdds") if side == "OVER" else p.get("realUnderOdds")
             odds = (raw_odds if p.get("realLine") is not None
                     and str(raw_odds or "").strip() not in ("", "0") else None)
@@ -10738,6 +10769,7 @@ def _nhl_save_picks_snapshot(
                 # duplicate 80-100% Locks record alongside the base category.
                 "score": p.get("score") or p.get("dispScore") or p.get("ptsScore") or 0,
                 "rank": rank, "is_overflow": ovf,
+                "captured_at": captured_at, "game_start": starts.get(team),
                 **({key: p.get(key) for key in (
                     "ppUnit", "ppUnitSource", "ppUnitSourceDetail", "ppUnitSourceUrl",
                     "ppUnitUpdatedAt", "ppUnitsVersion")} if sk == "PP_POINTS" else {}),
@@ -10745,18 +10777,18 @@ def _nhl_save_picks_snapshot(
             if cat in form_labels:
                 flat[-1].update({key: p.get(key) for key in _NHL_FORM_META})
             record_counts[(cat, side, ovf)] += 1
-            if cat == "Goalie Saves":
-                frozen_goalie_sides.add((team, side))
-    if flat or existing != existing_raw or (pregame_teams and not existing):
+    # Always save a valid replacement, even when the new run has zero picks.
+    # Otherwise removed plays would remain in the official pending record.
+    if pregame_teams:
         ok = _nhl_sb_upsert(
             "mpa_track_ledger",
             [{"app": _NHL_TRK_APP, "date": date_str,
               "category": snapshot_category,
               "side": "ALL", "wins": 0, "losses": 0, "locked": False,
-              "detail": _nhl_cap_record_rows(existing + flat)}],
+              "detail": _nhl_cap_record_rows(retained + flat)}],
             "app,date,category,side")
-        print(f"[nhl_track] snapshot {'saved' if ok else 'FAILED'}: "
-              f"{len(flat)} picks -> {date_str}")
+        print(f"[nhl_track] latest-run snapshot {'saved' if ok else 'FAILED'}: "
+              f"{len(flat)} refreshed pregame picks, {len(retained)} frozen picks -> {date_str}")
         return ok
     return bool(existing)
 
