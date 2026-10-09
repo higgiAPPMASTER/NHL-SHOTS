@@ -803,6 +803,10 @@ async def _nhl_display_report(client, group, report, selection, pid=None):
         total = _nhl_display_number(data.get("total"))
         if total is not None and total > len(data["data"]):
             raise ValueError("NHL display report is incomplete")
+        if group == "team" and data["data"] and not any(
+                isinstance(row, dict) and _nhl_display_team_abbr(row)
+                for row in data["data"]):
+            raise ValueError("NHL report contains no recognizable teams")
         return data["data"]
     except (httpx.HTTPError, ValueError, TypeError):
         logger.warning("NHL display-only %s/%s report unavailable", group, report)
@@ -825,7 +829,9 @@ def _nhl_display_team_abbr(row):
     ident = _nhl_display_number(row.get("teamId"))
     if ident in ids:
         return ids[ident]
-    name = _nhl_starter_name_key(row.get("teamFullName"))
+    # Aggregate NHL reports identify franchises, not team IDs. Match the
+    # published name exactly; never feed franchiseId into the team-ID map.
+    name = _nhl_starter_name_key(row.get("teamFullName") or row.get("franchiseName"))
     for team, full_name in _NHL_TEAM_FULL.items():
         if name and name == _nhl_starter_name_key(full_name):
             return team
@@ -871,8 +877,8 @@ async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: b
             if abbr not in teams:
                 continue
             team = teams[abbr]
-            if row.get("teamFullName"):
-                team["name"] = str(row["teamFullName"])
+            if row.get("teamFullName") or row.get("franchiseName"):
+                team["name"] = str(row.get("teamFullName") or row["franchiseName"])
             gp = _nhl_display_number(row.get("gamesPlayed"))
             if index == 0:
                 team["gp"] = int(gp) if gp is not None else None
@@ -889,9 +895,13 @@ async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: b
                         team[field] = round(value, 2) if value is not None else None
             else:
                 is_pp = index == 1
-                opportunities = _nhl_display_number(row.get(
-                    "powerPlayOpportunities" if is_pp else "timesShorthanded"))
-                goals = row.get("powerPlayGoalsFor" if is_pp else "powerPlayGoalsAgainst")
+                opportunity_value = row.get("ppOpportunities" if is_pp else "timesShorthanded")
+                if is_pp and opportunity_value is None:
+                    opportunity_value = row.get("powerPlayOpportunities")
+                opportunities = _nhl_display_number(opportunity_value)
+                goals = row.get("powerPlayGoalsFor" if is_pp else "ppGoalsAgainst")
+                if not is_pp and goals is None:
+                    goals = row.get("powerPlayGoalsAgainst")
                 team["ppOpportunities" if is_pp else "shorthandedOpportunities"] = opportunities
                 rate = _nhl_display_ratio(goals, opportunities, percent=True)
                 if rate is None and opportunities is not None and opportunities > 0:
