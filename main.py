@@ -130,6 +130,81 @@ C_PP_MIN_AVG_TOI_SEC      = 45
 # stable idle value available so a fresh deploy never returns a 500 here.
 _progress = {"stage": "Ready", "done": 0, "total": 0, "pct": 0}
 
+import contextvars as _nhl_progress_contextvars
+import threading as _nhl_progress_threading
+
+_NHL_BATCH_CONTEXT = _nhl_progress_contextvars.ContextVar("nhl_batch_progress", default=False)
+_NHL_BATCH_PROGRESS_LOCK = _nhl_progress_threading.RLock()
+_NHL_BATCH_PROGRESS = {"status": "IDLE", "pct": 0, "stage": "Ready"}
+
+
+def _nhl_batch_phase(system: str, stage: str, base: int, span: int = 0):
+    if not _NHL_BATCH_CONTEXT.get():
+        return
+    with _NHL_BATCH_PROGRESS_LOCK:
+        _NHL_BATCH_PROGRESS.update(
+            system=system, stage=stage, base=base, span=span, done=0, total=0,
+            pct=max(_NHL_BATCH_PROGRESS.get("pct", 0), min(base, 99)))
+
+
+def _nhl_pipeline_progress(value: dict) -> dict:
+    """Keep existing replay progress and publish batch progress independently."""
+    if _NHL_BATCH_CONTEXT.get():
+        with _NHL_BATCH_PROGRESS_LOCK:
+            span = _NHL_BATCH_PROGRESS.get("span", 0)
+            if span:
+                pct = _NHL_BATCH_PROGRESS.get("base", 0) + span * min(
+                    max(float(value.get("pct", 0)), 0), 100) / 100
+                _NHL_BATCH_PROGRESS.update(
+                    pct=max(_NHL_BATCH_PROGRESS.get("pct", 0), min(int(pct), 99)),
+                    stage=f"System {_NHL_BATCH_PROGRESS.get('system', '')} · {value.get('stage', '')}",
+                    done=value.get("done", 0), total=value.get("total", 0))
+    return value
+
+
+def _nhl_batch_note(stage: str):
+    if _NHL_BATCH_CONTEXT.get():
+        with _NHL_BATCH_PROGRESS_LOCK:
+            _NHL_BATCH_PROGRESS.update(stage=stage, done=0, total=0)
+
+
+def _nhl_batch_begin(date_str: str):
+    with _NHL_BATCH_PROGRESS_LOCK:
+        _NHL_BATCH_PROGRESS.clear()
+        _NHL_BATCH_PROGRESS.update(
+            status="RUNNING", date=date_str, run_id=str(time.time_ns()),
+            started_at_ms=int(time.time() * 1000), pct=0,
+            stage="Starting A+B+C+D", system="A+B", base=0, span=27)
+
+
+def _nhl_batch_worker(date_str: str):
+    """Run an explicitly triggered batch off the HTTP loop so polling works."""
+    global _CRON_BUSY_NHL
+    token = _NHL_BATCH_CONTEXT.set(True)
+    try:
+        batch = asyncio.run(_nhl_run_all_and_cache(date_str))
+        result = {key: value for key, value in batch.items() if key != "results"}
+        complete = all(
+            row.get("ok") and (row.get("boardStorage") or {}).get("durable")
+            for row in batch.get("systems", {}).values()) and bool(batch.get("systems"))
+        status = "NO_GAMES" if batch.get("no_games") else "COMPLETED" if complete else "PARTIAL"
+        with _NHL_BATCH_PROGRESS_LOCK:
+            _NHL_BATCH_PROGRESS.update(
+                status=status, pct=100, result=result,
+                stage=batch.get("message") or status.replace("_", " ").title(),
+                finished_at_ms=int(time.time() * 1000), done=0, total=0)
+        return batch
+    except Exception as exc:
+        with _NHL_BATCH_PROGRESS_LOCK:
+            _NHL_BATCH_PROGRESS.update(
+                status="FAILED", stage="Run failed — see Render logs",
+                error=f"NHL run failed ({type(exc).__name__}); see Render logs.",
+                finished_at_ms=int(time.time() * 1000))
+        raise
+    finally:
+        _NHL_BATCH_CONTEXT.reset(token)
+        _CRON_BUSY_NHL = False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HTTP Basic Auth
@@ -257,7 +332,9 @@ async def get_today_games(target_date: str = None) -> List[Dict]:
     async with httpx.AsyncClient(follow_redirects=True) as c:
         data = await _fetch(f"{NHL_API}/schedule/{target_date}", c)
     if not data:
-        return []
+        raise RuntimeError(
+            f"NHL schedule could not be read for {target_date}; "
+            "a failed schedule request is not a confirmed no-game slate.")
     games = []
     for day in data.get("gameWeek", []):
         if day.get("date") == target_date:
@@ -851,7 +928,7 @@ def _nhl_display_ratio(numerator, denominator, percent=False, digits=2):
 async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: bool = False):
     """Current selected-season context only. Never run/modify any pick system."""
     selection = _nhl_display_selection(date_str, game_type)
-    key = ("team-context", date_str, selection["season"], game_type)
+    key = ("team-context-v2", date_str, selection["season"], game_type)
     cached = _nhl_display_cached(key)
     if cached is not None and not refresh:
         return JSONResponse(cached)
@@ -914,10 +991,17 @@ async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: b
                 team["ppForPct" if is_pp else "ppAgainstPct"] = rate if rate is None or 0 <= rate <= 100 else None
                 team["ppChancesPG" if is_pp else "shorthandedPG"] = _nhl_display_ratio(
                     opportunities, gp)
+    unavailable = [name for name, rows in
+                   zip(("Team summary", "Power play", "Penalty kill"), reports)
+                   if rows is None]
+    if reports[0] == []:
+        unavailable.append("NHL.com returned no completed-game team summary for this selection")
     payload = {**selection, "teams": list(teams.values()),
-               "unavailable": [name for name, rows in
-                               zip(("Team summary", "Power play", "Penalty kill"), reports)
-                               if rows is None]}
+               "source": "NHL.com", "statsSchemaVersion": 2,
+               "reportCounts": {
+                   name: len(rows) if rows is not None else None
+                   for name, rows in zip(("summary", "powerplay", "penaltykill"), reports)},
+               "unavailable": unavailable}
     return JSONResponse(_nhl_display_store(key, payload))
 
 
@@ -4124,17 +4208,20 @@ def _nhl_alt_implied(odds) -> Optional[float]:
     )
 
 
-async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
+async def _build_nhl_alt_coach(
+        date_str: str, system: str = "A", shared_games: Optional[List[Dict]] = None) -> dict:
     """Evaluate only cached, genuinely priced live alternate NHL ladders.
 
     This intentionally does not call run_picks: standard-board lines and their
     probabilities must never leak into an alternate-line Coach result.
     """
+    from copy import deepcopy
     system = str(system or "A").upper()
     cached = _nhl_alt_coach_cache_get(date_str, system)
     if cached is not None:
         if not cached.get("games"):
-            games = await get_today_games(date_str)
+            games = (deepcopy(shared_games) if shared_games is not None
+                     else await get_today_games(date_str))
             if not games:
                 return {"date": date_str, "system": system, "picks": [],
                         "error": "Cannot verify games for the saved alternate Coach board."}
@@ -4146,7 +4233,8 @@ async def _build_nhl_alt_coach(date_str: str, system: str = "A") -> dict:
             if key not in best or (row["edge"], row["appProb"]) > (best[key]["edge"], best[key]["appProb"]):
                 best[key] = row
         return {**cached, "picks": sorted(best.values(), key=lambda r: (r["edge"], r["appProb"]), reverse=True)[:10]}
-    games = await get_today_games(date_str)
+    games = (deepcopy(shared_games) if shared_games is not None
+             else await get_today_games(date_str))
     if not games:
         return {"date": date_str, "system": system, "picks": [],
                 "error": "No NHL games found for this date."}
@@ -4344,11 +4432,14 @@ def _frank_market_key_py(label: str) -> str:
             "Assists (1+)": "assists", "Goalie Saves": "saves"}.get(label, "")
 
 
-async def _warm_nhl_alt_coach(date_str: str, system: str) -> dict:
-    key = f"{date_str}|{system}"
+async def _warm_nhl_alt_coach(
+        date_str: str, system: str,
+        shared_games: Optional[List[Dict]] = None) -> dict:
+    key = f"{date_str}|{system}" + ("|verified-slate" if shared_games is not None else "")
     task = _NHL_ALT_COACH_INFLIGHT.get(key)
     if task is None or task.done():
-        task = asyncio.create_task(_build_nhl_alt_coach(date_str, system))
+        task = asyncio.create_task(_build_nhl_alt_coach(
+            date_str, system, shared_games=shared_games))
         _NHL_ALT_COACH_INFLIGHT[key] = task
     try:
         return await asyncio.shield(task)
@@ -4758,6 +4849,8 @@ async def run_picks(
     skip_game_predictor: bool = False,
     persist_live_snapshot: bool = True,
     system: str = "A",
+    shared_games: Optional[List[Dict]] = None,
+    defer_coach_capture: bool = False,
 ) -> Dict:
     global _progress
     sem_nhl = asyncio.Semaphore(SEM_NHL)
@@ -4770,10 +4863,12 @@ async def run_picks(
     target_date = target_date or date.today().isoformat()
     season = get_season_for_date(date.fromisoformat(target_date))
 
-    _progress = {"stage": "Fetching games & sportsbook lines...", "done": 0, "total": 0, "pct": 10}
+    _progress = _nhl_pipeline_progress({"stage": "Fetching games & sportsbook lines...", "done": 0, "total": 0, "pct": 10})
 
     # ── Step 1 - games first; bail out on an off-day before any other fetch ────────
-    games = await get_today_games(target_date)
+    from copy import deepcopy
+    games = (deepcopy(shared_games) if shared_games is not None
+             else await get_today_games(target_date))
     if not games:
         return {"no_games": True,
                 "message": f"No NHL games scheduled for {target_date}.",
@@ -4814,7 +4909,7 @@ async def run_picks(
     unpriced_mode = not any((lines_map, pts_lines_map, ast_lines_map, sv_lines_map, goal_lines_map))
     # Missing book lines are handled independently in each market. A priced
     # market must not suppress an unpriced model pick in a different market.
-    _progress = {"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25}
+    _progress = _nhl_pipeline_progress({"stage": "Building player pool...", "done": 0, "total": 0, "pct": 25})
 
     # SA rankings for display
     playing = list({g["homeTeam"] for g in games} | {g["awayTeam"] for g in games})
@@ -4874,7 +4969,7 @@ async def run_picks(
         _fill_sim_map(pts_lines_map, PTS_LINE)
         _fill_sim_map(ast_lines_map, 0.5)
         _fill_sim_map(goal_lines_map, 0.5)
-    _progress = {"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35}
+    _progress = _nhl_pipeline_progress({"stage": f"Fetching game logs for {len(pool)} players...", "done": 0, "total": len(pool), "pct": 35})
 
     if not pool and not pp_only_pool:
         # The team-level predictor does not depend on sportsbook player props.
@@ -4936,7 +5031,7 @@ async def run_picks(
             f"across {len(skater_rosters)} teams"
         )
 
-    _progress = {"stage": "Analyzing hit rates...", "done": 0, "total": len(pool), "pct": 70}
+    _progress = _nhl_pipeline_progress({"stage": "Analyzing hit rates...", "done": 0, "total": len(pool), "pct": 70})
 
     # ── Steps 2 & 3 - NHL Stats API hit-rate analysis ────────────────────────────
     async def analyze(p: Dict) -> Optional[Dict]:
@@ -5082,9 +5177,10 @@ async def run_picks(
     async def analyze_tracked(p):
         result = await analyze(p)
         completed[0] += 1
-        _progress["done"]  = completed[0]
-        _progress["pct"]   = 70 + int((completed[0] / max(len(pool),1)) * 25)
-        _progress["stage"] = f"Analyzing players... {completed[0]}/{len(pool)}"
+        _progress.update(_nhl_pipeline_progress({
+            "done": completed[0], "total": len(pool),
+            "pct": 70 + int((completed[0] / max(len(pool), 1)) * 25),
+            "stage": f"Analyzing players... {completed[0]}/{len(pool)}"}))
         return result
 
     results_raw = await asyncio.gather(*[analyze_tracked(p) for p in pool])
@@ -5098,11 +5194,11 @@ async def run_picks(
         shot_unders.sort(
             key=lambda x: (x["underRate"], x["underTotal"]), reverse=True)
 
-    _progress = {"stage": "Analyzing points...", "done": len(pool), "total": len(pool), "pct": 96}
+    _progress = _nhl_pipeline_progress({"stage": "Analyzing points...", "done": len(pool), "total": len(pool), "pct": 96})
     # ── Step 4 - rank shots & run independent points picks ───────────────────
     picks.sort(key=lambda x: (x.get("projEdge", -999), x["score"], x["oppSA"]), reverse=True)
 
-    _progress = {"stage": "Analyzing points...", "done": len(pool), "total": len(pool), "pct": 96}
+    _progress = _nhl_pipeline_progress({"stage": "Analyzing points...", "done": len(pool), "total": len(pool), "pct": 96})
     (pts_all, ast_all, pts_unders, ast_unders, goal_all, goal_unders_all,
      pp_all, pp_unders) = await get_pts_picks(
         games, sa_map, sem_nhl, season, pts_lines_map, ast_lines_map, target_date, goal_lines_map,
@@ -5110,7 +5206,7 @@ async def run_picks(
         schedule_context=schedule_context, system=system,
         pp_units=pp_units, pp_rosters=pp_rosters, extra_markets=(pm_bundle := {}))
     pm_all, pm_unders = pm_bundle.get("pmPicks", []), pm_bundle.get("pmUnders", [])
-    _progress = {"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98}
+    _progress = _nhl_pipeline_progress({"stage": "Analyzing goalie saves...", "done": len(pool), "total": len(pool), "pct": 98})
     goalie_lookup_profiles = []
     saves_all, saves_unders = ([], []) if pp_only_pool else await get_saves_picks(
         games, sa_map, sem_nhl, season, sv_lines_map, target_date,
@@ -5277,7 +5373,7 @@ async def run_picks(
         and pick.get("lineSource") == "Historical Odds API"
     })
     # ── Game Predictor ─────────────────────────────────────────────────────
-    _progress = {"stage": "Building Game Predictor...", "done": len(pool), "total": len(pool), "pct": 98}
+    _progress = _nhl_pipeline_progress({"stage": "Building Game Predictor...", "done": len(pool), "total": len(pool), "pct": 98})
     if skip_game_predictor:
         game_preds = []
     else:
@@ -5476,14 +5572,19 @@ async def run_picks(
     # Preseason is a tuning/display slate only.  This guard is repeated here
     # (rather than relying solely on callers) so no official mutation path can
     # be reached by a future live-run entry point.
+    await _nhl_store_generated_board(target_date, system, _result)
     capture_official = bool(
         persist_live_snapshot and slate_meta["officialCaptureAllowed"])
     if capture_official:
+        _nhl_batch_note(f"Saving System {system} pregame pick and Game Predictor snapshots")
         _nhl_save_gp_snapshot(target_date, _result)
         _result["captureStatus"] = (
             "OFFICIAL_CAPTURE" if _nhl_save_picks_snapshot(target_date, _result)
             else "CAPTURE_FAILED")
-        await _nhl_capture_daily_coach(target_date, _result, system)
+        if defer_coach_capture:
+            _result["coachCaptureStatus"] = "DEFERRED"
+        else:
+            await _nhl_capture_daily_coach(target_date, _result, system)
     if not capture_official:
         _result["captureStatus"] = (
             "PRESEASON view-only: official snapshots, system records, "
@@ -5493,6 +5594,7 @@ async def run_picks(
             _progress = {"stage": "Done!", "done": len(pool), "total": len(pool), "pct": 100}
             return _result
         from replit_push import push_picks_to_replit
+        _nhl_batch_note(f"System {system} · Preparing hub snapshot")
         # Bake the picks into the page HTML so the Replit hub can serve an
         # instant, no-cold-start snapshot at moneypicksarena.com/dashboard/nhl.
         import json as _json
@@ -5528,6 +5630,23 @@ async def run_picks(
     return _result
 
 
+async def _nhl_store_generated_board(date_str: str, system: str, board: dict) -> bool:
+    """Save the finished display board before optional Coach/hub work."""
+    _nhl_batch_note(f"Saving System {system} display board")
+    try:
+        saved = await asyncio.to_thread(_nhl_save_live_board, date_str, system, board)
+    except Exception:
+        logger.exception("NHL system %s permanent board save failed", system)
+        saved = False
+    board["boardStorage"] = {"durable": bool(saved)}
+    if saved:
+        board.pop("boardStorageError", None)
+    else:
+        board["boardStorageError"] = (
+            f"System {system} finished but its permanent display board was not saved.")
+    return bool(saved)
+
+
 async def run_all_nhl_systems(target_date: str = None) -> dict:
     """Run and durably capture A, B, C, and D from one daily trigger.
 
@@ -5538,10 +5657,12 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
     button.
     """
     target_date = target_date or date.today().isoformat()
+    _nhl_batch_phase("A+B", "Generating System A and attached B", 0, 27)
     a = await run_picks(
         target_date,
         include_legacy_system=True,
         system="A",
+        defer_coach_capture=True,
     )
     if a.get("no_games") or a.get("error"):
         return {
@@ -5552,11 +5673,13 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
         }
 
     # B is the attached legacy calculation from the exact same A inputs.
+    _nhl_batch_phase("B", "Saving System B board and record", 27, 0)
     b = dict(a)
     b.update(a.get("legacySystem") or {})
     b["system"] = "B"
     b["comparisonSystem"] = "B Old/attached ZIP"
     b.update(_nhl_form_pick_groups(b))
+    await _nhl_store_generated_board(target_date, "B", b)
     preseason_slate = bool(a.get("preseason"))
     capture_ok = {"A": a.get("captureStatus") == "OFFICIAL_CAPTURE"}
     if not preseason_slate and a.get("officialCaptureAllowed", True):
@@ -5564,16 +5687,17 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
             target_date, b, snapshot_category="__picks_B__")
         b["captureStatus"] = (
             "OFFICIAL_CAPTURE" if capture_ok["B"] else "CAPTURE_FAILED")
-        await _nhl_capture_daily_coach(target_date, b, "B")
 
     systems = {"A": a, "B": b}
     for system in ("C", "D"):
+        _nhl_batch_phase(system, f"Generating System {system}", 30 if system == "C" else 57, 27)
         try:
             systems[system] = await run_picks(
                 target_date,
                 persist_live_snapshot=False,
                 skip_game_predictor=True,
                 system=system,
+                shared_games=a.get("games") or [],
             )
         except Exception as exc:
             logger.exception("NHL system %s batch run failed", system)
@@ -5585,6 +5709,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
             }
 
     for system in ("C", "D"):
+        _nhl_batch_phase(system, f"Saving System {system} pick snapshot", 84)
         result = systems[system]
         if (not preseason_slate and "error" not in result
                 and not result.get("no_games")
@@ -5593,6 +5718,16 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 target_date, result, snapshot_category=f"__picks_{system}__")
             result["captureStatus"] = (
                 "OFFICIAL_CAPTURE" if capture_ok[system] else "CAPTURE_FAILED")
+
+    # All four player boards and snapshots must finish before optional
+    # alternate Coach requests can spend their timeout budgets.
+    for system in ("A", "B", "C", "D"):
+        _nhl_batch_phase(system, f"Capturing System {system} Coach presets and alternate lines",
+                         84 + 3 * ("A", "B", "C", "D").index(system))
+        result = systems[system]
+        if ("error" not in result and not result.get("no_games")
+                and not preseason_slate
+                and result.get("officialCaptureAllowed", True)):
             await _nhl_capture_daily_coach(target_date, result, system)
 
     summary = {}
@@ -5604,6 +5739,8 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                        and result.get("coachCaptureStatus") == "AUTO_CAPTURE"))),
             "coachCaptureStatus": result.get("coachCaptureStatus", "VIEW_ONLY"),
             "coachCaptureError": result.get("coachCaptureError"),
+            "boardStorage": result.get("boardStorage", {"durable": False}),
+            "boardStorageError": result.get("boardStorageError"),
             "captureStatus": (
                 "PRESEASON_VIEW_ONLY" if result.get("preseason")
                 else ("OFFICIAL_CAPTURE" if capture_ok.get(system)
@@ -5629,7 +5766,10 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
         "message": (
             "NHL systems A, B, C, and D generated for PRESEASON "
             "tuning; official records were not written."
-            if preseason_slate else "NHL systems A, B, C, and D completed"),
+            if preseason_slate and all(row["ok"] for row in summary.values())
+            else ("NHL systems A, B, C, and D completed"
+                  if all(row["ok"] for row in summary.values())
+                  else "NHL run partially completed; check the individual system errors")),
         "preseason": preseason_slate,
         "officialCaptureAllowed": not preseason_slate,
     }
@@ -6071,6 +6211,16 @@ body.is-admin .frank-ai-systems{display:flex!important}
     <button class="btn-run" id="getBtn" onclick="getPicks()">🎯 Get Picks</button>
     <button class="btn-run" id="nhlRunAllBtn" onclick="runAllNhlSystems()" style="display:none;margin-left:8px;background:#4338ca">Run A+B+C+D</button>
     <div id="nhlRunAllStatus" style="display:none;color:#93c5fd;font-size:.74rem;font-weight:700;margin-top:10px"></div>
+    <div id="nhlRunAllProgress" style="display:none;max-width:520px;margin:14px auto 0;text-align:left">
+      <div style="display:flex;justify-content:space-between;gap:12px;font-size:.76rem;color:#cbd5e1;margin-bottom:7px">
+        <span id="nhlRunProgressStage" role="status" aria-live="polite">Starting…</span>
+        <strong id="nhlRunProgressPct" style="color:#fbbf24;white-space:nowrap">0%</strong>
+      </div>
+      <div id="nhlRunProgressTrack" role="progressbar" aria-label="NHL four-system run progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="height:12px;border-radius:8px;background:#22213a;overflow:hidden">
+        <div id="nhlRunProgressFill" style="height:100%;width:0%;background:#818cf8;border-radius:8px;transition:width .4s"></div>
+      </div>
+      <div id="nhlRunProgressDetail" style="color:#94a3b8;font-size:.7rem;margin-top:6px">Stage-based progress · not a completion-time estimate</div>
+    </div>
     <div id="nhlLiveSystemChoices" style="display:none;margin:14px auto 0">
       <div style="color:#fbbf24;font-size:.72rem;font-weight:900;margin-bottom:8px">LIVE BOARD · CHOOSE A SYSTEM</div>
       <div role="group" aria-label="Choose live NHL system" style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
@@ -7599,6 +7749,21 @@ async function _nhlSelectLiveSystem(system){
     ?'SAVED SYSTEM '+system+' · '+dt+' · '+board.savedPickCount+' original saved plays'
     :'LIVE SYSTEM '+system+' · '+dt+' · '+(board.qualified||0)+' players qualified';
 }
+function _nhlPaintRunProgress(d){
+  var wrap=document.getElementById('nhlRunAllProgress');
+  if(!wrap)return;
+  wrap.style.display='block';
+  var p=Math.max(0,Math.min(100,Number(d.pct)||0));
+  var fill=document.getElementById('nhlRunProgressFill'),track=document.getElementById('nhlRunProgressTrack');
+  var stage=document.getElementById('nhlRunProgressStage'),pct=document.getElementById('nhlRunProgressPct'),detail=document.getElementById('nhlRunProgressDetail');
+  if(fill){fill.style.width=p+'%';fill.style.background=d.status==='FAILED'?'#f87171':d.status==='PARTIAL'?'#fbbf24':d.status==='COMPLETED'?'#4ade80':'#818cf8';}
+  if(track)track.setAttribute('aria-valuenow',String(p));
+  if(stage)stage.textContent=d.stage||'Starting…';
+  if(pct)pct.textContent=p+'%';
+  var seconds=Number(d.elapsed_seconds)||0;
+  if(detail)detail.textContent=(d.total?'Players '+(d.done||0)+'/'+d.total+' · ':'')
+    +'Elapsed '+Math.floor(seconds/60)+'m '+(seconds%60)+'s · Stage-based progress, not a time estimate';
+}
 async function runAllNhlSystems(){
   if(!window.IS_ADMIN){alert('Admin only');return;}
   var _nhlTok=localStorage.getItem('__mpa_token')||'';
@@ -7607,12 +7772,41 @@ async function runAllNhlSystems(){
   var st=document.getElementById('nhlRunAllStatus');
   var dp=document.getElementById('datePicker');
   var dt=(dp&&dp.value)||_nhlLocalDate();
-  if(btn){btn.disabled=true;btn.textContent='Running all four systems…';}
-  if(st){st.style.display='block';st.textContent='One trigger is running A+B together, then C and D. Sportsbook lines are reused from the same odds cache.';}
-  try{
-    var r=await fetch('/api/nhl/run-all-systems?date_str='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin),{method:'POST'});
-    var data=await r.json();
-    if(!r.ok)throw new Error(data.detail||data.error||('HTTP '+r.status));
+  var runStart=Date.now(),pollTimer=null,pollBusy=false,lastProgress=null,requestEnded=false,finished=false;
+  var progressUrl='/api/nhl/run-progress?token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin);
+  function stopPoll(){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
+  function unlock(){if(btn){btn.disabled=false;btn.textContent='Run A+B+C+D';}}
+  async function poll(){
+    if(pollBusy||finished)return;
+    pollBusy=true;
+    try{
+      var r=await fetch(progressUrl,{cache:'no-store'});
+      if(!r.ok)throw new Error('Progress unavailable');
+      var d=await r.json();
+      if(d.status==='IDLE'&&lastProgress){
+        if(st)st.textContent='The server restarted; this run’s status is unavailable. No automatic rerun was started.';
+        stopPoll();unlock();return;
+      }
+      if(d.date!==dt||Number(d.started_at_ms)<runStart-5000)return;
+      lastProgress=d;_nhlPaintRunProgress(d);
+      if(requestEnded&&d.status!=='RUNNING'){
+        if(d.result)await finish(d.result);
+        else{if(st){st.style.color='#f87171';st.textContent=d.error||d.stage||'Run status unavailable';}finished=true;stopPoll();unlock();}
+      }
+    }catch(e){
+      var detail=document.getElementById('nhlRunProgressDetail');
+      if(detail)detail.textContent='Progress connection unavailable — retrying. Last reported progress is retained.';
+    }finally{pollBusy=false;}
+  }
+  async function finish(data){
+    if(finished)return;
+    finished=true;stopPoll();unlock();
+    _nhlPaintRunProgress({pct:100,status:data.no_games?'NO_GAMES':
+      (['A','B','C','D'].every(function(k){var row=(data.systems||{})[k]||{};return row.ok&&row.boardStorage&&row.boardStorage.durable;})?'COMPLETED':'PARTIAL'),
+      stage:data.message||'Run finished',elapsed_seconds:lastProgress?lastProgress.elapsed_seconds:Math.floor((Date.now()-runStart)/1000)});
+    await showResult(data);
+  }
+  async function showResult(data){
     if(data.no_games){
       if(st)st.textContent=data.message||('No NHL games scheduled for '+dt+'.');
       return;
@@ -7628,9 +7822,16 @@ async function runAllNhlSystems(){
         ?(data.preseason?(row.picks+' generated · view-only'):(row.picks+' logged'))
         :(row.error||'failed'))+(row.boardStorage&&row.boardStorage.durable===false?' · permanent board NOT saved':''));
     });
-    if(st)st.textContent=(data.preseason
-      ?'PRESEASON tuning complete · official records not written · '
-      :'Complete for '+dt+' · ')+parts.join(' · ');
+    var allSaved=['A','B','C','D'].every(function(system){
+      var row=(data.systems||{})[system]||{};
+      return row.ok&&row.boardStorage&&row.boardStorage.durable===true;
+    });
+    if(st){
+      st.style.color=allSaved?'#4ade80':'#fbbf24';
+      st.textContent=(allSaved
+        ?(data.preseason?'PRESEASON tuning complete · official records not written · ':'Complete for '+dt+' · ')
+        :'PARTIAL RUN for '+dt+' — not all systems completed and saved · ')+parts.join(' · ');
+    }
     var refreshRecord=!!_nhlTrkData;
     if(!data.preseason){
       _nhlTrkRunRevision++;
@@ -7639,10 +7840,27 @@ async function runAllNhlSystems(){
     }
     await getPicks();
     if(refreshRecord&&!data.preseason)await loadNhlTrackRecord(false,_nhlTrkSystem);
+  }
+  if(btn){btn.disabled=true;btn.textContent='Running all four systems…';}
+  if(st){st.style.display='block';st.textContent='One trigger is running A+B together, then C and D. Sportsbook lines are reused from the same odds cache.';}
+  _nhlPaintRunProgress({pct:0,stage:'Starting A+B+C+D',status:'RUNNING',elapsed_seconds:0});
+  pollTimer=setInterval(poll,1500);
+  try{
+    var r=await fetch('/api/nhl/run-all-systems?date_str='+encodeURIComponent(dt)+'&token='+encodeURIComponent(_nhlTok)+'&admin='+encodeURIComponent(_nhlAdmin),{method:'POST'});
+    var data=await r.json();
+    if(!r.ok)throw new Error(data.detail||data.error||('HTTP '+r.status));
+    await finish(data);
   }catch(e){
-    if(st){st.style.color='#f87171';st.textContent=e.message||'The four-system run failed.';}
+    requestEnded=true;
+    await poll();
+    if(!finished&&lastProgress&&lastProgress.status==='RUNNING'){
+      if(st){st.style.color='#fbbf24';st.textContent='Run request connection interrupted; continuing to check live progress. Do not start a second run.';}
+    }else if(!finished){
+      if(st){st.style.color='#f87171';st.textContent=e.message||'Run status unavailable.';}
+      stopPoll();unlock();
+    }
   }finally{
-    if(btn){btn.disabled=false;btn.textContent='Run A+B+C+D';}
+    if(finished){stopPoll();unlock();}
   }
 }
 
@@ -11306,7 +11524,8 @@ async def _nhl_capture_daily_coach(date_str: str, board: dict, system: str):
         if not ok:
             raise RuntimeError("Standard Coach presets could not be saved")
         board["coachCaptureStatus"] = "CAPTURE_PARTIAL"
-        payload = await asyncio.wait_for(_warm_nhl_alt_coach(date_str, system), timeout=120)
+        payload = await asyncio.wait_for(
+            _warm_nhl_alt_coach(date_str, system, shared_games=games), timeout=120)
         if payload.get("error") and "No genuine NHL alternate lines" not in payload["error"]:
             raise RuntimeError(payload["error"])
         picks = payload.get("picks") or []
@@ -15154,9 +15373,10 @@ def _nhl_board_from_saved_selections(date_str: str, system: str):
             if board.get("savedGamePredictorState") == "read_failed":
                 raise RuntimeError(board["savedGamePredictorNote"])
             return None
-        board["data_note"] = (
-            "Restored saved shared Game Predictor data. No saved player selections "
-            "were found for this system/date. No models were rerun and no records were changed.")
+        raise RuntimeError(
+            f"No saved {system} player board or selections were found for {date_str}. "
+            "Only shared Game Predictor data is available; it is not a completed "
+            f"{system} run. No models were rerun and no records were changed.")
     if not board["games"]:
         board["data_note"] += " Matchup identities were not saved; game filtering is unavailable for these restored selections."
     for key, *_ in _NHL_TRK_LISTS:
@@ -15241,6 +15461,7 @@ def _nhl_load_live_board(date_str: str, system: str):
 
 async def _nhl_run_all_and_cache(date_str: str) -> dict:
     batch = await run_all_nhl_systems(date_str)
+    _nhl_batch_phase("", "Saving final boards and Coach statuses", 96)
     results = batch.get("results") or {}
     a_result = results.get("A") or {}
     if a_result and "error" not in a_result and not a_result.get("no_games"):
@@ -15259,15 +15480,25 @@ async def _nhl_run_all_and_cache(date_str: str) -> dict:
         board = results.get(system) or {}
         if not board or "error" in board or board.get("no_games"):
             continue
-        try:
-            saved = await asyncio.to_thread(
-                _nhl_save_live_board, date_str, system, board)
-        except Exception:
-            logger.exception("NHL system %s permanent board save failed", system)
-            saved = False
+        saved = bool((board.get("boardStorage") or {}).get("durable"))
+        if not saved:
+            saved = await _nhl_store_generated_board(date_str, system, board)
+        else:
+            # Refresh Coach metadata, without treating a failed refresh as
+            # loss of the already-confirmed player board.
+            try:
+                refreshed = await asyncio.to_thread(
+                    _nhl_save_live_board, date_str, system, board)
+            except Exception:
+                logger.exception("NHL system %s board metadata refresh failed", system)
+                refreshed = False
+            if not refreshed:
+                logger.warning(
+                    "NHL system %s player board is saved; final metadata refresh failed", system)
         (batch.get("systems") or {}).get(system, {})["boardStorage"] = {
             "durable": bool(saved)}
         if not saved:
+            (batch.get("systems") or {}).get(system, {})["ok"] = False
             storage_failures.append(system)
     if storage_failures:
         batch["board_storage_warning"] = (
@@ -15276,6 +15507,7 @@ async def _nhl_run_all_and_cache(date_str: str) -> dict:
         batch["message"] = (batch.get("message") or "") + " · " + batch["board_storage_warning"]
     # Grade prior player/GP slates after today's capture.  The current date
     # remains pending until its games finish.
+    _nhl_batch_phase("", "Finalizing saved boards and settling prior records", 98)
     await asyncio.get_running_loop().run_in_executor(
         None, _nhl_update_track_ledger)
     return batch
@@ -15300,10 +15532,8 @@ async def api_run_all_nhl_systems(
         raise HTTPException(
             status_code=409, detail="The NHL daily batch is already running")
     _CRON_BUSY_NHL = True
-    try:
-        batch = await _nhl_run_all_and_cache(ds)
-    finally:
-        _CRON_BUSY_NHL = False
+    _nhl_batch_begin(ds)
+    batch = await asyncio.shield(asyncio.to_thread(_nhl_batch_worker, ds))
     response = {
         key: value for key, value in batch.items() if key != "results"
     }
@@ -15355,10 +15585,8 @@ async def cron_run_nhl(request: Request, date_str: str = ""):
     if _CRON_BUSY_NHL:
         return {"ran": False, "cached": bool(_cache_get("nhl", ds)), "date": ds, "reason": "already running"}
     _CRON_BUSY_NHL = True
-    try:
-        batch = await _nhl_run_all_and_cache(ds)
-    finally:
-        _CRON_BUSY_NHL = False
+    _nhl_batch_begin(ds)
+    batch = await asyncio.shield(asyncio.to_thread(_nhl_batch_worker, ds))
     if not batch.get("no_games") and (
             set(batch.get("systems", {})) != {"A", "B", "C", "D"}
             or not all(row.get("ok") for row in batch["systems"].values())):
@@ -15492,6 +15720,19 @@ async def api_odds_debug(dt: str = None, admin: str = ""):
 @app.get("/api/progress")
 async def api_progress():
     return JSONResponse(_progress)
+
+@app.get("/api/nhl/run-progress")
+async def api_nhl_run_progress(request: Request, token: str = "", admin: str = ""):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not _nhl_bet_admin_ok(tok, admin):
+        raise HTTPException(status_code=403, detail="Admin only")
+    with _NHL_BATCH_PROGRESS_LOCK:
+        data = {key: value for key, value in _NHL_BATCH_PROGRESS.items()
+                if key not in ("base", "span")}
+    if data.get("started_at_ms"):
+        end = data.get("finished_at_ms") or int(time.time() * 1000)
+        data["elapsed_seconds"] = max(0, int((end - data["started_at_ms"]) / 1000))
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 @app.get("/health")
 async def health():
