@@ -211,17 +211,48 @@ def _nhl_batch_worker(date_str: str):
 
 async def _nhl_batch_with_shared_feeds(date_str: str):
     """Reuse source data/connections for one run, never system-specific picks."""
-    async with httpx.AsyncClient(
-            follow_redirects=True, timeout=20,
-            limits=httpx.Limits(max_connections=32, max_keepalive_connections=32)) as client:
-        token = _NHL_BATCH_FEEDS.set({
-            "client": client, "limit": asyncio.Semaphore(32),
-            "responses": {}, "inflight": {}, "log_keys": set(), "pp_roles": {},
-        })
-        try:
-            return await _nhl_run_all_and_cache(date_str)
-        finally:
-            _NHL_BATCH_FEEDS.reset(token)
+    async with _nhl_shared_feed_scope():
+        return await _nhl_run_all_and_cache(date_str)
+
+
+@_nhl_asynccontextmanager
+async def _nhl_shared_feed_scope():
+    """Keep reusable source bodies on temporary disk, not in the Python heap."""
+    from tempfile import TemporaryDirectory
+    with TemporaryDirectory(prefix="nhl_feeds_", dir=str(_CACHE_DIR)) as folder:
+        async with httpx.AsyncClient(
+                follow_redirects=True, timeout=20,
+                limits=httpx.Limits(max_connections=16, max_keepalive_connections=8)) as client:
+            feeds = {
+                "client": client, "limit": asyncio.Semaphore(8),
+                "responses": {}, "inflight": {}, "log_keys": set(), "pp_roles": {},
+                "response_dir": pathlib.Path(folder),
+            }
+            token = _NHL_BATCH_FEEDS.set(feeds)
+            try:
+                yield feeds
+            finally:
+                pending = list(feeds["inflight"].values())
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+                try:
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                finally:
+                    pending.clear()
+                    feeds["inflight"].clear()
+                    feeds["responses"].clear()
+                    feeds["pp_roles"].clear()
+                    feeds["log_keys"].clear()
+                    _NHL_BATCH_FEEDS.reset(token)
+                    _nhl_collect_run_memory()
+
+
+def _nhl_collect_run_memory():
+    """Release completed-stage cycles without discarding any live pick data."""
+    import gc
+    gc.collect()
 
 
 @_nhl_asynccontextmanager
@@ -325,20 +356,46 @@ async def _fetch(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
         return await _fetch_once(url, client)
     # Reuse stable roster/stat inputs, not live gamecenter/lineup responses.
     cacheable = "/roster/" in url or url.startswith(NHL_STATS + "/")
-    if cacheable and url in shared["responses"]:
-        return _nhl_deepcopy(shared["responses"][url])
+    cached_path = shared["responses"].get(url) if cacheable else None
+    if cached_path is not None:
+        try:
+            return json.loads(cached_path.read_bytes())
+        except (OSError, ValueError, UnicodeError):
+            shared["responses"].pop(url, None)
+            logger.warning("NHL temporary source-cache read failed; retrying source")
     async def limited_fetch():
         async with shared["limit"]:
-            return await _fetch_once(url, shared["client"])
+            try:
+                response = await shared["client"].get(url, timeout=20)
+                if response.status_code == 200:
+                    # Share immutable bytes between concurrent callers. Each
+                    # decodes its own rows, so no full-dict deepcopy is needed.
+                    return response.content
+            except Exception as exc:
+                print(f"[NHL] {url} → {exc}")
+            return None
     task = shared["inflight"].get(url)
     if task is None:
         task = asyncio.create_task(limited_fetch())
         shared["inflight"][url] = task
     try:
-        data = await asyncio.shield(task)
-        if cacheable and isinstance(data, dict) and data:
-            shared["responses"][url] = _nhl_deepcopy(data)
-        return _nhl_deepcopy(data)
+        body = await asyncio.shield(task)
+        if body is None:
+            return None
+        try:
+            data = json.loads(body)
+        except (ValueError, UnicodeError) as exc:
+            print(f"[NHL] {url} → {exc}")
+            return None
+        if cacheable and isinstance(data, dict) and data and url not in shared["responses"]:
+            import hashlib
+            path = shared["response_dir"] / (hashlib.sha256(url.encode()).hexdigest() + ".json")
+            try:
+                path.write_bytes(body)
+                shared["responses"][url] = path
+            except OSError:
+                logger.warning("NHL temporary source-cache write failed; retaining fetched result")
+        return data
     finally:
         if task.done() and shared["inflight"].get(url) is task:
             shared["inflight"].pop(url, None)
@@ -3305,7 +3362,11 @@ async def _nhl_pp_role_logs(
     for pid in result:
         key = (pid, season, target_date)
         if key in role_cache:
-            result[pid] = _nhl_deepcopy(role_cache[key])
+            try:
+                result[pid] = json.loads(role_cache[key].read_bytes())
+            except (OSError, ValueError, UnicodeError):
+                role_cache.pop(key, None)
+                logger.warning("NHL temporary PP-role cache read failed; retrying source")
     missing_ids = [pid for pid in result if (pid, season, target_date) not in role_cache]
     if not missing_ids:
         return result
@@ -3333,7 +3394,13 @@ async def _nhl_pp_role_logs(
                         timeout=30,
                     )
                     r.raise_for_status()
-                    return r.json().get("data", [])
+                    # Only these fields feed PP-role history. Do not hold the
+                    # report's unused columns across every gathered batch.
+                    return [{
+                        "playerId": row.get("playerId"),
+                        "gameDate": row.get("gameDate", ""),
+                        "ppTimeOnIce": row.get("ppTimeOnIce"),
+                    } for row in r.json().get("data", [])]
             except Exception as exc:
                 print(f"[PP Role] fetch error ({game_type}, {len(batch)} players): {exc}")
                 return None
@@ -3356,7 +3423,13 @@ async def _nhl_pp_role_logs(
         # An empty successful report is valid; failed reads must remain retryable.
         if rows[index * 2] is not None and rows[index * 2 + 1] is not None:
             for pid in batch:
-                role_cache[(int(pid), season, target_date)] = _nhl_deepcopy(result[int(pid)])
+                if shared is not None:
+                    path = shared["response_dir"] / f"pp_{int(pid)}_{season}_{target_date}.json"
+                    try:
+                        path.write_text(json.dumps(result[int(pid)]), encoding="utf-8")
+                        role_cache[(int(pid), season, target_date)] = path
+                    except OSError:
+                        logger.warning("NHL temporary PP-role cache write failed; retaining fetched result")
     print(f"[PP Role] verified game-level PP TOI for "
           f"{sum(bool(v) for v in result.values())}/{len(result)} roster players")
     return result
@@ -4431,25 +4504,9 @@ async def _nhl_alt_scan_scoped(date_str, system, shared_games=None, progress=Non
         if _NHL_BATCH_FEEDS.get() is not None:
             return await asyncio.wait_for(
                 _build_nhl_alt_coach(date_str, system, shared_games), timeout=540)
-        async with httpx.AsyncClient(
-                follow_redirects=True, timeout=20,
-                limits=httpx.Limits(max_connections=32, max_keepalive_connections=32)) as client:
-            feeds = {
-                "client": client, "limit": asyncio.Semaphore(32),
-                "responses": {}, "inflight": {}, "log_keys": set(), "pp_roles": {},
-            }
-            feed_token = _NHL_BATCH_FEEDS.set(feeds)
-            try:
-                return await asyncio.wait_for(
-                    _build_nhl_alt_coach(date_str, system, shared_games), timeout=540)
-            finally:
-                pending = list(feeds["inflight"].values())
-                for task in pending:
-                    if not task.done():
-                        task.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
-                _NHL_BATCH_FEEDS.reset(feed_token)
+        async with _nhl_shared_feed_scope():
+            return await asyncio.wait_for(
+                _build_nhl_alt_coach(date_str, system, shared_games), timeout=540)
     finally:
         _NHL_ALT_SCAN_PROGRESS.reset(token)
 
@@ -6027,6 +6084,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
 
     systems = {"A": a, "B": b}
     for system in ("C", "D"):
+        _nhl_collect_run_memory()
         _nhl_batch_phase(system, f"Generating System {system}", 30 if system == "C" else 57, 27)
         try:
             systems[system] = await run_picks(
@@ -6059,6 +6117,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
     # All four player boards and snapshots must finish before optional
     # alternate Coach requests can spend their timeout budgets.
     for system in ("A", "B", "C", "D"):
+        _nhl_collect_run_memory()
         _nhl_batch_phase(system, f"Capturing System {system} Coach presets and alternate lines",
                          84 + 3 * ("A", "B", "C", "D").index(system))
         result = systems[system]
