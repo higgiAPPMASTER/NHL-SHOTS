@@ -3200,8 +3200,17 @@ async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> Li
     return logs
 
 
+def _nhl_hot_cold_min_games(target_date):
+    """October uses 2–5 current-season games; November onward requires five."""
+    try:
+        return 2 if date.fromisoformat(str(target_date)[:10]).month == 10 else 5
+    except (TypeError, ValueError):
+        return 5
+
+
 def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
     """Existing Shots/Points form qualifiers, independent of ordinary pick gates."""
+    minimum_games = _nhl_hot_cold_min_games(target_date)
     models = {}
     for profile in profiles:
         if profile and not profile.get("historyOnly"):
@@ -3263,9 +3272,9 @@ def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
             if line is None:
                 continue  # Never guess a missing Shots line.
             recent = values(recent_games, stat)
-            if len(recent_games) != 5 or len(recent) != 5:
+            if len(recent_games) < minimum_games or len(recent) != len(recent_games):
                 continue
-            average = sum(recent) / 5
+            average = sum(recent) / len(recent)
             versus = values(opponent_games, stat)
             model = models.get((player["pid"], market), {})
             # Scores are reused only at their original standard line.
@@ -3274,7 +3283,7 @@ def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
                 model = {}
             for side, form in (("OVER", "HOT"), ("UNDER", "COLD")):
                 hits = sum(v > line if side == "OVER" else v < line for v in recent)
-                if hits < 4 or not (average > line if side == "OVER" else average < line):
+                if hits * 5 < len(recent) * 4 or not (average > line if side == "OVER" else average < line):
                     continue
                 opponent_hits = sum(v > line if side == "OVER" else v < line for v in versus)
                 opponent_rate = opponent_hits / len(versus) * 100 if versus else None
@@ -3303,7 +3312,7 @@ def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles):
                     "odds": odds, "book": _nhl_side_book(quote, side) if odds is not None else "",
                     "realOdds": odds if side == "OVER" else None,
                     "realUnderOdds": odds if side == "UNDER" else None,
-                    "recentHits": hits, "recentTotal": 5, "recentAverage": round(average, 2),
+                    "recentHits": hits, "recentTotal": len(recent), "recentAverage": round(average, 2),
                     "recentPushes": sum(v == line for v in recent),
                     "opponentHits": opponent_hits, "opponentTotal": len(versus),
                     "opponentRate": round(opponent_rate, 1) if opponent_rate is not None else None,
@@ -3374,8 +3383,10 @@ def _nhl_form_pick_groups(board: dict) -> dict:
     for row in board["hotColdPlayers"]:
         if not row.get("savedSnapshot"):
             report_date = board.get("targetDate") or board.get("date") or ""
-            if (not report_date or len(_nhl_current_season_logs(
-                    row.get("hotColdRecentGames") or [], report_date)) != 5):
+            sample_size = len(_nhl_current_season_logs(
+                row.get("hotColdRecentGames") or [], report_date)) if report_date else 0
+            if (not report_date or not
+                    _nhl_hot_cold_min_games(report_date) <= sample_size <= 5):
                 continue
         for key, label, market, stat, side, coach_key in _NHL_FORM_SPECS:
             if row.get("marketKey") != market or row.get("side") != side:
@@ -6996,7 +7007,8 @@ function _nhlFormGroups(raw){
   _NHL_FORM_TYPES.forEach(function(form){
     var seen={};
     var rows=(groups[form.key]||[]).filter(function(p){
-      if(!p.savedSnapshot&&_nhlCurrentSeasonGames(p.hotColdRecentGames,raw.targetDate||raw.date||'').length!==5)return false;
+      var reportDate=raw.targetDate||raw.date||'';
+      if(!p.savedSnapshot&&_nhlCurrentSeasonGames(p.hotColdRecentGames,reportDate).length<_nhlHotColdMinGames(reportDate))return false;
       var id=String(p.pid)+'|'+String(p.team)+'|'+String(p.side)+'|'+String(p.dispLine);
       if(seen[id])return false;seen[id]=true;return true;
     });
@@ -8161,7 +8173,7 @@ function _hcCard(raw,r){
   return '<article class="hc-card"><div class="hc-top"><div class="hs-wrap"><span class="hs-ini">'+_nhlSafe(_initials(r.name))+'</span><img class="hs-img" src="'+_nhlSafe(head)+'" alt="" onerror="this.style.display=&quot;none&quot;"/></div><div><div class="hc-nm">'+_nhlSafe(r.name)+'</div><div class="hc-vs">'+_nhlSafe(r.team)+' '+(r.homeRoad==='H'?'vs':'at')+' <img src="'+_nhlSafe(logo)+'" alt="" onerror="this.style.display=&quot;none&quot;"/> '+_nhlSafe(r.opponent)+'</div></div></div>'
     +'<div><span class="hc-tag '+(r.form==='HOT'?'hc-hot':'hc-cold')+'">'+(r.doubleCold?'DOUBLE COLD':r.form)+'</span>'+(r.matchupSupports?'<span class="hc-tag hc-sup">Matchup supports</span>':'')+'</div>'
     +'<div class="hc-row"><span>Market</span><b>'+_nhlSafe(r.mkt)+' · '+line+'</b></div>'
-    +'<div class="hc-row"><span>'+(r.savedSnapshot?'Saved form sample':'Last 5 this season (any venue)')+'</span><b>'+_nhlSafe(r.recentHits)+'/'+_nhlSafe(r.recentTotal)+' '+(r.side==='OVER'?'Over':'Under')+' · avg '+_nhlSafe(r.recentAverage)+push+'</b></div>'
+    +'<div class="hc-row"><span>'+(r.savedSnapshot?'Saved form sample':'Last '+_nhlSafe(r.recentTotal)+' this season (any venue)')+'</span><b>'+_nhlSafe(r.recentHits)+'/'+_nhlSafe(r.recentTotal)+' '+(r.side==='OVER'?'Over':'Under')+' · avg '+_nhlSafe(r.recentAverage)+push+'</b></div>'
     +'<div class="hc-row"><span>Vs '+_nhlSafe(r.opponent)+'</span><b>'+_nhlSafe(opp)+warn+'</b></div>'
     +'<div class="hc-row"><span>Lineup</span><b>'+(conf?lineup:'<span class="hc-tag hc-warn">'+lineup+'</span>')+_nhlInjuryBadge(r)+'</b></div>'
     +'<div class="hc-row"><span>'+r.side+' odds</span><b>'+odds+'</b></div>'
@@ -8189,7 +8201,10 @@ function _nhlHotColdSection(raw,rows,q){
     return !q||String(p.name||'').toLowerCase().indexOf(q)>=0;
   });
   var h='<div id="nhl-section-hotcold" class="nhl-scroll-anchor"></div><section class="hc-sec" aria-labelledby="hcTitle"><div class="sec" id="hcTitle">Hot and Cold Players</div>';
-  h+='<p class="hc-note">Top 10 per category; ranks 11–20 are in Overflow. Only these 20 plays per category enter tracking and parlay pools. Form uses the true last five chronological games at all venues, before this game. 4/5 is history, not an 80% prediction. Pushes are not wins. This differs from the venue-matched Last 5 box in Game Log. My Bets requires genuine odds; priced Coach lists also require positive model edge. Double Cold also appears in Cold.</p>';
+  var october=_nhlHotColdMinGames(raw.targetDate||raw.date||'')===2;
+  h+='<p class="hc-note">Top 10 per category; ranks 11–20 are in Overflow. Only these 20 plays per category enter tracking and parlay pools. '
+    +(october?'October: use the available last 2–5 current-season games; minimum 2. The five-game minimum returns November 1. ':'Use the true last five current-season games; minimum 5. ')
+    +'All venues, before this game. At least 80% must meet the side (2/2, 3/3, 4/4 or 4/5); history is not a prediction. Pushes are not wins. This differs from the venue-matched Last 5 box in Game Log. My Bets requires genuine odds; priced Coach lists also require positive model edge. Double Cold also appears in Cold.</p>';
   function grp(label,kind,cur,opts){
     return '<div class="hc-grp" role="group" aria-label="'+label+'"><span>'+label+'</span>'+opts.map(function(o){
       return '<button type="button" class="hc-btn" aria-pressed="'+(cur===o[0])+'" onclick="_nhlHcSet(&quot;'+kind+'&quot;,&quot;'+o[0]+'&quot;)">'+o[1]+'</button>';
@@ -8216,6 +8231,9 @@ function _nhlHotColdSection(raw,rows,q){
   });
   return h+'</section>';
 }
+function _nhlHotColdMinGames(dt){
+  return /^\\d{4}-10-\\d{2}$/.test(String(dt||'').slice(0,10))?2:5;
+}
 function _nhlCurrentSeasonGames(games,dt){
   var m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dt||'').slice(0,10));
   if(!m)return [];
@@ -8232,8 +8250,9 @@ function _nhlHcHistory(p){
     }).join('')+'</tbody></table>';
   }
   var raw=window.__NHL_RAW__||{},dt=raw.targetDate||raw.date||window.__NHL_DATE__||(p.last5VenueStats||{}).asOf||'';
-  return '<div class="hc-note"><b>'+_nhlSafe(p.form)+' form · '+_nhlSafe(p.mkt)+'</b><br/>Last five games this NHL season, all venues (separate from the venue-matched Last 5 box). No previous-season backfill. History only, not a prediction. Pushes are not wins.'
-    +tbl('Last five this season, all venues',_nhlCurrentSeasonGames(p.hotColdRecentGames,dt))+tbl('Meetings vs '+_nhlSafe(p.opponent),p.hotColdOpponentGames||[])+'</div>';
+  var recent=_nhlCurrentSeasonGames(p.hotColdRecentGames,dt);
+  return '<div class="hc-note"><b>'+_nhlSafe(p.form)+' form · '+_nhlSafe(p.mkt)+'</b><br/>Last '+recent.length+' games this NHL season, all venues (separate from the venue-matched Last 5 box). No previous-season backfill. History only, not a prediction. Pushes are not wins.'
+    +tbl('Last '+recent.length+' this season, all venues',recent)+tbl('Meetings vs '+_nhlSafe(p.opponent),p.hotColdOpponentGames||[])+'</div>';
 }
 function _nhlLast5Box(p){
   var data=p.last5VenueStats,venue=(data&&data.venue)||p.homeRoad||p.last5HomeRoad||'';
