@@ -1047,6 +1047,143 @@ def _lineup_filtered_rosters(
     return filtered
 
 
+async def _nhl_top30_ppg_build(target_date: str) -> dict:
+    """Independent, small daily list; never calls or changes any pick model."""
+    import urllib.parse
+    season = get_season_for_date(date.fromisoformat(target_date))
+    async with httpx.AsyncClient(
+            follow_redirects=True, timeout=15,
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4)) as client:
+        async def read(url):
+            response = await client.get(url)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("NHL source returned an invalid response")
+            return payload
+
+        leaders_data, schedule = await asyncio.gather(
+            read(f"{NHL_API}/skater-stats-leaders/{season}/2?categories=points&limit=30"),
+            read(f"{NHL_API}/schedule/{target_date}"))
+        leaders = leaders_data.get("points")
+        if not isinstance(leaders, list) or not isinstance(schedule.get("gameWeek"), list):
+            raise ValueError("NHL scoring leaders or schedule unavailable")
+        leaders = leaders[:30]
+        matchups = {}
+        for day in schedule["gameWeek"]:
+            if day.get("date") != target_date:
+                continue
+            for game in day.get("games") or []:
+                if game.get("gameType") not in (1, 2, 3):
+                    continue
+                for own, other in (("homeTeam", "awayTeam"), ("awayTeam", "homeTeam")):
+                    team, opponent = game.get(own) or {}, game.get(other) or {}
+                    if not team.get("abbrev") or not opponent.get("id"):
+                        raise ValueError("NHL matchup is missing its team identity")
+                    matchups[team["abbrev"]] = {
+                        "opponent": opponent.get("abbrev", ""),
+                        "opponent_id": int(opponent["id"]),
+                    }
+        candidates, seen = [], set()
+        for rank, leader in enumerate(leaders, 1):
+            pid = leader.get("id")
+            if not pid or pid in seen or leader.get("value") is None:
+                raise ValueError("NHL scoring leaderboard has invalid or duplicate players")
+            seen.add(pid)
+            team = leader.get("teamAbbrev", "")
+            if team not in matchups:
+                continue
+            candidates.append({
+                "pid": int(pid), "rank": rank,
+                "name": " ".join(str((leader.get(k) or {}).get("default", ""))
+                                 for k in ("firstName", "lastName")).strip(),
+                "team": team, "season_points": int(leader["value"]),
+                "headshot": leader.get("headshot", ""),
+                **matchups[team],
+            })
+        by_opponent = {}
+        for player in candidates:
+            by_opponent.setdefault(player["opponent_id"], []).append(player)
+        sem = asyncio.Semaphore(3)
+
+        async def career_group(opponent_id, players):
+            # Aggregate GAME rows, not season summaries: the opponent filter
+            # must apply to the individual games. No home/road restriction.
+            ids = ",".join(str(p["pid"]) for p in players)
+            query = urllib.parse.urlencode({
+                "isAggregate": "true", "isGame": "true",
+                "start": 0, "limit": 30,
+                "cayenneExp": (
+                    f'gameTypeId=2 and gameDate<"{target_date}" '
+                    f"and opponentTeamId={opponent_id} and playerId in ({ids})"),
+            })
+            try:
+                async with sem:
+                    payload = await read(f"{NHL_STATS}/skater/summary?{query}")
+                rows = payload.get("data")
+                if not isinstance(rows, list):
+                    raise ValueError("Career report unavailable")
+                if int(payload.get("total", len(rows))) > len(rows):
+                    raise ValueError("Career report is incomplete")
+                totals = {}
+                for row in rows:
+                    pid = int(row.get("playerId") or 0)
+                    gp = _nhl_display_number(row.get("gamesPlayed"))
+                    points = _nhl_display_number(row.get("points"))
+                    if pid not in {p["pid"] for p in players} or pid in totals:
+                        raise ValueError("Career report has invalid player identities")
+                    if gp is None or points is None or gp != int(gp) or points != int(points):
+                        raise ValueError("Career report has missing totals")
+                    totals[pid] = (int(points), int(gp))
+                qualified = []
+                for player in players:
+                    points, gp = totals.get(player["pid"], (0, 0))
+                    if gp > 0 and points >= gp:
+                        qualified.append({
+                            **{k: v for k, v in player.items() if k != "opponent_id"},
+                            "career_points": points, "career_games": gp,
+                            "career_ppg": round(points / gp, 4),
+                        })
+                return qualified, None
+            except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                return [], players[0]["opponent"]
+
+        groups = await asyncio.gather(*(
+            career_group(opp, players) for opp, players in by_opponent.items()))
+        rows = sorted([row for group, _ in groups for row in group], key=lambda p: p["rank"])
+        unavailable = [opponent for _, opponent in groups if opponent]
+        if groups and len(unavailable) == len(groups):
+            raise ValueError("Career opponent history unavailable; retry the category")
+        return {
+            "date": target_date, "season": season, "players": rows,
+            "leader_count": len(leaders), "playing_count": len(candidates),
+            "unavailable": bool(unavailable), "unavailable_opponents": unavailable,
+            "history_scope": "Career regular season before today, home and away combined",
+        }
+
+
+@app.get("/api/nhl/top30-ppg-vs-team")
+async def nhl_top30_ppg_vs_team(
+        request: Request, date_str: str = "", token: str = "",
+        admin: str = "", refresh: bool = False):
+    tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not (_token_email(tok) or _nhl_bet_admin_ok(tok, admin)):
+        raise HTTPException(status_code=403, detail="Sign in to view this category")
+    ds = date_str or _nhl_record_today()
+    if ds != _nhl_record_today():
+        raise HTTPException(status_code=400, detail="This daily category is available for today only")
+    key = ("top30-career-ppg-v1", ds, get_season_for_date(date.fromisoformat(ds)))
+    cached = _nhl_display_cached(key)
+    if cached is not None and not refresh:
+        return JSONResponse(cached, headers={"Cache-Control": "no-store"})
+    try:
+        payload = await asyncio.wait_for(_nhl_top30_ppg_build(ds), timeout=60)
+    except (httpx.HTTPError, ValueError, TypeError, KeyError, asyncio.TimeoutError):
+        logger.warning("NHL Top 30 PPG vs team source read failed")
+        raise HTTPException(status_code=502, detail="NHL Top 30 or career history unavailable; retry this category")
+    return JSONResponse(_nhl_display_store(key, payload), headers={"Cache-Control": "no-store"})
+
+
 _NHL_DISPLAY_STATS_CACHE: Dict[Tuple, Tuple[float, Dict]] = {}
 
 
@@ -8638,6 +8775,64 @@ function _nhlHcBind(){
     b.onclick=function(){nhlHotColdOpen(b.getAttribute('data-hc'));};
   });
 }
+var _nhlTop30State={date:'',data:null,loading:false,error:'',request:0};
+function _nhlTop30Section(raw){
+  var dt=String(raw.targetDate||raw.date||window.__NHL_DATE__||_nhlLocalDate()).slice(0,10);
+  var s=_nhlTop30State,valid=s.date===dt,body='';
+  if(raw.simulation||raw.historical||dt!==_nhlLocalDate()){
+    body='<div class="hc-note">Today-only scoring category. Select today to load the list.</div>';
+  }else{
+    body='<button type="button" class="hc-btn" onclick="_nhlLoadTop30(true)"'+(valid&&s.loading?' disabled':'')+'>'
+      +(valid&&s.loading?'Loading…':valid&&s.data?'Refresh list':'Load list')+'</button>';
+    if(valid&&s.error)body+='<div class="hc-note" style="color:#fbbf24">'+_nhlSafe(s.error)+'</div>';
+    if(valid&&s.data){
+      var data=s.data,rows=data.players||[];
+      body+='<div class="hc-note">'+rows.length+' qualifiers · '+data.playing_count+' of '+data.leader_count+' league leaders have a team game today.</div>';
+      if(data.unavailable)body+='<div class="hc-note" style="color:#fbbf24">Partial list: opponent history unavailable vs '+_nhlSafe((data.unavailable_opponents||[]).join(', '))+'. Refresh to retry.</div>';
+      if(rows.length){
+        body+='<div class="hc-grid">'+rows.map(function(p){
+          var photo=p.headshot?'<img src="'+_nhlSafe(p.headshot)+'" alt="" loading="lazy" style="width:48px;height:48px;object-fit:contain;border-radius:50%">':'';
+          return '<article class="hc-card"><div style="display:flex;align-items:center;gap:10px">'+photo
+            +'<div><div style="font-weight:900;color:#f8fafc">'+_nhlSafe(p.name)+'</div>'
+            +'<div class="hc-note">'+_nhlSafe(p.team)+' vs '+_nhlSafe(p.opponent)+'</div></div></div>'
+            +'<div class="hc-note">NHL points rank #'+p.rank+' · '+p.season_points+' points this season</div>'
+            +'<div style="font-size:1.35rem;font-weight:900;color:#4ade80">'+Number(p.career_ppg).toFixed(2)+' PPG vs '+_nhlSafe(p.opponent)+'</div>'
+            +'<div class="hc-note">'+p.career_points+' career points in '+p.career_games+' games · Home + Away</div></article>';
+        }).join('')+'</div>';
+      }else body+='<div class="hc-note">'+(data.unavailable?'No qualifiers found in the available histories.':'No Top 30 player with a team game today averages at least 1.00 career PPG against that opponent.')+'</div>';
+    }
+  }
+  return '<section id="nhl-section-top30" class="hc-section"><h2 style="font-size:1rem;color:#f8fafc;margin:0 0 8px">Top 30 Point Per Game vrs Team</h2>'
+    +'<div class="hc-note">This season’s Top 30 by total points → today’s opponent → career regular-season average of at least 1.00 PPG. Home and away combined. No edge gate or Top 10 cap.</div>'
+    +body+'</section>';
+}
+function _nhlTop30Repaint(){
+  var section=document.getElementById('nhl-section-top30');
+  if(section)section.outerHTML=_nhlTop30Section(window.__NHL_RAW__||{});
+}
+async function _nhlLoadTop30(refresh){
+  var raw=window.__NHL_RAW__||{},dt=String(raw.targetDate||raw.date||window.__NHL_DATE__||_nhlLocalDate()).slice(0,10);
+  if(raw.simulation||raw.historical||dt!==_nhlLocalDate())return;
+  var s=_nhlTop30State;
+  if(s.loading)return;
+  if(s.date!==dt){s.date=dt;s.data=null;}
+  s.loading=true;s.error='';var id=++s.request;
+  _nhlTop30Repaint();
+  var ctl=new AbortController(),timer=setTimeout(function(){ctl.abort();},70000);
+  try{
+    var qs=_nhlBetAuthQS();
+    var response=await fetch('/api/nhl/top30-ppg-vs-team'+qs+(qs.length>1?'&':'')+'date_str='+encodeURIComponent(dt)+(refresh?'&refresh=true':''),{credentials:'include',signal:ctl.signal});
+    var data=await response.json();
+    if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
+    if(data.date!==dt||!Array.isArray(data.players))throw new Error('Unexpected NHL category response');
+    if(s.request===id)s.data=data;
+  }catch(error){
+    if(s.request===id)s.error=error.name==='AbortError'?'Category source timed out. Click Load list or Refresh list to retry.':error.message;
+  }finally{
+    clearTimeout(timer);
+    if(s.request===id){s.loading=false;_nhlTop30Repaint();}
+  }
+}
 function _nhlHotColdSection(raw,rows,q){
   rows=_nhlFormVisibleRows(raw,false).filter(function(p){
     return !q||String(p.name||'').toLowerCase().indexOf(q)>=0;
@@ -9557,6 +9752,7 @@ function _nhlPaint(q){
     '<div class="chip nhl-jump-chip" onclick="nhlJumpToHotCold()" onkeydown="if(event.key===&quot;Enter&quot;||event.key===&quot; &quot;){event.preventDefault();nhlJumpToHotCold();}" role="button" tabindex="0" aria-label="Jump to Hot and Cold Players"><div class="val">' + _nhlFormVisibleRows(d,false).length + '</div><div class="lbl">Hot/Cold</div></div>' +
     '</div>';
   _nhlHcRegistry={};
+  h += _nhlTop30Section(original);
   h += _nhlHotColdSection(d,(d.hotColdPlayers||[]).filter(_nhlPositionMatches).filter(function(p){return !q||(p.name||'').toLowerCase().indexOf(q)>=0;}),q);
 
   // Games
