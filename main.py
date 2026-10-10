@@ -981,7 +981,7 @@ def _nhl_display_ratio(numerator, denominator, percent=False, digits=2):
 async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: bool = False):
     """Current selected-season context only. Never run/modify any pick system."""
     selection = _nhl_display_selection(date_str, game_type)
-    key = ("team-context-v2", date_str, selection["season"], game_type)
+    key = ("team-context-v3", date_str, selection["season"], game_type)
     cached = _nhl_display_cached(key)
     if cached is not None and not refresh:
         return JSONResponse(cached)
@@ -995,7 +995,7 @@ async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: b
     teams = {
         abbr: dict(abbr=abbr, name=name, gp=0 if reports[0] is not None else None,
                    sfPG=None, saPG=None, gfPG=None, gaPG=None,
-                   ppForPct=None, ppAgainstPct=None, ppChancesPG=None,
+                   ppForPct=None, ppAgainstPct=None, pkPct=None, ppChancesPG=None,
                    shorthandedPG=None, ppOpportunities=None, shorthandedOpportunities=None)
         for abbr, name in _NHL_TEAM_FULL.items()
     }
@@ -1042,6 +1042,8 @@ async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: b
                         reported = reported * 100 if reported <= 1 else reported
                         rate = round(reported if is_pp else 100 - reported, 2)
                 team["ppForPct" if is_pp else "ppAgainstPct"] = rate if rate is None or 0 <= rate <= 100 else None
+                if not is_pp and team["ppAgainstPct"] is not None:
+                    team["pkPct"] = round(100 - team["ppAgainstPct"], 2)
                 team["ppChancesPG" if is_pp else "shorthandedPG"] = _nhl_display_ratio(
                     opportunities, gp)
     unavailable = [name for name, rows in
@@ -1050,7 +1052,7 @@ async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: b
     if reports[0] == []:
         unavailable.append("NHL.com returned no completed-game team summary for this selection")
     payload = {**selection, "teams": list(teams.values()),
-               "source": "NHL.com", "statsSchemaVersion": 2,
+               "source": "NHL.com", "statsSchemaVersion": 3,
                "reportCounts": {
                    name: len(rows) if rows is not None else None
                    for name, rows in zip(("summary", "powerplay", "penaltykill"), reports)},
@@ -13475,6 +13477,7 @@ function _ntsGet(key,url,force){
 var _ntsStats=[
  {k:'saPG',l:'Shots Against',f:1},{k:'sfPG',l:'Shots For',f:1},{k:'gfPG',l:'Goals For',f:2},
  {k:'gaPG',l:'Goals Against',f:2},{k:'ppForPct',l:'PP For %',f:1,pct:1,den:'ppOpportunities'},
+ {k:'pkPct',l:'PK %',f:1,pct:1,den:'shorthandedOpportunities'},
  {k:'ppAgainstPct',l:'PP Against %',f:1,pct:1,den:'shorthandedOpportunities'}];
 function _ntsVal(t,s){
   if(!t||_ntsNum(t.gp)===null||t.gp<=0)return null;
@@ -13504,7 +13507,7 @@ function nhlTeamStatsMount(raw){
   raw=raw||window.__NHL_RAW__||{};
   var date=raw.targetDate||raw.date||window.__NHL_DATE__||'';
   var gt=_ntsGameType(raw);
-  var key='team|'+date+'|'+gt;
+  var key='team-v3|'+date+'|'+gt;
   var open=document.getElementById('nts-ov');if(open&&open.__ntsContextKey!==key&&open.__ntsClose)open.__ntsClose();
   var url='/api/nhl/team-context?date_str='+encodeURIComponent(date)+'&game_type='+gt;
   el.__ntsKey=key;
@@ -13535,7 +13538,7 @@ function nhlTeamStatsMount(raw){
       var ranked_=r.v!==null;
       h+='<button type="button" class="nts-chip" data-ab="'+_ntsEsc(r.t.abbr)+'" aria-haspopup="dialog"><span class="nts-rk">'+(ranked_?'#'+(i+1):'--')+'</span><span class="nts-ab">'+_ntsEsc(r.t.abbr)+'</span>'+(ranked_?'<span class="nts-val">'+_ntsFmt(r.v,s)+'</span>':'<span class="nts-na">N/A</span>')+'</button>';
     });
-    h+='</div><div class="nts-note">'+(s.pct?'Conversion rate':'Per game')+', ranked high to low. N/A teams are unranked. Stats through '+_ntsEsc(data.throughDate||'the day before this game')+'.'+(s.k==='ppAgainstPct'?' PP goals allowed / times shorthanded; lower is better defensively.':'')+(data.unavailable&&data.unavailable.length?' Unavailable: '+data.unavailable.map(_ntsEsc).join(', ')+'. <button type="button" class="nts-btn" id="nts-partial-retry">Retry missing stats</button>':'')+'</div>';
+    h+='</div><div class="nts-note">'+(s.k==='pkPct'?'Penalty-kill success rate':s.pct?'Conversion rate':'Per game')+', ranked high to low. N/A teams are unranked. Stats through '+_ntsEsc(data.throughDate||'the day before this game')+'.'+(s.k==='ppAgainstPct'?' PP goals allowed / times shorthanded; lower is better defensively.':'')+(s.k==='pkPct'?' Successful kills / times shorthanded; higher is better defensively.':'')+(data.unavailable&&data.unavailable.length?' Unavailable: '+data.unavailable.map(_ntsEsc).join(', ')+'. <button type="button" class="nts-btn" id="nts-partial-retry">Retry missing stats</button>':'')+'</div>';
     el.innerHTML=shell(h);
     el.querySelectorAll('.nts-tab').forEach(function(b){b.onclick=function(){sel=+b.getAttribute('data-i');draw();};});
     var se=el.querySelector('.nts-sel');if(se)se.onchange=function(){sel=+se.value;draw();};
@@ -13549,7 +13552,7 @@ function nhlTeamStatsMount(raw){
     if(!team)return;
     var cols=[team];if(oppAb)cols.push(opp||{abbr:oppAb,missing:true});
     function cell(t,s){if(t.missing)return '<span class="nts-na">N/A</span>';var f=_ntsFmt(_ntsVal(t,s),s);return f===null?'<span class="nts-na">N/A</span>':f;}
-    var order=[1,0,2,3,4,5];
+    var order=[1,0,2,3,4,5,6];
     var h='<h3 id="nts-ttl" style="margin:0 0 2px;font-size:.95rem;color:#fbbf24">'+_ntsEsc(team.name||team.abbr)+(oppAb?' vs '+_ntsEsc(opp&&opp.name?opp.name:oppAb):'')+'</h3>';
     h+='<div class="nts-sub">'+_ntsEsc(data.seasonLabel)+' only - '+_ntsEsc(data.gameTypeLabel)+' - through '+_ntsEsc(data.throughDate||'previous day')+'</div>';
     if(!oppAb)h+='<div class="nts-note">No game today for '+_ntsEsc(ab)+', so no opponent comparison. Showing team stats alone.</div>';
