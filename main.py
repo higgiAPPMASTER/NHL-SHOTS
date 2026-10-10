@@ -132,8 +132,11 @@ _progress = {"stage": "Ready", "done": 0, "total": 0, "pct": 0}
 
 import contextvars as _nhl_progress_contextvars
 import threading as _nhl_progress_threading
+from contextlib import asynccontextmanager as _nhl_asynccontextmanager
+from copy import deepcopy as _nhl_deepcopy
 
 _NHL_BATCH_CONTEXT = _nhl_progress_contextvars.ContextVar("nhl_batch_progress", default=False)
+_NHL_BATCH_FEEDS = _nhl_progress_contextvars.ContextVar("nhl_batch_feeds", default=None)
 _NHL_BATCH_PROGRESS_LOCK = _nhl_progress_threading.RLock()
 _NHL_BATCH_PROGRESS = {"status": "IDLE", "pct": 0, "stage": "Ready"}
 
@@ -182,7 +185,7 @@ def _nhl_batch_worker(date_str: str):
     global _CRON_BUSY_NHL
     token = _NHL_BATCH_CONTEXT.set(True)
     try:
-        batch = asyncio.run(_nhl_run_all_and_cache(date_str))
+        batch = asyncio.run(_nhl_batch_with_shared_feeds(date_str))
         result = {key: value for key, value in batch.items() if key != "results"}
         complete = all(
             row.get("ok") and (row.get("boardStorage") or {}).get("durable")
@@ -204,6 +207,31 @@ def _nhl_batch_worker(date_str: str):
     finally:
         _NHL_BATCH_CONTEXT.reset(token)
         _CRON_BUSY_NHL = False
+
+
+async def _nhl_batch_with_shared_feeds(date_str: str):
+    """Reuse source data/connections for one run, never system-specific picks."""
+    async with httpx.AsyncClient(
+            follow_redirects=True, timeout=20,
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=32)) as client:
+        token = _NHL_BATCH_FEEDS.set({
+            "client": client, "limit": asyncio.Semaphore(32),
+            "responses": {}, "inflight": {}, "log_keys": set(), "pp_roles": {},
+        })
+        try:
+            return await _nhl_run_all_and_cache(date_str)
+        finally:
+            _NHL_BATCH_FEEDS.reset(token)
+
+
+@_nhl_asynccontextmanager
+async def _nhl_feed_client(timeout=20):
+    shared = _NHL_BATCH_FEEDS.get()
+    if shared is not None:
+        yield shared["client"]
+    else:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+            yield client
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -281,7 +309,7 @@ def _odds_cache_set(app: str, date_key: str, data):
 #  NHL API helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _fetch(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
+async def _fetch_once(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
     try:
         r = await client.get(url, timeout=20)
         if r.status_code == 200:
@@ -289,6 +317,31 @@ async def _fetch(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
     except Exception as e:
         print(f"[NHL] {url} → {e}")
     return None
+
+
+async def _fetch(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
+    shared = _NHL_BATCH_FEEDS.get()
+    if shared is None or not str(url).startswith((NHL_API + "/", NHL_STATS + "/")):
+        return await _fetch_once(url, client)
+    # Reuse stable roster/stat inputs, not live gamecenter/lineup responses.
+    cacheable = "/roster/" in url or url.startswith(NHL_STATS + "/")
+    if cacheable and url in shared["responses"]:
+        return _nhl_deepcopy(shared["responses"][url])
+    async def limited_fetch():
+        async with shared["limit"]:
+            return await _fetch_once(url, shared["client"])
+    task = shared["inflight"].get(url)
+    if task is None:
+        task = asyncio.create_task(limited_fetch())
+        shared["inflight"][url] = task
+    try:
+        data = await asyncio.shield(task)
+        if cacheable and isinstance(data, dict) and data:
+            shared["responses"][url] = _nhl_deepcopy(data)
+        return _nhl_deepcopy(data)
+    finally:
+        if task.done() and shared["inflight"].get(url) is task:
+            shared["inflight"].pop(url, None)
 
 
 def get_season_for_date(d: date, game: Optional[Dict] = None) -> str:
@@ -1718,7 +1771,7 @@ def _nhl_last5_venue_stats(logs: List[Dict], target_date: str, home_road: str) -
 
 async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
     async with sem:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
+        async with _nhl_feed_client() as c:
             data = await _fetch(f"{NHL_API}/roster/{team}/current", c)
     if not data:
         return []
@@ -1736,7 +1789,7 @@ async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
 async def get_goalies(team: str, sem: asyncio.Semaphore) -> List[Dict]:
     """Goalies for a team — separate pool from skaters (saves market)."""
     async with sem:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
+        async with _nhl_feed_client() as c:
             data = await _fetch(f"{NHL_API}/roster/{team}/current", c)
     if not data:
         return []
@@ -3118,8 +3171,17 @@ async def _nhl_pp_role_logs(
     result: Dict[int, List[Dict]] = {int(pid): [] for pid in player_ids}
     if not player_ids:
         return result
+    shared = _NHL_BATCH_FEEDS.get()
+    role_cache = shared["pp_roles"] if shared is not None else {}
+    for pid in result:
+        key = (pid, season, target_date)
+        if key in role_cache:
+            result[pid] = _nhl_deepcopy(role_cache[key])
+    missing_ids = [pid for pid in result if (pid, season, target_date) not in role_cache]
+    if not missing_ids:
+        return result
     cutoff = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
-    batches = [player_ids[i:i + 20] for i in range(0, len(player_ids), 20)]
+    batches = [missing_ids[i:i + 20] for i in range(0, len(missing_ids), 20)]
     sem = asyncio.Semaphore(6)
 
     async def fetch_batch(batch: List[int], game_type: int) -> List[Dict]:
@@ -3135,23 +3197,24 @@ async def _nhl_pp_role_logs(
         }
         async with sem:
             try:
-                async with httpx.AsyncClient(timeout=30) as c:
+                async with _nhl_feed_client(timeout=30) as c:
                     r = await c.get(
                         f"{NHL_STATS}/skater/powerplay", params=params,
                         headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+                        timeout=30,
                     )
                     r.raise_for_status()
                     return r.json().get("data", [])
             except Exception as exc:
                 print(f"[PP Role] fetch error ({game_type}, {len(batch)} players): {exc}")
-                return []
+                return None
 
     rows = await asyncio.gather(*[
         fetch_batch(batch, game_type)
         for batch in batches for game_type in (2, 3)
     ])
     for group in rows:
-        for row in group:
+        for row in group or []:
             pid = int(row.get("playerId") or 0)
             if pid in result:
                 result[pid].append({
@@ -3160,6 +3223,11 @@ async def _nhl_pp_role_logs(
                 })
     for logs in result.values():
         logs.sort(key=lambda x: x["date"], reverse=True)
+    for index, batch in enumerate(batches):
+        # An empty successful report is valid; failed reads must remain retryable.
+        if rows[index * 2] is not None and rows[index * 2 + 1] is not None:
+            for pid in batch:
+                role_cache[(int(pid), season, target_date)] = _nhl_deepcopy(result[int(pid)])
     print(f"[PP Role] verified game-level PP TOI for "
           f"{sum(bool(v) for v in result.values())}/{len(result)} roster players")
     return result
@@ -4482,7 +4550,10 @@ def _nhl_log_cache_get(pid: int, season: str, game_type: int):
         else _NHL_COMPLETED_LOG_TTL
     )
     try:
-        if not path.exists() or time.time() - path.stat().st_mtime >= ttl:
+        shared = _NHL_BATCH_FEEDS.get()
+        key = (int(pid), season, int(game_type))
+        already_read = shared is not None and key in shared["log_keys"]
+        if not path.exists() or (not already_read and time.time() - path.stat().st_mtime >= ttl):
             return None
         payload = json.loads(path.read_text(encoding="utf-8"))
         if (
@@ -4492,6 +4563,8 @@ def _nhl_log_cache_get(pid: int, season: str, game_type: int):
             or not isinstance(payload.get("data"), dict)
         ):
             return None
+        if shared is not None:
+            shared["log_keys"].add(key)
         return payload["data"]
     except Exception:
         return None
@@ -4510,6 +4583,9 @@ def _nhl_log_cache_set(pid: int, season: str, game_type: int, data: dict):
             }, ensure_ascii=False),
             encoding="utf-8",
         )
+        shared = _NHL_BATCH_FEEDS.get()
+        if shared is not None:
+            shared["log_keys"].add((int(pid), season, int(game_type)))
     except Exception:
         pass
 
@@ -4533,8 +4609,7 @@ async def _nhl_cached_log_payloads(
 
     if missing:
         async with sem:
-            async with httpx.AsyncClient(
-                    follow_redirects=True, timeout=30) as c:
+            async with _nhl_feed_client(timeout=30) as c:
                 results = await asyncio.gather(*[
                     _fetch(
                         f"{NHL_API}/player/{pid}/game-log/{season}/{game_type}",
@@ -4550,10 +4625,14 @@ async def _nhl_cached_log_payloads(
 
 
 async def _nhl_player_logs(pid: int, sem: asyncio.Semaphore,
-                           additional_season: str = "") -> List[Dict]:
+                           additional_season: str = "",
+                           only_season: bool = False) -> List[Dict]:
     """Load NHL game logs for a player across multiple seasons."""
     all_logs = []
-    payloads = await _nhl_cached_log_payloads(pid, sem, additional_season)
+    payloads = await _nhl_cached_log_payloads(
+        pid, sem, additional_season, only_season=only_season)
+    if only_season and additional_season and (additional_season, 2) not in payloads:
+        raise RuntimeError("Current-season NHL regular-season game log unavailable")
     for data in payloads.values():
         if not isinstance(data, dict): continue
         for g in data.get("gameLog", []):
@@ -5453,8 +5532,32 @@ async def run_picks(
             player_profiles.append(profile)
             profile_seen.add(key)
 
+    # Form boards need this season even though ordinary model history uses
+    # its existing configured seasons. Do not change those model inputs.
+    _progress = _nhl_pipeline_progress({
+        "stage": "Loading current-season Hot/Cold history...",
+        "done": 0, "total": len(pool), "pct": 98})
+    form_ids = list(dict.fromkeys(p["pid"] for p in pool))
+    form_current = await asyncio.gather(*[
+        _nhl_player_logs(pid, sem_nhl, season, only_season=True)
+        for pid in form_ids
+    ], return_exceptions=True)
+    form_logs = dict(logs_map)
+    form_unavailable = 0
+    for pid, current in zip(form_ids, form_current):
+        if not isinstance(current, list):
+            form_unavailable += 1
+            continue
+        merged = {
+            (g.get("date"), g.get("opponent"), g.get("homeRoad")): g
+            for g in logs_map.get(pid, [])}
+        merged.update({
+            (g.get("date"), g.get("opponent"), g.get("homeRoad")): g for g in current})
+        form_logs[pid] = sorted(merged.values(), key=lambda g: g.get("date", ""), reverse=True)
+    if form_unavailable:
+        logger.warning("Current-season Hot/Cold history unavailable for %s players", form_unavailable)
     hot_cold_players = _nhl_hot_cold_players(
-        pool, logs_map, target_date, pts_lines_map, player_profiles)
+        pool, form_logs, target_date, pts_lines_map, player_profiles)
 
     _result = {
         "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
@@ -5492,6 +5595,8 @@ async def run_picks(
         "playerProfiles": player_profiles,
         "hotColdVersion": 1,
         "hotColdPlayers": hot_cold_players,
+        "hotColdSeason": season,
+        "hotColdSourceUnavailable": form_unavailable,
         "games":         games,
         "gameTypes":     slate_meta["gameTypes"],
         "gameTypeLabels": slate_meta["gameTypeLabels"],
@@ -8215,6 +8320,10 @@ function _nhlHotColdSection(raw,rows,q){
     +grp('Edge','e',_nhlHcEdge,[['ALL','All qualifying players'],['POS','Positive Edge Only']])+'</div>';
   if(raw.hotColdVersion!==1||!Array.isArray(raw.hotColdPlayers)){
     return h+'<div class="hc-note">Saved board predates this section; new analysis needed.</div></section>';
+  }
+  if(Number(raw.hotColdSourceUnavailable)>0){
+    h+='<div class="hc-note" style="color:#fbbf24">Current-season Hot/Cold history could not be loaded for '
+      +Number(raw.hotColdSourceUnavailable)+' players. No previous-season games were substituted.</div>';
   }
   var lists=[['shots','Shots on Goal'],['points','Points (1+)']].filter(function(m){return _nhlHcMarket==='ALL'||_nhlHcMarket===m[0];});
   lists.forEach(function(m){
