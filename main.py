@@ -322,7 +322,9 @@ async def _nhl_load_history_map(player_ids, loader, preserve_unavailable=False):
         return {pid: row if isinstance(row, list) else empty
                 for pid, row in zip(ids, rows)}
     histories = _nhl_run_working_map()
-    limit = asyncio.Semaphore(4)
+    # Histories are written straight to disk, so 6 concurrent loads speed the
+    # slate while keeping peak memory well below unbounded fan-out.
+    limit = asyncio.Semaphore(6)
 
     async def load_one(pid):
         async with limit:
@@ -6716,19 +6718,27 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
 
     # All four player boards and snapshots must finish before optional
     # alternate Coach requests can spend their timeout budgets.
-    for system in ("A", "B", "C", "D"):
-        _nhl_collect_run_memory()
-        _nhl_batch_phase(system, f"Capturing System {system} Coach presets and alternate lines",
-                         84 + 3 * ("A", "B", "C", "D").index(system))
-        result = systems[system]
-        if ("error" not in result and not result.get("no_games")
-                and not preseason_slate
-                and result.get("officialCaptureAllowed", True)):
-            await _nhl_capture_daily_coach(target_date, result, system)
-        # Disk reads are independent mutable copies. Write status changes
-        # back so final boards and the response keep all capture metadata.
-        systems[system] = result
-        result = None
+    # Two systems at a time: they share the cached alternate source feed and
+    # histories, halving this phase without four concurrent memory peaks.
+    _nhl_collect_run_memory()
+    coach_limit = asyncio.Semaphore(2)
+
+    async def capture_one(system):
+        async with coach_limit:
+            _nhl_batch_phase(system, f"Capturing System {system} Coach presets and alternate lines",
+                             84 + 3 * ("A", "B", "C", "D").index(system))
+            board_copy = systems[system]
+            if ("error" not in board_copy and not board_copy.get("no_games")
+                    and not preseason_slate
+                    and board_copy.get("officialCaptureAllowed", True)):
+                await _nhl_capture_daily_coach(target_date, board_copy, system)
+            # Disk reads are independent mutable copies. Write status changes
+            # back so final boards and the response keep all capture metadata.
+            systems[system] = board_copy
+
+    await asyncio.gather(*(capture_one(system) for system in ("A", "B", "C", "D")))
+    _nhl_collect_run_memory()
+    result = None
 
     summary = {}
     for system, result in systems.items():
