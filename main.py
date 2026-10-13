@@ -1533,6 +1533,15 @@ async def nhl_player_display_context(pid: int, date_str: str, position: str = "F
                 payload["savePct"] = _nhl_display_number(row.get("savePct"))
             if payload["savePct"] is not None and payload["savePct"] > 1:
                 payload["savePct"] = None
+            payload.update({
+                "goalsAgainstAverage": _nhl_display_number(row.get("goalsAgainstAverage")),
+                "wins": _nhl_display_number(row.get("wins")),
+                "losses": _nhl_display_number(row.get("losses")),
+                "otLosses": _nhl_display_number(row.get("otLosses")),
+                "shutouts": _nhl_display_number(row.get("shutouts")),
+                "savesPerGame": _nhl_display_ratio(row.get("saves"), gp),
+                "shotsAgainstPerGame": _nhl_display_ratio(row.get("shotsAgainst"), gp),
+            })
         else:
             toi = matching[1][0] if len(matching[1]) == 1 else {}
             payload["toiAvgSec"] = _nhl_display_number(toi.get("timeOnIcePerGame"))
@@ -2173,6 +2182,38 @@ def _nhl_last5_display_stats(game: dict) -> dict:
             "plusMinus": number("plusMinus"), "shots": number("shots")}
 
 
+def _nhl_goalie_display_stats(game: Dict) -> Dict:
+    """Actual goalie box fields only; never changes the model's saves value."""
+    def count(key):
+        value = game.get(key)
+        try:
+            return int(value) if value is not None and value != "" and int(value) >= 0 else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+    sa, ga, saves = count("shotsAgainst"), count("goalsAgainst"), count("saves")
+    if saves is None and sa is not None and ga is not None and sa >= ga:
+        saves = sa - ga
+    sv = _nhl_display_ratio(saves, sa, digits=4) if saves is not None and sa else None
+    if sv is None and sa != 0:
+        sv = _nhl_display_number(game.get("savePct"))
+        if sv is not None and 1 < sv <= 100:
+            sv /= 100
+        if sv is not None and not 0 <= sv <= 1:
+            sv = None
+    toi = game.get("toi")
+    if toi is None or toi == "":
+        toi = game.get("timeOnIce")
+    toi_sec = None
+    if isinstance(toi, str) and re.fullmatch(r"\d{1,3}:\d{2}", toi):
+        toi_sec = _parse_toi(toi)
+    elif isinstance(toi, (int, float)) and math.isfinite(toi) and toi >= 0:
+        toi_sec = toi
+    decision = str(game.get("decision") or "").strip().upper()
+    return {"saves": saves, "shotsAgainst": sa, "goalsAgainst": ga,
+            "savePct": sv, "toiSec": toi_sec,
+            "decision": decision if decision in ("W", "L", "O", "OT", "OTL", "SOL", "T") else None}
+
+
 def _nhl_current_season_logs(logs: List[Dict], target_date: str) -> List[Dict]:
     """Never backfill current-season Last 5 samples with an older NHL season."""
     season = get_season_for_date(date.fromisoformat(target_date))
@@ -2184,13 +2225,16 @@ def _nhl_current_season_logs(logs: List[Dict], target_date: str) -> List[Dict]:
 
 def _nhl_last5_venue_stats(logs: List[Dict], target_date: str, home_road: str) -> dict:
     """Current-season display sample: last five same-venue games, any opponent."""
+    goalie = any(isinstance(g.get("last5DisplayStats"), dict)
+                 and "saves" in g["last5DisplayStats"] for g in logs)
+    extra = {"position": "G", "statsVersion": 2} if goalie else {}
     selected = sorted(
         (g for g in _nhl_current_season_logs(logs, target_date)
          if g.get("date") and g.get("homeRoad") == home_road),
         key=lambda g: g["date"], reverse=True)
     rows, seen = [], set()
     if home_road not in ("H", "R"):
-        return {"venue": home_road, "asOf": target_date, "games": []}
+        return {"venue": home_road, "asOf": target_date, "games": [], **extra}
     for game in selected:
         identity = (game["date"], game.get("opponent"))
         if identity in seen:
@@ -2204,7 +2248,7 @@ def _nhl_last5_venue_stats(logs: List[Dict], target_date: str, home_road: str) -
                      **stats})
         if len(rows) == 5:
             break
-    return {"venue": home_road, "asOf": target_date, "games": rows}
+    return {"venue": home_road, "asOf": target_date, "games": rows, **extra}
 
 
 async def get_roster(team: str, sem: asyncio.Semaphore) -> List[Dict]:
@@ -3715,7 +3759,7 @@ async def _goalie_season_logs(pid: int, season: str, c: httpx.AsyncClient) -> Li
             logs.append({
                 "date":     g.get("gameDate",     ""),
                 "saves":    saves,
-                "last5DisplayStats": _nhl_last5_display_stats(g),
+                "last5DisplayStats": _nhl_goalie_display_stats(g),
                 "homeRoad": g.get("homeRoadFlag", ""),
                 "opponent": g.get("opponentAbbrev", ""),
             })
@@ -6292,8 +6336,8 @@ async def _nhl_store_generated_board(date_str: str, system: str, board: dict) ->
     if saved:
         board.pop("boardStorageError", None)
     else:
-        board["boardStorageError"] = (
-            f"System {system} finished but its permanent display board was not saved.")
+        board.setdefault("boardStorageError", (
+            f"System {system} finished but its permanent display board was not saved."))
     return bool(saved)
 
 
@@ -8539,7 +8583,8 @@ async function runAllNhlSystems(){
       var row=(data.systems||{})[system]||{};
       parts.push(system+': '+(row.ok
         ?(data.preseason?(row.picks+' generated · view-only'):(row.picks+' logged'))
-        :(row.error||'failed'))+(row.boardStorage&&row.boardStorage.durable===false?' · permanent board NOT saved':''));
+        :(row.error||'failed'))+(row.boardStorage&&row.boardStorage.durable===false
+          ?' · permanent board NOT saved'+(row.boardStorageError?' — '+row.boardStorageError:''):''));
     });
     var allSaved=['A','B','C','D'].every(function(system){
       var row=(data.systems||{})[system]||{};
@@ -9027,6 +9072,7 @@ function _nhlHcHistory(p){
 }
 function _nhlLast5Box(p){
   var data=p.last5VenueStats,venue=(data&&data.venue)||p.homeRoad||p.last5HomeRoad||'';
+  var position=_nhlPositionGroup(p)==='G'||p.mkt==='Goalie Saves'?'G':'F';
   var raw=window.__NHL_RAW__||{},dt=(data&&data.asOf)||p.last5Date||raw.targetDate||raw.date||window.__NHL_DATE__||'';
   if(venue!=='H'&&venue!=='R'){
     (raw.games||[]).some(function(game){
@@ -9035,45 +9081,58 @@ function _nhlLast5Box(p){
       return false;
     });
   }
-  var key=String(p.pid||'')+'|'+venue+'|'+dt;
+  var key=String(p.pid||'')+'|'+venue+'|'+dt+(position==='G'?'|goalie-v2':'');
   data=data||_nhlLast5Cache[key];
+  if(position==='G'&&(!data||data.position!=='G'||data.statsVersion!==2))data=null;
   var valid=!!p.pid&&!!dt&&(venue==='H'||venue==='R');
   var state=data?'ready':valid?'pending':'unavailable';
-  return '<section class="nhl-last5-box" data-load="'+state+'" data-key="'+_nhlEsc(key)+'" data-pid="'+_nhlEsc(p.pid||'')+'" data-venue="'+_nhlEsc(venue)+'" data-date="'+_nhlEsc(dt)+'" style="margin:12px 0;padding:10px;border:1px solid #334155;border-radius:10px;background:#0b1626;min-width:0">'
-    +_nhlLast5Content(data,venue,state==='pending'?'Loading last 5 game stats…':'Last 5 stats unavailable: game venue or player details were not saved.')+'</section>';
+  return '<section class="nhl-last5-box" data-load="'+state+'" data-key="'+_nhlEsc(key)+'" data-pid="'+_nhlEsc(p.pid||'')+'" data-venue="'+_nhlEsc(venue)+'" data-date="'+_nhlEsc(dt)+'" data-position="'+position+'" style="margin:12px 0;padding:10px;border:1px solid #334155;border-radius:10px;background:#0b1626;min-width:0">'
+    +_nhlLast5Content(data,venue,state==='pending'?'Loading last 5 game stats…':'Last 5 stats unavailable: game venue or player details were not saved.',position)+'</section>';
 }
-function _nhlLast5Content(data,venue,message){
+function _nhlLast5Content(data,venue,message,position){
+  var goalie=position==='G'||(data&&data.position==='G');
   var title='LAST 5 '+(venue==='H'?'HOME':venue==='R'?'AWAY':'HOME / AWAY')+' GAMES · THIS SEASON';
   var games=data?_nhlCurrentSeasonGames(data.games,data.asOf):[];
   var head='<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;color:#7dd3fc;font-size:.69rem;font-weight:900;letter-spacing:.04em">'+title+(data?'<span style="color:#94a3b8;font-weight:500">'+games.length+' available</span>':'')+'</div>';
   if(!data)return head+'<div style="font-size:.7rem;color:#94a3b8">'+_nhlEsc(message)+'</div>';
   if(!games.length)return head+'<div style="font-size:.7rem;color:#94a3b8">No earlier '+(venue==='H'?'home':'away')+' games this NHL season. Previous seasons are not used to fill the Last 5.</div>';
-  var cols=[['goals','G','Goals'],['points','P','Points'],['assists','A','Assists'],['powerPlayPoints','PPP','Power Play Points'],['plusMinus','+/−','Plus/Minus'],['shots','SOG','Shots on Goal']];
+  var cols=goalie
+    ?[['saves','SV','Saves'],['shotsAgainst','SA','Shots Against'],['goalsAgainst','GA','Goals Against'],['savePct','SV%','Save Percentage'],['toiSec','TOI','Time on Ice'],['decision','Result','Game Decision']]
+    :[['goals','G','Goals'],['points','P','Points'],['assists','A','Assists'],['powerPlayPoints','PPP','Power Play Points'],['plusMinus','+/−','Plus/Minus'],['shots','SOG','Shots on Goal']];
   var headers='<th scope="col" style="text-align:left;padding:5px 4px">Date</th><th scope="col" style="padding:5px 4px">Opp</th>'+cols.map(function(c){return '<th scope="col" title="'+c[2]+'" style="padding:5px 4px"><abbr title="'+c[2]+'" style="text-decoration:none">'+c[1]+'</abbr></th>';}).join('');
   var rows=games.map(function(g){
     var label=_nhlGameDateLabel(g.date);
     return '<tr><td style="text-align:left;padding:6px 4px;white-space:nowrap" title="'+_nhlEsc(g.date)+'">'+_nhlEsc(label.replace(/, [0-9]{4}$/,''))+'</td><td style="padding:6px 4px;color:#94a3b8">'+_nhlEsc(g.opponent||'—')+'</td>'+cols.map(function(c){
       var value=g[c[0]],number=value==null||value===''?null:Number(value);
       var text=number==null||!isFinite(number)?'—':c[0]==='plusMinus'&&number>0?'+'+number:String(number);
+      if(c[0]==='decision')text=value||'—';
+      if(c[0]==='savePct'&&number!=null&&isFinite(number))text=number.toFixed(3);
+      if(c[0]==='toiSec'&&number!=null&&isFinite(number)){
+        var minutes=Math.floor(number/60),seconds=Math.round(number%60);
+        if(seconds===60){minutes++;seconds=0;}
+        text=minutes+':'+(seconds<10?'0':'')+seconds;
+      }
       var color=c[0]==='plusMinus'&&number!=null?(number<0?'#fb7185':number>0?'#4ade80':'#cbd5e1'):'#e2e8f0';
       return '<td style="padding:6px 4px;color:'+color+';font-variant-numeric:tabular-nums">'+_nhlEsc(text)+'</td>';
     }).join('')+'</tr>';
   }).join('');
   return head+'<div style="overflow-x:auto"><table aria-label="'+title+' statistics" style="width:100%;min-width:300px;border-collapse:collapse;text-align:center;font-size:.67rem"><thead style="color:#94a3b8;border-bottom:1px solid #334155"><tr>'+headers+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
-    +'<div style="margin-top:6px;color:#64748b;font-size:.62rem">This NHL season only · all opponents · before '+_nhlEsc(data.asOf)+' · no previous-season backfill · G goals · P points · A assists · PPP power play points · SOG shots</div>';
+    +'<div style="margin-top:6px;color:#64748b;font-size:.62rem">This NHL season only · all opponents · before '+_nhlEsc(data.asOf)+' · no previous-season backfill · '
+    +(goalie?'SV saves · SA shots against · GA goals against · SV% save percentage · TOI time on ice':'G goals · P points · A assists · PPP power play points · SOG shots')+'</div>';
 }
 function _nhlLast5Pump(){
   while(_nhlLast5Active<4&&_nhlLast5Queue.length){
     var job=_nhlLast5Queue.shift();_nhlLast5Active++;
     (function(task){
-      fetch('/api/nhl/player-last-five?'+new URLSearchParams({pid:task.pid,date_str:task.date,home_road:task.venue}).toString())
+      fetch('/api/nhl/player-last-five?'+new URLSearchParams({pid:task.pid,date_str:task.date,home_road:task.venue,position:task.position||'F'}).toString())
         .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
         .then(function(data){
           if(!data||!Array.isArray(data.games)||data.venue!==task.venue||data.asOf!==task.date)throw new Error('Invalid stats response');
+          if(task.position==='G'&&(data.position!=='G'||data.statsVersion!==2))throw new Error('Invalid goalie stats response');
           _nhlLast5Cache[task.key]=data;
-          (_nhlLast5Waiting[task.key]||[]).forEach(function(box){if(box.isConnected){box.dataset.load='ready';box.innerHTML=_nhlLast5Content(data,task.venue);}});
+          (_nhlLast5Waiting[task.key]||[]).forEach(function(box){if(box.isConnected){box.dataset.load='ready';box.innerHTML=_nhlLast5Content(data,task.venue,null,task.position);}});
         }).catch(function(){
-          (_nhlLast5Waiting[task.key]||[]).forEach(function(box){if(box.isConnected){box.dataset.load='error';box.innerHTML=_nhlLast5Content(null,task.venue,'Could not load last 5 game stats. Reopen the card to retry.');}});
+          (_nhlLast5Waiting[task.key]||[]).forEach(function(box){if(box.isConnected){box.dataset.load='error';box.innerHTML=_nhlLast5Content(null,task.venue,'Could not load last 5 game stats. Reopen the card to retry.',task.position);}});
         }).finally(function(){delete _nhlLast5Waiting[task.key];_nhlLast5Active--;_nhlLast5Pump();});
     })(job);
   }
@@ -9082,10 +9141,10 @@ function _nhlLast5Scan(){
   document.querySelectorAll('.nhl-last5-box[data-load="pending"]').forEach(function(box){
     if(box.closest('details:not([open])'))return;
     var key=box.dataset.key,venue=box.dataset.venue;
-    if(_nhlLast5Cache[key]){box.dataset.load='ready';box.innerHTML=_nhlLast5Content(_nhlLast5Cache[key],venue);return;}
+    if(_nhlLast5Cache[key]){box.dataset.load='ready';box.innerHTML=_nhlLast5Content(_nhlLast5Cache[key],venue,null,box.dataset.position);return;}
     box.dataset.load='loading';
     if(_nhlLast5Waiting[key]){_nhlLast5Waiting[key].push(box);return;}
-    _nhlLast5Waiting[key]=[box];_nhlLast5Queue.push({key:key,pid:box.dataset.pid,date:box.dataset.date,venue:venue});
+    _nhlLast5Waiting[key]=[box];_nhlLast5Queue.push({key:key,pid:box.dataset.pid,date:box.dataset.date,venue:venue,position:box.dataset.position||'F'});
   });
   _nhlLast5Pump();
 }
@@ -9315,8 +9374,8 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
   var records=freshRecords||_nhlRecordsForPlayer(p), opponent=p.opponent||'today\\'s opponent';
   var last5=p.last5VenueStats;
   Object.keys(records).some(function(key){if(records[key]&&records[key].last5VenueStats){last5=records[key].last5VenueStats;return true;}return false;});
-  var categories=['Shots on Goal','Points (1+)','Power Play Points (1+)','Plus/Minus','Assists (1+)','Goals (1+)','Goalie Saves'];
-  var isGoalie=_nhlPositionGroup(p)==='G';
+  var isGoalie=_nhlPositionGroup(p)==='G'||p.mkt==='Goalie Saves';
+  var categories=isGoalie?['Goalie Saves']:['Shots on Goal','Points (1+)','Power Play Points (1+)','Plus/Minus','Assists (1+)','Goals (1+)','Goalie Saves'];
   var cards=categories.map(function(label){
     if((label==='Goalie Saves')!==isGoalie)
       return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">Not applicable to this position.</div></article>';
@@ -9326,10 +9385,10 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
   var html='<div class="lad-modal" onclick="event.stopPropagation()">'
     +'<button class="lad-close" onclick="closeNhlLadder()">✕</button>'
     +'<div class="lad-profile"><div class="hs-wrap"><span class="hs-ini">'+_nhlSafe(_initials(p.name))+'</span><img class="hs-img" src="'+_nhlSafe(head)+'" onerror="this.style.display=\\'none\\'"/></div><div><h3>'+_nhlSafe(p.name)+'</h3><div class="lad-profile-team">'+_nhlSafe(p.team||'')+' vs '+_nhlSafe(opponent)+' · '+(p.homeRoad==='H'?'HOME':'AWAY')+'</div></div></div>'
-    +'<div style="font-size:.68rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin-bottom:8px">Category history vs '+_nhlSafe(opponent)+'</div>'
+    +'<div style="font-size:.68rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin-bottom:8px">'+(isGoalie?'Goalie saves history':'Category history')+' vs '+_nhlSafe(opponent)+'</div>'
     +'<div style="color:#94a3b8;font-size:.65rem;margin-bottom:8px">'+(freshRecords?'Full pregame game-log history':errorText?_nhlSafe(errorText):'Loading full game-log history…')+'</div>'
     +'<div id="nhl-player-season-context"></div>'
-    +_nhlLast5Box(Object.assign({},p,{last5VenueStats:last5}))
+    +_nhlLast5Box(Object.assign({},p,{last5VenueStats:last5,positionGroup:isGoalie?'G':p.positionGroup}))
     +_nhlHcHistory(p)
     +'<div class="lad-market-grid">'+cards+'</div></div>';
   var ov=document.createElement('div');
@@ -9352,7 +9411,7 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
   var params=new URLSearchParams({
     pid:String(p.pid),date_str:String(dt),team:String(p.team||''),
     opponent:String(p.opponent||''),home_road:String(p.homeRoad),
-    position:_nhlPositionGroup(p),lines:JSON.stringify(lines)
+    position:isGoalie?'G':_nhlPositionGroup(p),lines:JSON.stringify(lines)
   });
   fetch('/api/nhl/player-history?'+params.toString())
     .then(function(response){if(!response.ok)throw new Error('HTTP '+response.status);return response.json();})
@@ -11744,20 +11803,76 @@ def _nhl_day_read_rows(table, params=None):
             offset += len(page)
 
 
-def _nhl_sb_upsert(table, rows, on_conflict=None):
+def _nhl_safe_save_message(value):
+    """Keep useful storage errors without exposing credentials/private URLs."""
+    message = str(value or "")
+    for secret in (_NHL_SB_KEY, _NHL_SB_URL):
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    message = re.sub(r"https?://[^\s<>\"']+", "[URL]", message)
+    message = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b",
+                     "[redacted token]", message)
+    message = re.sub(
+        r"(?i)(bearer\s+|(?:apikey|api_key|token|password|secret)\s*[:=]\s*)[^\s,;]+",
+        r"\1[redacted]", message)
+    return " ".join(message.split())[:240]
+
+
+def _nhl_sb_upsert(table, rows, on_conflict=None, *, retries=0, failure=None):
+    """Keep boolean callers unchanged; only board writes opt into retries."""
+    def report(message):
+        safe = _nhl_safe_save_message(message)
+        if failure is not None:
+            failure["error"] = safe
+        logger.warning("NHL storage write to %s failed: %s", table, safe)
+
+    if failure is not None:
+        failure.clear()
     if not _NHL_SB_URL or not _NHL_SB_KEY or not rows:
+        report("Storage is not configured." if not _NHL_SB_URL or not _NHL_SB_KEY
+               else "No rows were supplied for this write.")
         return False
-    try:
-        h = {"apikey": _NHL_SB_KEY, "Authorization": f"Bearer {_NHL_SB_KEY}",
-             "Content-Type": "application/json",
-             "Prefer": "resolution=merge-duplicates,return=minimal"}
-        url = f"{_NHL_SB_URL}/rest/v1/{table}"
-        if on_conflict:
-            url += f"?on_conflict={on_conflict}"
-        r = httpx.post(url, headers=h, json=rows, timeout=20)
-        return r.status_code in (200, 201, 204)
-    except Exception as e:
-        print(f"[nhl_sb_upsert] {e}")
+    h = {"apikey": _NHL_SB_KEY, "Authorization": f"Bearer {_NHL_SB_KEY}",
+         "Content-Type": "application/json",
+         "Prefer": "resolution=merge-duplicates,return=minimal"}
+    url = f"{_NHL_SB_URL}/rest/v1/{table}"
+    if on_conflict:
+        url += f"?on_conflict={on_conflict}"
+    attempts = 1 + max(0, min(int(retries), 2))
+    for attempt in range(attempts):
+        retryable = False
+        try:
+            r = httpx.post(url, headers=h, json=rows, timeout=20)
+            if r.status_code in (200, 201, 204):
+                if failure is not None:
+                    failure.clear()
+                return True
+            code, message = "", ""
+            try:
+                payload = r.json()
+                if isinstance(payload, dict):
+                    code = _nhl_safe_save_message(payload.get("code"))
+                    message = _nhl_safe_save_message(payload.get("message"))
+            except (ValueError, TypeError):
+                pass
+            report(
+                f"HTTP {r.status_code}"
+                + (f" ({code})" if code else "")
+                + (f": {message}" if message else ": storage rejected the write.")
+                + f" [attempt {attempt + 1}/{attempts}]")
+            retryable = r.status_code in (408, 425, 429, 500, 502, 503, 504)
+        except httpx.RequestError as exc:
+            report(f"Network error ({type(exc).__name__}) "
+                   f"[attempt {attempt + 1}/{attempts}].")
+            retryable = isinstance(
+                exc, (httpx.TimeoutException, httpx.NetworkError,
+                      httpx.RemoteProtocolError, httpx.ProxyError))
+        except Exception as exc:
+            report(f"Write failed ({type(exc).__name__}): "
+                   + _nhl_safe_save_message(exc))
+        if not retryable or attempt + 1 == attempts:
+            break
+        time.sleep(0.5 * (2 ** attempt))
     return False
 
 _NHL_TRK_APP   = "nhl"
@@ -13338,13 +13453,14 @@ async def nhl_gp_record(grade: bool = False, date_str: str = ""):
     return JSONResponse(_nhl_gp_record_payload())
 
 @app.get("/api/nhl/player-last-five")
-async def nhl_player_last_five(pid: int, date_str: str, home_road: str):
+async def nhl_player_last_five(pid: int, date_str: str, home_road: str,
+                               position: str = "F"):
     """Read-only card display; does not run models or alter saved records."""
     try:
         selected = date.fromisoformat(date_str)
     except ValueError:
         raise HTTPException(status_code=400, detail="Date must use YYYY-MM-DD")
-    if pid <= 0 or home_road not in ("H", "R"):
+    if pid <= 0 or home_road not in ("H", "R") or position not in ("F", "D", "G"):
         raise HTTPException(status_code=400, detail="Player and H/R venue are required")
     year = selected.year if selected.month >= 7 else selected.year - 1
     payloads = await _nhl_cached_log_payloads(
@@ -13358,11 +13474,15 @@ async def nhl_player_last_five(pid: int, date_str: str, home_road: str):
     logs = [
         {"date": game.get("gameDate", ""), "homeRoad": game.get("homeRoadFlag", ""),
          "opponent": game.get("opponentAbbrev", ""),
-         "last5DisplayStats": _nhl_last5_display_stats(game)}
+         "last5DisplayStats": (_nhl_goalie_display_stats(game) if position == "G"
+                               else _nhl_last5_display_stats(game))}
         for data in available for game in data["gameLog"]
         if isinstance(game, dict)
     ]
-    return JSONResponse(_nhl_last5_venue_stats(logs, date_str, home_road),
+    result = _nhl_last5_venue_stats(logs, date_str, home_road)
+    if position == "G":
+        result.update(position="G", statsVersion=2)
+    return JSONResponse(result,
                         headers={"Cache-Control": "private, max-age=600"})
 
 
@@ -14262,6 +14382,7 @@ function nhlTeamStatsMount(raw){
   load(false);
 }
 function _npsGroup(p){
+  if(p.mkt==='Goalie Saves')return 'G';
   if(typeof _nhlPositionGroup==='function')return _nhlPositionGroup(p);
   var s=String(p.positionGroup||p.position||p.pos||'').toUpperCase().charAt(0);
   return s==='G'?'G':s==='D'?'D':'F';
@@ -14301,14 +14422,14 @@ function nhlPlayerContextMount(p,overlay){
   var raw=window.__NHL_RAW__||{};
   var date=raw.targetDate||raw.date||window.__NHL_DATE__||'';
   var gt=_ntsGameType(raw),pos=_npsGroup(p);
-  var key='player|'+p.pid+'|'+date+'|'+gt+'|'+pos;
+  var key='player|'+p.pid+'|'+date+'|'+gt+'|'+pos+(pos==='G'?'|goalie-v2':'');
   el.__npsKey=key;
   function live(){return overlay.isConnected&&overlay.contains(el)&&el.__npsKey===key;}
   function row(l,v){return '<div class="nps-row"><span>'+l+'</span><span>'+(v===null||v===undefined?'<span class="nts-na">N/A</span>':_ntsEsc(v))+'</span></div>';}
   function box(label,inner){el.innerHTML='<div class="nps-box"><b>Current season context</b>'+(label?' <span class="nts-sub">'+_ntsEsc(label)+'</span>':'')+inner+'</div>';}
   var expectedStarter=p.lineupStatus==='STARTER_EXPECTED'||p.starterStatus==='expected';
   if(pos==='G'&&!_npsConfirmed(p,raw)&&!expectedStarter){
-    box('',row('Starter','Unconfirmed')+row('Season SV%',null)+row('Appearances',null));
+    box('',row('Starter','Unconfirmed')+row('Season SV%',null)+row('Appearances',null)+row('GAA',null)+row('Record (W-L-OT)',null)+row('Shutouts',null)+row('Saves / appearance',null)+row('Shots against / appearance',null));
     return;
   }
   var url='/api/nhl/player-season-context?pid='+encodeURIComponent(p.pid)+'&date_str='+encodeURIComponent(date)+'&game_type='+gt+'&position='+pos;
@@ -14322,7 +14443,12 @@ function nhlPlayerContextMount(p,overlay){
       if(pos==='G'){
         var gg=_ntsNum(d.goalieGames)>0?d.goalieGames:null,sv=gg!==null?_ntsNum(d.savePct):null;
         var svs=sv===null?null:(sv<=1?sv.toFixed(3):(sv/100).toFixed(3));
-        box(lab,row('Starter',expectedStarter?'Expected — may change':'Confirmed')+row('Season SV%',svs)+row('Appearances',gg));
+        var gaa=_ntsNum(d.goalsAgainstAverage),wins=_ntsNum(d.wins),losses=_ntsNum(d.losses),ot=_ntsNum(d.otLosses);
+        var record=wins!==null&&losses!==null&&ot!==null?wins+'-'+losses+'-'+ot:null;
+        var savesAvg=_ntsNum(d.savesPerGame),shotsAvg=_ntsNum(d.shotsAgainstPerGame);
+        box(lab,row('Starter',expectedStarter?'Expected — may change':'Confirmed')+row('Season SV%',svs)+row('Appearances',gg)
+          +row('GAA',gaa===null?null:gaa.toFixed(2))+row('Record (W-L-OT)',record)+row('Shutouts',_ntsNum(d.shutouts))
+          +row('Saves / appearance',savesAvg===null?null:savesAvg.toFixed(1))+row('Shots against / appearance',shotsAvg===null?null:shotsAvg.toFixed(1)));
       }else{
         var up=_npsPub(p,'ppUnit',date),dd=_npsPub(p,'systemDUnit',date);
         box(lab,row('Games played',_ntsNum(d.gp))+row('Avg ice time',gp?_npsMin(d.toiAvgSec):null)+row('Avg PP ice time',gp?_npsMin(d.ppToiAvgSec):null)+row('PP unit',up)+row('Published line / pair',dd));
@@ -15938,18 +16064,44 @@ def _nhl_valid_live_board(board, date_str: str, system: str):
 
 def _nhl_save_live_board(date_str: str, system: str, board: dict):
     """Store complete live display data separately from every official record."""
-    board = _nhl_valid_live_board(board, date_str, system)
-    if board is None:
+    original = board
+    valid = _nhl_valid_live_board(board, date_str, system)
+    if valid is None:
+        reason = (
+            f"System {system} board validation failed: date, system, schema "
+            "or live-board eligibility did not match; no write was attempted.")
+        if isinstance(original, dict):
+            original["boardStorageError"] = reason
+        logger.warning("%s", reason)
         return False
-    return _nhl_sb_upsert("mpa_track_ledger", [{
+    # Store correct success metadata, not a previous failed-save notice.
+    # This is a shallow metadata view: no full-board deepcopy is allocated.
+    stored_board = dict(valid)
+    stored_board["boardStorage"] = {"durable": True}
+    stored_board.pop("boardStorageError", None)
+    stored_board.pop("boardStorageRefreshError", None)
+    failure = {}
+    saved = _nhl_sb_upsert("mpa_track_ledger", [{
         "app": _NHL_TRK_APP + "_live_boards", "date": date_str,
         "category": "__board_" + system + "__", "side": "ALL",
         "wins": 0, "losses": 0, "locked": False, "locked_at": None,
         "detail": {
             "version": 1, "system": system, "date": date_str,
-            "saved_at": datetime.utcnow().isoformat() + "Z", "board": board,
+            "saved_at": datetime.utcnow().isoformat() + "Z", "board": stored_board,
         },
-    }], on_conflict="app,date,category,side")
+    }], on_conflict="app,date,category,side", retries=2, failure=failure)
+    if saved:
+        original.pop("boardStorageError", None)
+        original.pop("boardStorageRefreshError", None)
+    else:
+        reason = f"System {system} board save: " + failure.get(
+            "error", "Storage did not confirm the write.")
+        key = ("boardStorageRefreshError"
+               if (original.get("boardStorage") or {}).get("durable")
+               else "boardStorageError")
+        original[key] = reason
+        logger.warning("%s", reason)
+    return saved
 
 
 def _nhl_read_saved_selection_rows(date_str: str, category: str):
@@ -16348,11 +16500,32 @@ async def _nhl_run_all_and_cache(date_str: str) -> dict:
             if not refreshed:
                 logger.warning(
                     "NHL system %s player board is saved; final metadata refresh failed", system)
-        (batch.get("systems") or {}).get(system, {})["boardStorage"] = {
-            "durable": bool(saved)}
+        row = (batch.get("systems") or {}).get(system, {})
+        row["boardStorage"] = {"durable": bool(saved)}
+        if saved:
+            row.pop("boardStorageError", None)
+            # A successful final save can recover a storage-only failure,
+            # but must never conceal failed pick/Coach record capture.
+            row["ok"] = bool(
+                not row.get("error")
+                and (batch.get("preseason") or (
+                    row.get("captureStatus") == "OFFICIAL_CAPTURE"
+                    and row.get("coachCaptureStatus") == "AUTO_CAPTURE")))
+        else:
+            row["boardStorageError"] = board.get("boardStorageError") or (
+                f"System {system} permanent board save was not confirmed.")
+        if board.get("boardStorageRefreshError"):
+            row["boardStorageRefreshError"] = board["boardStorageRefreshError"]
+        else:
+            row.pop("boardStorageRefreshError", None)
         if not saved:
-            (batch.get("systems") or {}).get(system, {})["ok"] = False
+            row["ok"] = False
             storage_failures.append(system)
+        # Preserve final diagnostics/recovery on the disk working copy and
+        # local board, not just in the transient run response.
+        results[system] = board
+        _cache_set("nhl" if system == "A" else f"nhl_live_board_v1_{system}",
+                   date_str, board)
     if storage_failures:
         batch["board_storage_warning"] = (
             "Permanent live board saving was not confirmed for "
