@@ -134,6 +134,7 @@ import contextvars as _nhl_progress_contextvars
 import threading as _nhl_progress_threading
 from contextlib import asynccontextmanager as _nhl_asynccontextmanager
 from copy import deepcopy as _nhl_deepcopy
+from collections.abc import MutableMapping as _NHLMutableMapping
 
 _NHL_BATCH_CONTEXT = _nhl_progress_contextvars.ContextVar("nhl_batch_progress", default=False)
 _NHL_BATCH_FEEDS = _nhl_progress_contextvars.ContextVar("nhl_batch_feeds", default=None)
@@ -212,7 +213,11 @@ def _nhl_batch_worker(date_str: str):
 async def _nhl_batch_with_shared_feeds(date_str: str):
     """Reuse source data/connections for one run, never system-specific picks."""
     async with _nhl_shared_feed_scope():
-        return await _nhl_run_all_and_cache(date_str)
+        batch = await _nhl_run_all_and_cache(date_str)
+        # The HTTP/status callers only consume the summary. Boards have
+        # already been cached and durably saved before this scope closes.
+        batch.pop("results", None)
+        return batch
 
 
 @_nhl_asynccontextmanager
@@ -248,11 +253,111 @@ async def _nhl_shared_feed_scope():
                     _NHL_BATCH_FEEDS.reset(token)
                     _nhl_collect_run_memory()
 
+class _NHLRunDiskMap(_NHLMutableMapping):
+    """Lossless private working copies; never load the whole slate at once."""
+
+    def __init__(self, parent):
+        from tempfile import mkdtemp
+        self._folder = pathlib.Path(mkdtemp(prefix="working_", dir=str(parent)))
+        self._paths = {}
+        self._serial = 0
+
+    def __getitem__(self, key):
+        import pickle
+        path = self._paths[key]
+        # These files are written by this process in its private run folder;
+        # no uploaded or externally supplied pickle is ever opened.
+        with path.open("rb") as handle:
+            return pickle.load(handle)
+
+    def __setitem__(self, key, value):
+        import pickle
+        path = self._paths.get(key)
+        if path is None:
+            self._serial += 1
+            path = self._folder / f"{self._serial}.pkl"
+        temporary = path.with_suffix(".tmp")
+        try:
+            with temporary.open("wb") as handle:
+                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            temporary.replace(path)
+            self._paths[key] = path
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def __delitem__(self, key):
+        self._paths.pop(key).unlink(missing_ok=True)
+
+    def __iter__(self):
+        return iter(self._paths)
+
+    def __len__(self):
+        return len(self._paths)
+
+    def __contains__(self, key):
+        return key in self._paths
+
+    def clear(self):
+        for path in self._paths.values():
+            path.unlink(missing_ok=True)
+        self._paths.clear()
+
+
+def _nhl_run_working_map():
+    shared = _NHL_BATCH_FEEDS.get()
+    return (_NHLRunDiskMap(shared["response_dir"])
+            if shared is not None else {})
+
+
+async def _nhl_load_history_map(player_ids, loader, preserve_unavailable=False):
+    """Bound complete player loads, including warm-cache parsing, not just HTTP."""
+    ids = list(player_ids)
+    empty = None if preserve_unavailable else []
+    if _NHL_BATCH_FEEDS.get() is None:
+        rows = await asyncio.gather(
+            *(loader(pid) for pid in ids), return_exceptions=True)
+        return {pid: row if isinstance(row, list) else empty
+                for pid, row in zip(ids, rows)}
+    histories = _nhl_run_working_map()
+    limit = asyncio.Semaphore(4)
+
+    async def load_one(pid):
+        async with limit:
+            try:
+                rows = await loader(pid)
+            except Exception:
+                rows = None
+            # Complete histories remain intact, but completed coroutine
+            # results retain only None, not thousands of parsed dictionaries.
+            histories[pid] = rows if isinstance(rows, list) else empty
+
+    tasks = [asyncio.create_task(load_one(pid)) for pid in ids]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    return histories
+
 
 def _nhl_collect_run_memory():
     """Release completed-stage cycles without discarding any live pick data."""
     import gc
     gc.collect()
+    # gc alone cannot return unused libc allocation arenas to Render.
+    # On non-glibc platforms this optional allocator step is simply absent.
+    try:
+        import ctypes
+        trim = ctypes.CDLL(None).malloc_trim
+        trim.argtypes = [ctypes.c_size_t]
+        trim.restype = ctypes.c_int
+        trim(0)
+    except (AttributeError, OSError):
+        pass
 
 
 @_nhl_asynccontextmanager
@@ -296,12 +401,22 @@ def _cache_get(app: str, date_key: str):
     return None
 
 def _cache_set(app: str, date_key: str, result: dict):
+    temporary = None
     try:
-        _cache_path(app, date_key).write_text(
-            json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        from tempfile import NamedTemporaryFile
+        path = _cache_path(app, date_key)
+        with NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=str(path.parent),
+                prefix=path.name + ".", suffix=".tmp", delete=False) as handle:
+            temporary = pathlib.Path(handle.name)
+            json.dump(result, handle, ensure_ascii=False)
+        temporary.replace(path)
         print(f"[Cache] FILE SET {app}/{date_key}")
     except Exception as e:
         print(f"[Cache] Write error: {e}")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 def _cache_clear(app: str = None):
     for p in _CACHE_DIR.glob("*.json"):
@@ -3972,12 +4087,11 @@ async def get_pts_picks(
         logs.sort(key=lambda x: x["date"], reverse=True)
         return logs
 
-    log_tasks = {p["id"]: fetch_logs(p["id"]) for p, *_ in all_players}
-    log_results, pp_role_map = await asyncio.gather(
-        asyncio.gather(*log_tasks.values(), return_exceptions=True),
-        _nhl_pp_role_logs(list(log_tasks.keys()), season, target_date),
+    player_ids = [p["id"] for p, *_ in all_players]
+    logs_map, pp_role_map = await asyncio.gather(
+        _nhl_load_history_map(player_ids, fetch_logs),
+        _nhl_pp_role_logs(player_ids, season, target_date),
     )
-    logs_map = {pid: (r if isinstance(r, list) else []) for pid, r in zip(log_tasks.keys(), log_results)}
 
     pts_picks, ast_picks, goal_picks, pp_picks = [], [], [], []
     pts_unders, ast_unders, goal_unders, pp_unders = [], [], [], []
@@ -4418,10 +4532,8 @@ async def get_saves_picks(
 
     # Lookup-only roster goalies do not trigger extra full-season downloads
     # during board generation. Their history loads only when a card is opened.
-    log_tasks = {p["id"]: fetch_logs(p["id"]) for p, *_ in all_goalies}
-    log_results = await asyncio.gather(*log_tasks.values(), return_exceptions=True)
-    logs_map = {pid: (r if isinstance(r, list) else [])
-                for pid, r in zip(log_tasks.keys(), log_results)}
+    logs_map = await _nhl_load_history_map(
+        [p["id"] for p, *_ in all_goalies], fetch_logs)
 
     if lookup_profiles is not None:
         eligible_by_id = {p["id"]: p for p, *_ in all_goalies}
@@ -4815,10 +4927,9 @@ async def _build_nhl_alt_coach(
         finally:
             completed += 1
             _nhl_alt_note("Loading eligible player histories", completed, len(people))
-    log_results = await asyncio.gather(
-        *[load_history(person) for person in people], return_exceptions=True)
-    log_map = {p["id"]: logs if isinstance(logs, list) else []
-               for (p, *_), logs in zip(people, log_results)}
+    people_by_id = {person[0]["id"]: person for person in people}
+    log_map = await _nhl_load_history_map(
+        people_by_id, lambda pid: load_history(people_by_id[pid]))
     rows = []
     _nhl_alt_note("Ranking exact alternate lines by model hit probability")
     for player, team, opponent, home_road, kind in people:
@@ -5498,10 +5609,9 @@ async def run_picks(
         }
 
     # Fetch NHL API game logs for all players concurrently
-    log_tasks = {p["pid"]: _nhl_player_logs(p["pid"], sem_nhl) for p in pool}
-    log_results = await asyncio.gather(*log_tasks.values(), return_exceptions=True)
-    logs_map = {pid: (r if isinstance(r, list) else [])
-                for pid, r in zip(log_tasks.keys(), log_results)}
+    logs_map = await _nhl_load_history_map(
+        dict.fromkeys(p["pid"] for p in pool),
+        lambda pid: _nhl_player_logs(pid, sem_nhl))
 
     if d_mode:
         if simulate:
@@ -5952,13 +6062,16 @@ async def run_picks(
         "stage": "Loading current-season Hot/Cold history...",
         "done": 0, "total": len(pool), "pct": 98})
     form_ids = list(dict.fromkeys(p["pid"] for p in pool))
-    form_current = await asyncio.gather(*[
-        _nhl_player_logs(pid, sem_nhl, season, only_season=True)
-        for pid in form_ids
-    ], return_exceptions=True)
-    form_logs = dict(logs_map)
+    form_current = await _nhl_load_history_map(
+        form_ids,
+        lambda pid: _nhl_player_logs(pid, sem_nhl, season, only_season=True),
+        preserve_unavailable=True)
+    form_logs = _nhl_run_working_map()
+    for pid in logs_map:
+        form_logs[pid] = logs_map[pid]
     form_unavailable = 0
-    for pid, current in zip(form_ids, form_current):
+    for pid in form_ids:
+        current = form_current.get(pid)
         if not isinstance(current, list):
             form_unavailable += 1
             continue
@@ -5972,6 +6085,12 @@ async def run_picks(
         logger.warning("Current-season Hot/Cold history unavailable for %s players", form_unavailable)
     hot_cold_players = _nhl_hot_cold_players(
         pool, form_logs, target_date, pts_lines_map, player_profiles)
+    # No subsequent board/snapshot/Coach/hub stage needs raw histories.
+    # Free these before persistence and JSON/HTML transfer allocate buffers.
+    logs_map.clear()
+    form_logs.clear()
+    form_current.clear()
+    _nhl_collect_run_memory()
 
     _result = {
         "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
@@ -6219,7 +6338,12 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
         b["captureStatus"] = (
             "OFFICIAL_CAPTURE" if capture_ok["B"] else "CAPTURE_FAILED")
 
-    systems = {"A": a, "B": b}
+    # Keep the verified schedule in RAM, not every completed system board.
+    shared_games = a.get("games") or []
+    systems = _nhl_run_working_map()
+    systems["A"] = a
+    systems["B"] = b
+    a = b = None
     for system in ("C", "D"):
         _nhl_collect_run_memory()
         _nhl_batch_phase(system, f"Generating System {system}", 30 if system == "C" else 57, 27)
@@ -6229,7 +6353,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 persist_live_snapshot=False,
                 skip_game_predictor=True,
                 system=system,
-                shared_games=a.get("games") or [],
+                shared_games=shared_games,
             )
         except Exception as exc:
             logger.exception("NHL system %s batch run failed", system)
@@ -6237,7 +6361,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 "error": f"System {system} failed: {exc}",
                 "system": system,
                 "picks": [],
-                "games": a.get("games") or [],
+                "games": shared_games,
             }
 
     for system in ("C", "D"):
@@ -6250,6 +6374,8 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 target_date, result, snapshot_category=f"__picks_{system}__")
             result["captureStatus"] = (
                 "OFFICIAL_CAPTURE" if capture_ok[system] else "CAPTURE_FAILED")
+        systems[system] = result
+        result = None
 
     # All four player boards and snapshots must finish before optional
     # alternate Coach requests can spend their timeout budgets.
@@ -6262,6 +6388,10 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
                 and not preseason_slate
                 and result.get("officialCaptureAllowed", True)):
             await _nhl_capture_daily_coach(target_date, result, system)
+        # Disk reads are independent mutable copies. Write status changes
+        # back so final boards and the response keep all capture metadata.
+        systems[system] = result
+        result = None
 
     summary = {}
     for system, result in systems.items():
@@ -6293,7 +6423,7 @@ async def run_all_nhl_systems(target_date: str = None) -> dict:
         }
     return {
         "date": target_date,
-        "games": len(a.get("games") or []),
+        "games": len(shared_games),
         "systems": summary,
         "results": systems,
         "message": (
@@ -16187,12 +16317,14 @@ async def _nhl_run_all_and_cache(date_str: str) -> dict:
     a_result = results.get("A") or {}
     if a_result and "error" not in a_result and not a_result.get("no_games"):
         _cache_set("nhl", date_str, a_result)
+    a_result = None
     # Read-only live board switching, including preseason. These files are
     # separate from official snapshots and never enter any record.
     for system in ("B", "C", "D"):
         board = results.get(system) or {}
         if board and "error" not in board and not board.get("no_games"):
             _cache_set(f"nhl_live_board_v1_{system}", date_str, board)
+        board = None
     # /tmp is only an accelerator. Keep complete display boards across
     # redeploys, including preseason and legitimately empty player-prop pools.
     # This namespace never contributes to any official record or W/L.
@@ -16226,6 +16358,8 @@ async def _nhl_run_all_and_cache(date_str: str) -> dict:
             "Permanent live board saving was not confirmed for "
             + ", ".join(storage_failures) + ". Local copies may be lost on restart.")
         batch["message"] = (batch.get("message") or "") + " · " + batch["board_storage_warning"]
+    board = None
+    _nhl_collect_run_memory()
     # Grade prior player/GP slates after today's capture.  The current date
     # remains pending until its games finish.
     _nhl_batch_phase("", "Finalizing saved boards and settling prior records", 98)
