@@ -144,10 +144,42 @@ _NHL_BATCH_PROGRESS_LOCK = _nhl_progress_threading.RLock()
 _NHL_BATCH_PROGRESS = {"status": "IDLE", "pct": 0, "stage": "Ready"}
 
 
+def _nhl_timing_mark(stage: str):
+    """Log how long each batch stage took (diagnostic only; caller holds lock)."""
+    now = time.time()
+    prev = _NHL_BATCH_PROGRESS.get("_timing_stage")
+    if prev == stage:
+        return
+    started = _NHL_BATCH_PROGRESS.get("_timing_at") or now
+    if prev:
+        took = now - started
+        _NHL_BATCH_PROGRESS.setdefault("_timings", []).append((prev, round(took, 1)))
+        begin = (_NHL_BATCH_PROGRESS.get("started_at_ms") or now * 1000) / 1000
+        print(f"[NHL TIMING] {prev} took {int(took // 60)}m {int(took % 60)}s "
+              f"(run elapsed {int((now - begin) // 60)}m {int((now - begin) % 60)}s)",
+              flush=True)
+    _NHL_BATCH_PROGRESS["_timing_stage"] = stage
+    _NHL_BATCH_PROGRESS["_timing_at"] = now
+
+
+def _nhl_timing_summary():
+    with _NHL_BATCH_PROGRESS_LOCK:
+        _nhl_timing_mark("__finished__")
+        rows = _NHL_BATCH_PROGRESS.get("_timings") or []
+    totals = {}
+    for stage, took in rows:
+        totals[stage] = totals.get(stage, 0) + took
+    slowest = sorted(totals.items(), key=lambda row: row[1], reverse=True)[:12]
+    print("[NHL TIMING] SLOWEST STAGES: " + " | ".join(
+        f"{stage} = {int(took // 60)}m {int(took % 60)}s" for stage, took in slowest),
+        flush=True)
+
+
 def _nhl_batch_phase(system: str, stage: str, base: int, span: int = 0):
     if not _NHL_BATCH_CONTEXT.get():
         return
     with _NHL_BATCH_PROGRESS_LOCK:
+        _nhl_timing_mark(stage)
         _NHL_BATCH_PROGRESS.update(
             system=system, stage=stage, base=base, span=span, done=0, total=0,
             pct=max(_NHL_BATCH_PROGRESS.get("pct", 0), min(base, 99)))
@@ -159,6 +191,8 @@ def _nhl_pipeline_progress(value: dict) -> dict:
         with _NHL_BATCH_PROGRESS_LOCK:
             span = _NHL_BATCH_PROGRESS.get("span", 0)
             if span:
+                _nhl_timing_mark(
+                    f"System {_NHL_BATCH_PROGRESS.get('system', '')} · {value.get('stage', '')}")
                 pct = _NHL_BATCH_PROGRESS.get("base", 0) + span * min(
                     max(float(value.get("pct", 0)), 0), 100) / 100
                 _NHL_BATCH_PROGRESS.update(
@@ -171,6 +205,7 @@ def _nhl_pipeline_progress(value: dict) -> dict:
 def _nhl_batch_note(stage: str):
     if _NHL_BATCH_CONTEXT.get():
         with _NHL_BATCH_PROGRESS_LOCK:
+            _nhl_timing_mark(stage)
             _NHL_BATCH_PROGRESS.update(stage=stage, done=0, total=0)
 
 
@@ -188,7 +223,10 @@ def _nhl_batch_worker(date_str: str):
     global _CRON_BUSY_NHL
     token = _NHL_BATCH_CONTEXT.set(True)
     try:
-        batch = asyncio.run(_nhl_batch_with_shared_feeds(date_str))
+        try:
+            batch = asyncio.run(_nhl_batch_with_shared_feeds(date_str))
+        finally:
+            _nhl_timing_summary()
         result = {key: value for key, value in batch.items() if key != "results"}
         complete = all(
             row.get("ok") and (row.get("boardStorage") or {}).get("durable")
@@ -16426,6 +16464,26 @@ def _nhl_valid_live_board(board, date_str: str, system: str):
     return None
 
 
+def _nhl_pack_board(board: dict) -> str:
+    """Lossless gzip+base64 of a full display board (about 15x smaller).
+
+    Full boards are ~10 MB of JSON, mostly lookup profiles; uploading that
+    uncompressed hit the 20s write timeout and Supabase statement timeouts.
+    """
+    import base64, gzip
+    raw = json.dumps(board, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(gzip.compress(raw, 6)).decode("ascii")
+
+
+def _nhl_saved_board_from_detail(detail: dict):
+    """Read a saved board row written compressed (new) or as plain JSON (old)."""
+    packed = detail.get("board_gz")
+    if isinstance(packed, str) and packed:
+        import base64, gzip
+        return json.loads(gzip.decompress(base64.b64decode(packed)).decode("utf-8"))
+    return detail.get("board")
+
+
 def _nhl_save_live_board(date_str: str, system: str, board: dict):
     """Store complete live display data separately from every official record."""
     original = board
@@ -16451,7 +16509,8 @@ def _nhl_save_live_board(date_str: str, system: str, board: dict):
         "wins": 0, "losses": 0, "locked": False, "locked_at": None,
         "detail": {
             "version": 1, "system": system, "date": date_str,
-            "saved_at": datetime.utcnow().isoformat() + "Z", "board": stored_board,
+            "saved_at": datetime.utcnow().isoformat() + "Z",
+            "encoding": "gzip+base64", "board_gz": _nhl_pack_board(stored_board),
         },
     }], on_conflict="app,date,category,side", retries=2, failure=failure)
     if saved:
@@ -16548,13 +16607,14 @@ def _nhl_read_saved_gp_board(date_str: str):
                     if (not isinstance(detail, dict) or detail.get("version") != 1
                             or detail.get("date") != date_str or detail.get("system") != "A"):
                         raise ValueError("Saved Game Predictor board identity mismatch")
-                    board = _nhl_valid_live_board(detail.get("board"), date_str, "A")
+                    board = _nhl_valid_live_board(
+                        _nhl_saved_board_from_detail(detail), date_str, "A")
                     if board is None:
                         raise ValueError("Invalid saved Game Predictor board")
                     return board
                 if attempt == 2:
                     return None
-        except (httpx.RequestError, ValueError, AttributeError, TypeError):
+        except (httpx.RequestError, ValueError, AttributeError, TypeError, OSError):
             logger.warning("NHL saved Game Predictor board read failed (attempt %s)", attempt + 1)
         if attempt < 2:
             time.sleep(0.25 * (attempt + 1))
@@ -16804,7 +16864,8 @@ def _nhl_load_live_board(date_str: str, system: str):
                             or detail.get("date") != date_str
                             or detail.get("system") != system):
                         raise ValueError("Saved board metadata does not match")
-                    board = _nhl_valid_live_board(detail.get("board"), date_str, system)
+                    board = _nhl_valid_live_board(
+                        _nhl_saved_board_from_detail(detail), date_str, system)
                     if board is None:
                         raise ValueError("Saved board identity or schema does not match")
                     return _nhl_restore_saved_gp(board, date_str)
@@ -16818,7 +16879,7 @@ def _nhl_load_live_board(date_str: str, system: str):
             else:
                 logger.warning("NHL saved %s board read returned HTTP %s",
                                system, response.status_code)
-        except (httpx.RequestError, ValueError, AttributeError, TypeError):
+        except (httpx.RequestError, ValueError, AttributeError, TypeError, OSError):
             logger.warning("NHL saved %s board read failed (attempt %s)",
                            system, attempt + 1)
         if attempt < 2:
@@ -17120,7 +17181,7 @@ async def api_nhl_run_progress(request: Request, token: str = "", admin: str = "
         raise HTTPException(status_code=403, detail="Admin only")
     with _NHL_BATCH_PROGRESS_LOCK:
         data = {key: value for key, value in _NHL_BATCH_PROGRESS.items()
-                if key not in ("base", "span")}
+                if key not in ("base", "span") and not key.startswith("_timing")}
     if data.get("started_at_ms"):
         end = data.get("finished_at_ms") or int(time.time() * 1000)
         data["elapsed_seconds"] = max(0, int((end - data["started_at_ms"]) / 1000))
