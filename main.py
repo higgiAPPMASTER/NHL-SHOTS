@@ -66,13 +66,15 @@ MIN_GP        = 10    # minimum games played for valid average
 
 MIN_GAMES     = 2     # min games required for hit-rate calc
 LIVE_ALTERNATE_PROP_MARKETS = (
-    "player_shots_alternate",
+    "player_shots_on_goal_alternate",
     "player_points_alternate",
     "player_assists_alternate",
     "player_total_saves_alternate",
 )
 _NHL_ALT_COACH_TTL = 2 * 3600
 _NHL_ALT_COACH_INFLIGHT: Dict[str, asyncio.Task] = {}
+_NHL_ALT_FEED_INFLIGHT: Dict[Tuple, asyncio.Task] = {}
+_NHL_ALT_FEED_TTL = 10 * 60
 HIT_THRESH         = 70.0  # % hit rate to qualify against the posted sportsbook line
 HIT_THRESH_PTS     = 60.0  # % hit rate to qualify for Points
 HIT_THRESH_PP      = 50.0  # % hit rate to qualify for model-only Power Play Points
@@ -395,7 +397,7 @@ def _cache_get(app: str, date_key: str):
                 print(f"[Cache] STALE SCHEMA {app}/{date_key}")
                 return None
             print(f"[Cache] FILE HIT {app}/{date_key}")
-            return data
+            return _nhl_safe_live_quote_display(data) if app.startswith("nhl") else data
     except Exception as e:
         print(f"[Cache] Read error: {e}")
     return None
@@ -1198,6 +1200,7 @@ async def _nhl_top30_ppg_build(target_date: str) -> dict:
                     matchups[team["abbrev"]] = {
                         "opponent": opponent.get("abbrev", ""),
                         "opponent_id": int(opponent["id"]),
+                        "today_venue": "HOME" if own == "homeTeam" else "AWAY",
                     }
         candidates, seen = [], set()
         for rank, leader in enumerate(leaders, 1):
@@ -1221,44 +1224,67 @@ async def _nhl_top30_ppg_build(target_date: str) -> dict:
             by_opponent.setdefault(player["opponent_id"], []).append(player)
         sem = asyncio.Semaphore(3)
 
-        async def career_group(opponent_id, players):
+        async def career_report(opponent_id, players, venue=""):
             # Aggregate GAME rows, not season summaries: the opponent filter
-            # must apply to the individual games. No home/road restriction.
+            # must apply to the individual games.
             ids = ",".join(str(p["pid"]) for p in players)
+            venue_filter = f' and homeRoad="{venue}"' if venue else ""
             query = urllib.parse.urlencode({
                 "isAggregate": "true", "isGame": "true",
                 "start": 0, "limit": 30,
                 "cayenneExp": (
                     f'gameTypeId=2 and gameDate<"{target_date}" '
-                    f"and opponentTeamId={opponent_id} and playerId in ({ids})"),
+                    f"and opponentTeamId={opponent_id} and playerId in ({ids}){venue_filter}"),
             })
+            async with sem:
+                payload = await read(f"{NHL_STATS}/skater/summary?{query}")
+            rows = payload.get("data")
+            if not isinstance(rows, list):
+                raise ValueError("Career report unavailable")
+            if int(payload.get("total", len(rows))) > len(rows):
+                raise ValueError("Career report is incomplete")
+            totals = {}
+            for row in rows:
+                pid = int(row.get("playerId") or 0)
+                values = [_nhl_display_number(row.get(k))
+                          for k in ("gamesPlayed", "goals", "assists", "points")]
+                if pid not in {p["pid"] for p in players} or pid in totals:
+                    raise ValueError("Career report has invalid player identities")
+                if any(v is None or v != int(v) for v in values):
+                    raise ValueError("Career report has missing totals")
+                gp, goals, assists, points = (int(v) for v in values)
+                totals[pid] = {"games": gp, "goals": goals, "assists": assists,
+                               "points": points,
+                               "ppg": round(points / gp, 4) if gp else None}
+            return totals
+
+        async def career_group(opponent_id, players):
             try:
-                async with sem:
-                    payload = await read(f"{NHL_STATS}/skater/summary?{query}")
-                rows = payload.get("data")
-                if not isinstance(rows, list):
-                    raise ValueError("Career report unavailable")
-                if int(payload.get("total", len(rows))) > len(rows):
-                    raise ValueError("Career report is incomplete")
-                totals = {}
-                for row in rows:
-                    pid = int(row.get("playerId") or 0)
-                    gp = _nhl_display_number(row.get("gamesPlayed"))
-                    points = _nhl_display_number(row.get("points"))
-                    if pid not in {p["pid"] for p in players} or pid in totals:
-                        raise ValueError("Career report has invalid player identities")
-                    if gp is None or points is None or gp != int(gp) or points != int(points):
-                        raise ValueError("Career report has missing totals")
-                    totals[pid] = (int(points), int(gp))
+                totals = await career_report(opponent_id, players)
                 qualified = []
                 for player in players:
-                    points, gp = totals.get(player["pid"], (0, 0))
+                    row = totals.get(player["pid"]) or {"games": 0, "points": 0}
+                    points, gp = row["points"], row["games"]
                     if gp > 0 and points >= gp:
                         qualified.append({
                             **{k: v for k, v in player.items() if k != "opponent_id"},
                             "career_points": points, "career_games": gp,
                             "career_ppg": round(points / gp, 4),
+                            "career_goals": row.get("goals"),
+                            "career_assists": row.get("assists"),
                         })
+                if qualified:
+                    # Display-only venue split; qualification above stays combined.
+                    empty = {"games": 0, "goals": 0, "assists": 0, "points": 0, "ppg": None}
+                    splits = await asyncio.gather(
+                        career_report(opponent_id, qualified, "H"),
+                        career_report(opponent_id, qualified, "R"),
+                        return_exceptions=True)
+                    for row in qualified:
+                        for label, split in zip(("home", "away"), splits):
+                            row[label + "_split"] = (
+                                None if isinstance(split, BaseException)
+                                else split.get(row["pid"], dict(empty)))
                 return qualified, None
             except (httpx.HTTPError, ValueError, TypeError, KeyError):
                 return [], players[0]["opponent"]
@@ -1287,7 +1313,7 @@ async def nhl_top30_ppg_vs_team(
     ds = date_str or _nhl_record_today()
     if ds != _nhl_record_today():
         raise HTTPException(status_code=400, detail="This daily category is available for today only")
-    key = ("top30-career-ppg-v1", ds, get_season_for_date(date.fromisoformat(ds)))
+    key = ("top30-career-ppg-v2", ds, get_season_for_date(date.fromisoformat(ds)))
     cached = _nhl_display_cached(key)
     if cached is not None and not refresh:
         return JSONResponse(cached, headers={"Cache-Control": "no-store"})
@@ -2996,7 +3022,7 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                             "apiKey": api_key, "date": event_snapshot,
                             "regions": "us,ca",
                             "markets": (
-                                "player_shots_alternate,"
+                                "player_shots_on_goal_alternate,"
                                 "player_points_alternate,"
                                 "player_assists_alternate,"
                                 "player_total_saves_alternate"
@@ -3017,7 +3043,7 @@ async def _get_historical_player_lines(c: httpx.AsyncClient, api_key: str,
                 )
             found: Dict[str, Dict] = {}
             alternate_to_standard = {
-                "player_shots_alternate": "player_shots_on_goal",
+                "player_shots_on_goal_alternate": "player_shots_on_goal",
                 "player_points_alternate": "player_points",
                 "player_assists_alternate": "player_assists",
                 "player_total_saves_alternate": "player_total_saves",
@@ -3163,6 +3189,13 @@ def _nhl_odds_cache_has_books(payload: Dict) -> bool:
                 if (str(info.get(price_key) or "").strip() not in ("", "0")
                         and not _nhl_side_book(info, side)):
                     return False
+                if key != "goals" and str(info.get(price_key) or "").strip() not in ("", "0"):
+                    try:
+                        if (not math.isfinite(float(info.get("line")))
+                                or float(info.get(price_key + "_line")) != float(info["line"])):
+                            return False
+                    except (TypeError, ValueError):
+                        return False
     return True
 
 
@@ -3224,7 +3257,7 @@ async def get_shot_lines(
         )
         cached_live_pp = live_odds_date and "pp" not in _oc
         cached_live_books = live_odds_date and (
-            _oc.get("quote_provenance_version") != 1
+            _oc.get("quote_provenance_version") != 2
             or not _nhl_odds_cache_has_books(_oc)
         )
         if (not cached_live_alternates and not cached_live_goals_ou
@@ -3374,15 +3407,39 @@ async def get_shot_lines(
                                             continue
                                     rec = target.setdefault(player, {
                                         "line": line, "odds": "",
-                                        "under_odds": "", "source": "OddsAPI"})
-                                    if mkey == "player_power_play_points" and rec["line"] != line:
+                                        "under_odds": "", "source": "OddsAPI",
+                                        "eventId": ev["id"], "market": mkey})
+                                    # A different book's primary line is NOT this
+                                    # line's price. Never join player-only quotes.
+                                    if (not math.isfinite(line) or line <= 0
+                                            or rec.get("eventId") != ev["id"]
+                                            or abs(float(rec["line"]) - line) > 1e-9):
+                                        continue
+                                    try:
+                                        quote_price = float(oc.get("price"))
+                                    except (TypeError, ValueError):
+                                        continue
+                                    book_name = book.get("title") or book.get("key") or ""
+                                    if (not book_name or not math.isfinite(quote_price)
+                                            or not quote_price.is_integer()
+                                            or not (quote_price >= 100 or -1000 <= quote_price <= -100)):
                                         continue
                                     if nm == "Over" and not rec["odds"]:
-                                        rec["odds"] = str(oc.get("price", ""))
-                                        rec["odds_book"] = book.get("title") or book.get("key") or ""
+                                        rec["odds"] = str(int(quote_price))
+                                        rec["odds_book"] = book_name
+                                        rec["odds_line"] = line
+                                        rec["odds_quote"] = {"eventId": ev["id"], "player": player,
+                                            "market": mkey, "side": "OVER", "line": line,
+                                            "odds": quote_price, "book": book_name,
+                                            "bookKey": book.get("key")}
                                     elif nm == "Under" and not rec["under_odds"]:
-                                        rec["under_odds"] = str(oc.get("price", ""))
-                                        rec["under_book"] = book.get("title") or book.get("key") or ""
+                                        rec["under_odds"] = str(int(quote_price))
+                                        rec["under_book"] = book_name
+                                        rec["under_odds_line"] = line
+                                        rec["under_odds_quote"] = {"eventId": ev["id"], "player": player,
+                                            "market": mkey, "side": "UNDER", "line": line,
+                                            "odds": quote_price, "book": book_name,
+                                            "bookKey": book.get("key")}
                                         if mkey == "player_goals":
                                             rec["under_market"] = "player_goals"
                     if isinstance(ra, httpx.Response) and ra.status_code == 200:
@@ -3474,7 +3531,7 @@ async def get_shot_lines(
                 "lines": lines, "pts": pts_lines,
                 "ast": ast_lines, "sv": sv_lines, "goals": goal_lines,
                 "pp": pp_lines,
-                "quote_provenance_version": 1,
+                "quote_provenance_version": 2,
                 "goals_ou_requested": bool(goal_ou_reads_ok) and all(goal_ou_reads_ok),
                 "alternates": alternate_lines})
         return lines, pts_lines, ast_lines, sv_lines, goal_lines
@@ -4764,6 +4821,10 @@ async def get_saves_picks(
 _NHL_ALT_SCAN_PROGRESS = _nhl_progress_contextvars.ContextVar("nhl_alt_scan_progress", default=None)
 
 
+class _NHLAlternateFeedError(RuntimeError):
+    """Safe public feed diagnostic; never contains credentials or request URLs."""
+
+
 def _nhl_alt_rank(row):
     """Probability first, then the better genuine price; never rank by edge."""
     return (float(row.get("appProb") or 0), float(row.get("odds") or -1000))
@@ -4775,19 +4836,240 @@ def _nhl_alt_note(stage, done=0, total=0):
         progress.update(stage=stage, done=done, total=total)
 
 
+def _nhl_alt_qualified_quotes(rec):
+    """Choose the best qualifying exact-side price, not a failing other-book price."""
+    if not isinstance(rec, dict):
+        return []
+    quotes = rec.get("quotes")
+    if not isinstance(quotes, list):
+        quotes = [
+            {"side": side, "odds": rec.get(field), "book": rec.get(book_field),
+             "bookKey": ""}
+            for side, field, book_field in (
+                ("OVER", "odds", "odds_book"), ("UNDER", "under_odds", "under_book"))]
+    best = {}
+    for quote in quotes:
+        if not isinstance(quote, dict) or quote.get("side") not in ("OVER", "UNDER"):
+            continue
+        implied = _nhl_alt_implied(quote.get("odds"))
+        try:
+            odds = float(str(quote.get("odds")).replace("+", ""))
+        except (TypeError, ValueError):
+            continue
+        if (not math.isfinite(odds) or not odds.is_integer()
+                or not (-1000 <= odds <= -100 or odds >= 100)
+                or implied is None or implied < 70 or not quote.get("book")):
+            continue
+        side = quote["side"]
+        rank = (odds, quote.get("bookKey") == "espnbet")
+        current = best.get(side)
+        if current is None or rank > (
+                float(str(current["odds"]).replace("+", "")),
+                current.get("bookKey") == "espnbet"):
+            best[side] = quote
+    return list(best.values())
+
+
+def _nhl_merge_alt_book_quotes(ladders, payload, event_id):
+    """Retain every book's own line/side/price; Score is the documented US feed."""
+    for book in payload.get("bookmakers") or []:
+        if not isinstance(book, dict):
+            continue
+        book_key = str(book.get("key") or "").strip()
+        book_name = ("theScore Bet" if book_key == "espnbet"
+                     else str(book.get("title") or book_key).strip())
+        if not book_name:
+            continue
+        for market in book.get("markets") or []:
+            if not isinstance(market, dict) or market.get("key") not in ladders:
+                continue
+            target = ladders[market["key"]]
+            for outcome in market.get("outcomes") or []:
+                if not isinstance(outcome, dict) or outcome.get("name") not in ("Over", "Under"):
+                    continue
+                player = str(outcome.get("description") or "").strip()
+                try:
+                    line, odds = float(outcome.get("point")), float(outcome.get("price"))
+                except (TypeError, ValueError):
+                    continue
+                if (not player or not math.isfinite(line) or line <= 0
+                        or not math.isfinite(odds) or not odds.is_integer()
+                        or not (odds >= 100 or odds <= -100)):
+                    continue
+                key = f"{event_id}|{player}|{line:g}"
+                rec = target.setdefault(key, {
+                    "player": player, "line": line, "eventId": event_id,
+                    "home_team": payload.get("home_team"),
+                    "away_team": payload.get("away_team"),
+                    "quotes": [], "source": "OddsAPI (alternate)"})
+                side = outcome["name"].upper()
+                quote = {"side": side, "odds": odds, "bookKey": book_key,
+                         "book": book_name,
+                         "lastUpdate": market.get("last_update") or book.get("last_update")}
+                rec["quotes"] = [q for q in rec["quotes"]
+                                 if (q.get("bookKey") or q.get("book"), q.get("side"))
+                                 != (book_key or book_name, side)]
+                rec["quotes"].append(quote)
+
+
+async def _nhl_fetch_alt_book_feed(date_str, games):
+    """Coach-only quotes. Never rewrite or extend the standard-odds cache TTL."""
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if not api_key:
+        raise _NHLAlternateFeedError("Alternate sportsbook feed is not configured.")
+    _nhl_alt_note("Checking theScore Bet and other alternate sportsbooks")
+    events, lookup_ok = [], False
+    tomorrow = (date.fromisoformat(date_str) + timedelta(days=1)).isoformat()
+    async with _nhl_feed_client(timeout=25) as client:
+        for sport in ("icehockey_nhl", "icehockey_nhl_championship"):
+            try:
+                response = await client.get(
+                    f"{ODDS_API}/sports/{sport}/events",
+                    params={"apiKey": api_key, "dateFormat": "iso"}, timeout=25)
+                if response.status_code != 200:
+                    continue
+                data = response.json()
+                if not isinstance(data, list):
+                    continue
+                lookup_ok = True
+                events = [
+                    {**e, "_sport": sport} for e in data if isinstance(e, dict)
+                    and e.get("id") and str(e.get("commence_time") or "")[:10] in (date_str, tomorrow)
+                    and _odds_event_matches_slate(e, games)]
+                if events:
+                    break
+            except (httpx.HTTPError, ValueError):
+                continue
+        if not events:
+            raise _NHLAlternateFeedError(
+                "No matching NHL sportsbook events were returned for the verified slate."
+                if lookup_ok else "NHL alternate sportsbook event lookup failed; coverage is unconfirmed.")
+        ladders = {market: {} for market in LIVE_ALTERNATE_PROP_MARKETS}
+        coverage = {"events": len(events), "scoreReads": 0, "scoreFailures": 0,
+                    "otherReads": 0, "otherFailures": 0, "markets": {},
+                    "errors": {"score": [], "other": []}}
+        sem = asyncio.Semaphore(6)
+
+        async def read_event(event):
+            async with sem:
+                async def read(score):
+                    params = {"apiKey": api_key,
+                              "markets": ",".join(LIVE_ALTERNATE_PROP_MARKETS),
+                              "oddsFormat": "american"}
+                    params.update({"bookmakers": "espnbet"} if score
+                                  else {"regions": "us,us2,ca"})
+                    try:
+                        response = await client.get(
+                            f"{ODDS_API}/sports/{event['_sport']}/events/{event['id']}/odds",
+                            params=params, timeout=25)
+                        if response.status_code != 200:
+                            return None, f"HTTP {response.status_code}"
+                        data = response.json()
+                        if (not isinstance(data, dict)
+                                or not isinstance(data.get("bookmakers"), list)
+                                or str(data.get("id") or "") != str(event["id"])):
+                            return None, "invalid event response"
+                        # Explicit Score reads cannot relabel another bookmaker.
+                        if score:
+                            data = {**data, "bookmakers": [
+                                b for b in data["bookmakers"]
+                                if isinstance(b, dict) and b.get("key") == "espnbet"]}
+                        return data, ""
+                    except (httpx.HTTPError, ValueError) as exc:
+                        return None, type(exc).__name__
+                generic, score = await asyncio.gather(read(False), read(True))
+                for (data, error), prefix in ((generic, "other"), (score, "score")):
+                    coverage[prefix + ("Reads" if data is not None else "Failures")] += 1
+                    if data is not None:
+                        _nhl_merge_alt_book_quotes(ladders, data, event["id"])
+                    elif error not in coverage["errors"][prefix]:
+                        coverage["errors"][prefix].append(error)
+        await asyncio.gather(*(read_event(event) for event in events))
+    if not coverage["scoreReads"] and not coverage["otherReads"]:
+        errors = "; ".join(
+            label + ": " + ", ".join(coverage["errors"][prefix])
+            for prefix, label in (("score", "theScore Bet"), ("other", "general feed"))
+            if coverage["errors"][prefix])
+        raise _NHLAlternateFeedError(
+            "All alternate sportsbook requests failed; missing prices are not confirmed. " + errors)
+    for market, ladder in ladders.items():
+        counts = {"score": {"OVER": 0, "UNDER": 0},
+                  "other": {"OVER": 0, "UNDER": 0},
+                  "scoreEligible": {"OVER": 0, "UNDER": 0},
+                  "otherEligible": {"OVER": 0, "UNDER": 0}}
+        for rec in ladder.values():
+            for quote in rec["quotes"]:
+                prefix = "score" if quote.get("bookKey") == "espnbet" else "other"
+                side = quote["side"]
+                counts[prefix][side] += 1
+                implied = _nhl_alt_implied(quote["odds"])
+                if quote["odds"] >= -1000 and implied is not None and implied >= 70:
+                    counts[prefix + "Eligible"][side] += 1
+        coverage["markets"][market] = counts
+    payload = {"alternates": ladders, "sourceCoverage": coverage,
+               "sourceFetchedAt": time.time()}
+    _odds_cache_set("nhl_coach_alt_books_v1", date_str, payload)
+    return payload
+
+
+async def _nhl_alt_book_feed(date_str, games):
+    cached = _odds_cache_get("nhl_coach_alt_books_v1", date_str)
+    if (isinstance(cached, dict)
+            and 0 <= time.time() - float(cached.get("sourceFetchedAt") or 0) < _NHL_ALT_FEED_TTL):
+        return cached
+    # Tasks cannot be shared between the HTTP loop and the batch-worker loop.
+    key = (date_str, id(asyncio.get_running_loop()))
+    task = _NHL_ALT_FEED_INFLIGHT.get(key)
+    if task is None:
+        task = asyncio.create_task(_nhl_fetch_alt_book_feed(date_str, games))
+        _NHL_ALT_FEED_INFLIGHT[key] = task
+        def finished(done):
+            if _NHL_ALT_FEED_INFLIGHT.get(key) is done:
+                _NHL_ALT_FEED_INFLIGHT.pop(key, None)
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
+
+def _nhl_alt_source_summary(coverage, market="", side=""):
+    if not isinstance(coverage, dict):
+        return "Alternate sportsbook coverage was not reported."
+    mapping = {"shots": "player_shots_on_goal_alternate", "points": "player_points_alternate",
+               "assists": "player_assists_alternate", "saves": "player_total_saves_alternate"}
+    keys = [mapping[market]] if market in mapping else (
+        [] if market else list(LIVE_ALTERNATE_PROP_MARKETS))
+    sides = [side] if side in ("OVER", "UNDER") else ["OVER", "UNDER"]
+    def total(group):
+        return sum((coverage.get("markets", {}).get(k, {}).get(group, {}).get(s) or 0)
+                   for k in keys for s in sides)
+    text = (
+        f"theScore Bet US feed (espnbet): {total('score')} returned "
+        f"{side.title() + ' ' if side else ''}quotes; "
+        f"{total('scoreEligible')} meet the 70% implied / -1000 price rules. "
+        f"Other books: {total('other')} quotes; {total('otherEligible')} meet those price rules. "
+        "Counts cover the slate and selected market/side, before player and game filters. "
+        "Player eligibility, available pregame history and the 85% app gate still apply. "
+        "This feed does not confirm Ontario availability or identical Ontario prices.")
+    failed = coverage.get("scoreFailures", 0) + coverage.get("otherFailures", 0)
+    if failed:
+        text += (f" Coverage is incomplete: {coverage.get('scoreFailures', 0)} theScore "
+                 f"and {coverage.get('otherFailures', 0)} general event reads failed; "
+                 "zero returned quotes is not proof those books have no options.")
+        for prefix, label in (("score", "theScore"), ("other", "general feed")):
+            errors = (coverage.get("errors") or {}).get(prefix) or []
+            if errors:
+                text += f" {label}: {', '.join(errors)}."
+    if market and market not in mapping:
+        text += " This category has no alternate market in the current Coach lookup."
+    return text
+
+
 def _nhl_alt_priced_record(rec):
     """Skip history only when neither genuine side can meet the unchanged book gate."""
     if not isinstance(rec, dict) or not rec.get("player") or rec.get("line") is None:
         return False
-    for field in ("odds", "under_odds"):
-        implied = _nhl_alt_implied(rec.get(field))
-        if implied is not None and implied >= 70:
-            try:
-                if float(str(rec[field]).replace("+", "")) >= -1000:
-                    return True
-            except (ValueError, TypeError):
-                pass
-    return False
+    return bool(_nhl_alt_qualified_quotes(rec))
 
 
 async def _nhl_alt_scan_scoped(date_str, system, shared_games=None, progress=None):
@@ -4805,11 +5087,13 @@ async def _nhl_alt_scan_scoped(date_str, system, shared_games=None, progress=Non
 
 
 def _nhl_alt_coach_cache_get(date_key: str, system: str):
-    version = 7 if system == "D" else 6
+    version = 8
     path = _CACHE_DIR / f"nhl_alt_coach_v{version}_{system}_{date_key}.json"
     try:
         if path.exists() and time.time() - path.stat().st_mtime < _NHL_ALT_COACH_TTL:
-            return json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if 0 <= time.time() - float(payload.get("sourceFetchedAt") or 0) < _NHL_ALT_FEED_TTL:
+                return payload
     except Exception as exc:
         print(f"[NHLAltCoach] cache read error: {exc}")
     return None
@@ -4817,7 +5101,7 @@ def _nhl_alt_coach_cache_get(date_key: str, system: str):
 
 def _nhl_alt_coach_cache_set(date_key: str, system: str, payload: dict) -> None:
     try:
-        version = 7 if system == "D" else 6
+        version = 8
         (_CACHE_DIR / f"nhl_alt_coach_v{version}_{system}_{date_key}.json").write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception as exc:
@@ -4871,19 +5155,18 @@ async def _build_nhl_alt_coach(
                 "error": "No NHL games found for this date."}
     injury_report = await _nhl_injury_report(date_str)
 
-    # get_shot_lines owns the live alternate cache.  It safely refreshes an old
-    # An older cached payload may predate the alternates field.
-    live_cache = _odds_cache_get("nhl_lineup_v5_us_ca", date_str)
-    if not isinstance(live_cache, dict) or "alternates" not in live_cache:
-        await get_shot_lines(date_str, games)
-        live_cache = _odds_cache_get("nhl_lineup_v5_us_ca", date_str)
-    alternates = (live_cache or {}).get("alternates") or {}
+    # Separate, short-lived Coach source: explicitly checks theScore Bet without
+    # touching standard board inputs or refreshing their cached quote timestamp.
+    source_feed = await _nhl_alt_book_feed(date_str, games)
+    alternates = source_feed.get("alternates") or {}
     alternates = {
         market: {key: rec for key, rec in ladder.items() if _nhl_alt_priced_record(rec)}
         for market, ladder in alternates.items() if isinstance(ladder, dict)}
     if not any(alternates.get(k) for k in LIVE_ALTERNATE_PROP_MARKETS):
         return {"date": date_str, "system": system, "picks": [],
-                "error": "No genuine NHL alternate price meets the 70% book-implied gate and -1000 odds floor."}
+                "candidates": [], "games": games,
+                "sourceCoverage": source_feed.get("sourceCoverage"),
+                "sourceFetchedAt": source_feed.get("sourceFetchedAt")}
 
     sem = asyncio.Semaphore(SEM_NHL)
     team_ctx = {}
@@ -4891,7 +5174,7 @@ async def _build_nhl_alt_coach(
         team_ctx[game["homeTeam"]] = (game["awayTeam"], "H")
         team_ctx[game["awayTeam"]] = (game["homeTeam"], "R")
     skater_markets = {
-        "player_shots_alternate": ("shots", "Shots on Goal"),
+        "player_shots_on_goal_alternate": ("shots", "Shots on Goal"),
         "player_points_alternate": ("points", "Points (1+)"),
         "player_assists_alternate": ("assists", "Assists (1+)"),
     }
@@ -4980,18 +5263,22 @@ async def _build_nhl_alt_coach(
         logs = _nhl_pre_game_logs(log_map.get(player["id"], []), date_str)
         if not logs:
             continue
+        player_games = [g for g in games if team in (g.get("homeTeam"), g.get("awayTeam"))]
         for market, (stat_key, label) in skater_markets.items():
             if kind != "skater":
                 continue
             ladder = alternates.get(market) or {}
             exact_lines = [rec for rec in ladder.values() if isinstance(rec, dict)
+                           and _odds_event_matches_slate(rec, player_games)
                            and _match_odds_name(rec.get("player", ""), [player])]
             for rec in exact_lines:
                 rows.extend(_nhl_alt_coach_exact_rows(
                     player, team, opponent, home_road, logs, stat_key, label, rec, system, date_str))
         if kind == "goalie":
             for rec in (alternates.get("player_total_saves_alternate") or {}).values():
-                if isinstance(rec, dict) and _match_odds_name(rec.get("player", ""), [player]):
+                if (isinstance(rec, dict)
+                        and _odds_event_matches_slate(rec, player_games)
+                        and _match_odds_name(rec.get("player", ""), [player])):
                     rows.extend(_nhl_alt_coach_exact_rows(
                         player, team, opponent, home_road, logs, "saves", "Goalie Saves",
                         rec, system, date_str))
@@ -5002,7 +5289,9 @@ async def _build_nhl_alt_coach(
             best[key] = row
     picks = sorted(best.values(), key=_nhl_alt_rank, reverse=True)[:10]
     payload = {"date": date_str, "system": system, "picks": picks, "games": games,
-               "candidates": rows, "lines": len(rows)}
+               "candidates": rows, "lines": len(rows),
+               "sourceCoverage": source_feed.get("sourceCoverage"),
+               "sourceFetchedAt": source_feed.get("sourceFetchedAt")}
     payload = _nhl_apply_injury_report(payload, injury_report)
     _nhl_alt_coach_cache_set(date_str, system, payload)
     return payload
@@ -5020,8 +5309,8 @@ def _nhl_alt_coach_exact_rows(player, team, opponent, home_road, logs, stat_key,
     if len(recent) < (C_MIN_SAMPLE if system == "C" else MIN_GAMES):
         return []
     out = []
-    for side, odds_key in (("OVER", "odds"), ("UNDER", "under_odds")):
-        odds = rec.get(odds_key)
+    for quote in _nhl_alt_qualified_quotes(rec):
+        side, odds = quote["side"], quote["odds"]
         implied = _nhl_alt_implied(odds)
         if implied is None:  # never manufacture an absent side or price
             continue
@@ -5050,9 +5339,11 @@ def _nhl_alt_coach_exact_rows(player, team, opponent, home_road, logs, stat_key,
             "player": player["name"], "pid": player["id"], "team": team, "opponent": opponent,
             "market": label, "marketKey": _frank_market_key_py(label), "side": side,
             "line": line, "odds": float(str(odds).replace("+", "")),
-            "book": rec.get("under_book" if side == "UNDER" else "odds_book")
-                    or rec.get("source", "OddsAPI (alternate)"),
-            "oppositeOdds": rec.get("odds" if side == "UNDER" else "under_odds"),
+            "book": quote["book"], "bookKey": quote.get("bookKey", ""),
+            "quoteTimestamp": quote.get("lastUpdate"),
+            "oppositeOdds": next((q.get("odds") for q in rec.get("quotes", [])
+                                  if q.get("bookKey") == quote.get("bookKey")
+                                  and q.get("side") != side), None),
             "appProb": app_prob, "implied": implied, "edge": edge, "isAlternate": True,
             "recentRate": round(r3, 1), "recentHits": h3, "recentTotal": len(recent),
             "oppRate": round(r2, 1) if r2 is not None else 0, "oppHits": h2,
@@ -5638,6 +5929,7 @@ async def run_picks(
         return {
             "date": target_date, "targetDate": target_date, "season": season,
             "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
+            "_nhlQuoteTupleVersion": 2 if not simulate else None,
             "ppUnitsVersion": 1 if pp_units is not None else None,
             "ppUnitMissingTeams": sorted(
                 team for team, assignments in (pp_units or {}).items() if not assignments),
@@ -6138,6 +6430,7 @@ async def run_picks(
 
     _result = {
         "_nhlCacheVersion": 10 if d_mode and not simulate else 9,
+        "_nhlQuoteTupleVersion": 2 if not simulate else None,
         "ppUnitsVersion": 1 if pp_units is not None else None,
         "ppUnitMissingTeams": sorted(
             team for team, assignments in (pp_units or {}).items() if not assignments),
@@ -8104,7 +8397,9 @@ function _frankRender(question,rows,totalPriced,mode){
     :mode==='safe'
     ?'I checked only the exact sides that qualified for the loaded board, removed every zero or negative Coach Edge play, and ranked the remaining plays by sportsbook-implied win probability.'
     :'I checked '+totalPriced+' priced props from the loaded '+(window.IS_ADMIN?_frankSystemLabel(window.NHL_FRANK_SYSTEM||'A')+' ':'')+'board and ranked the matching positive-edge plays. Probability edge is shown in percentage points, not traditional expected ROI.';
-  _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div>'
+    if(window.__NHL_ALT_COACH_ACTIVE__&&window.__NHL_ALT_COACH_SOURCE_SUMMARY__)
+      summary+='<br/><br/>'+_frankEsc(window.__NHL_ALT_COACH_SOURCE_SUMMARY__);
+    _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div>'
     +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>'+(mode==='board'?'App Board Rank':window.__NHL_ALT_COACH_ACTIVE__?'Hit Rate Rank':'Coach Edge')+'</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
 }
 async function generateFrankSelected(){
@@ -8260,9 +8555,11 @@ async function askNhlAltCoach(){
       await new Promise(function(resolve){setTimeout(resolve,1500);});
     }
     window.__NHL_ALT_COACH_ROWS__=data.picks||[];
+    window.__NHL_ALT_COACH_SOURCE_SUMMARY__=data.sourceSummary||'';
     if(!window.__NHL_ALT_COACH_ROWS__.length){
       window.__NHL_ALT_COACH_ACTIVE__=false;
-      _frankCommit('<div><div class="frank-ai-question">Best Alt-Line Hit Rate · '+_frankEsc(marketLabel)+' · '+_frankEsc(side||'All sides')+' · '+_frankEsc(gameLabel)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">No genuine NHL alternate line for this category, side and game meets the two probability gates: at least 85% app probability and at least 70% sportsbook-implied probability. Edge is not required. Categories without a published alternate ladder have no priced plays.</div></div></div>');
+      _frankCommit('<div><div class="frank-ai-question">Best Alt-Line Hit Rate · '+_frankEsc(marketLabel)+' · '+_frankEsc(side||'All sides')+' · '+_frankEsc(gameLabel)+'</div><div class="frank-ai-summary"><div class="frank-ai-empty">No priced alternate qualifies for this selection under the existing 85% app / 70% implied rules. Source coverage is shown below; a missing feed quote does not mean the sportsbook app has no alternate options.</div>'
+        +(data.sourceSummary?'<div style="margin-top:10px">'+_frankEsc(data.sourceSummary)+'</div>':'')+'</div></div>');
       return;
     }
     window.__NHL_ALT_COACH_ACTIVE__=true;
@@ -8967,12 +9264,13 @@ function _nhlTop30Section(raw){
       if(rows.length){
         body+='<div class="hc-grid">'+rows.map(function(p){
           var photo=p.headshot?'<img src="'+_nhlSafe(p.headshot)+'" alt="" loading="lazy" style="width:48px;height:48px;object-fit:contain;border-radius:50%">':'';
-          return '<article class="hc-card"><div style="display:flex;align-items:center;gap:10px">'+photo
+          return '<article class="hc-card" style="cursor:pointer" onclick="_nhlTop30Toggle(this,event)" title="Click for home/away career stats"><div style="display:flex;align-items:center;gap:10px">'+photo
             +'<div><div style="font-weight:900;color:#f8fafc">'+_nhlSafe(p.name)+'</div>'
             +'<div class="hc-note">'+_nhlSafe(p.team)+' vs '+_nhlSafe(p.opponent)+'</div></div></div>'
             +'<div class="hc-note">NHL points rank #'+p.rank+' · '+p.season_points+' points this season</div>'
             +'<div style="font-size:1.35rem;font-weight:900;color:#4ade80">'+Number(p.career_ppg).toFixed(2)+' PPG vs '+_nhlSafe(p.opponent)+'</div>'
-            +'<div class="hc-note">'+p.career_points+' career points in '+p.career_games+' games · Home + Away</div></article>';
+            +'<div class="hc-note">'+p.career_points+' career points in '+p.career_games+' games · Home + Away · <span style="color:#93c5fd">Click for Home/Away</span></div>'
+            +_nhlTop30Splits(p)+'</article>';
         }).join('')+'</div>';
       }else body+='<div class="hc-note">'+(data.unavailable?'No qualifiers found in the available histories.':'No Top 30 player with a team game today averages at least 1.00 career PPG against that opponent.')+'</div>';
     }
@@ -8980,6 +9278,28 @@ function _nhlTop30Section(raw){
   return '<section id="nhl-section-top30" class="hc-section"><h2 style="font-size:1rem;color:#f8fafc;margin:0 0 8px">Top 30 Point Per Game vrs Team</h2>'
     +'<div class="hc-note">This season’s Top 30 by total points → today’s opponent → career regular-season average of at least 1.00 PPG. Home and away combined. No edge gate or Top 10 cap.</div>'
     +body+'</section>';
+}
+function _nhlTop30Splits(p){
+  var today=p.today_venue==='HOME'?'home':p.today_venue==='AWAY'?'away':'';
+  function row(label,key,stats){
+    var on=key===today,base='padding:5px 8px;border-bottom:1px solid #1f2937;';
+    var style=on?base+'background:rgba(250,204,21,.16);color:#fde68a;font-weight:900;':base+'color:#e2e8f0;';
+    var tag=on?' <span style="font-size:.62rem;background:#facc15;color:#111827;border-radius:4px;padding:1px 4px;font-weight:900">TODAY</span>':'';
+    if(!stats)return '<tr><td style="'+style+'">'+label+tag+'</td><td colspan="5" style="'+style+'">Unavailable — refresh list to retry</td></tr>';
+    return '<tr><td style="'+style+'">'+label+tag+'</td><td style="'+style+'">'+stats.games+'</td><td style="'+style+'">'+stats.goals+'</td><td style="'+style+'">'+stats.assists+'</td><td style="'+style+'">'+stats.points+'</td><td style="'+style+'">'+(stats.games?(stats.points/stats.games).toFixed(2):'—')+'</td></tr>';
+  }
+  var th='padding:5px 8px;color:#94a3b8;font-size:.68rem;text-align:left;border-bottom:1px solid #334155';
+  var total={games:p.career_games,goals:p.career_goals,assists:p.career_assists,points:p.career_points};
+  return '<div class="nhl-top30-splits" style="display:none;margin-top:8px;overflow-x:auto">'
+    +'<div class="hc-note" style="margin-bottom:4px">Career regular season vs '+_nhlSafe(p.opponent)+' · Today: '+(today?'<b style="color:#fde68a">'+today.toUpperCase()+'</b>':'venue unknown')+'</div>'
+    +'<table style="width:100%;border-collapse:collapse;font-size:.78rem"><thead><tr><th style="'+th+'">Venue</th><th style="'+th+'">GP</th><th style="'+th+'">G</th><th style="'+th+'">A</th><th style="'+th+'">PTS</th><th style="'+th+'">PPG</th></tr></thead><tbody>'
+    +row('Home','home',p.home_split)+row('Away','away',p.away_split)
+    +row('Total','',total.goals==null?null:total)+'</tbody></table></div>';
+}
+function _nhlTop30Toggle(card,event){
+  if(event&&event.target&&event.target.closest&&event.target.closest('a,button'))return;
+  var box=card.querySelector('.nhl-top30-splits');
+  if(box)box.style.display=box.style.display==='none'?'block':'none';
 }
 function _nhlTop30Repaint(){
   var section=document.getElementById('nhl-section-top30');
@@ -14829,6 +15149,8 @@ async def api_nhl_coach_alternates(request: Request, date_str: str = "",
                 raise HTTPException(status_code=503, detail="Alternate scan stopped; retry to reuse completed source data.")
             except asyncio.TimeoutError:
                 raise HTTPException(status_code=504, detail="NHL sources did not finish within nine minutes. Completed histories remain cached for retry.")
+            except _NHLAlternateFeedError as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
             except Exception:
                 logger.exception("NHL alternate scan failed")
                 raise HTTPException(status_code=503, detail="Alternate scan failed while loading NHL sources; see server logs.")
@@ -14871,8 +15193,12 @@ async def api_nhl_coach_alternates(request: Request, date_str: str = "",
                     raise HTTPException(status_code=503, detail="Alternate Coach record could not be saved")
                 payload["captureStatus"] = (
                     f"{tracked}/{len(payload['picks'])} alternate plays saved before puck drop")
+        payload["sourceSummary"] = _nhl_alt_source_summary(
+            payload.get("sourceCoverage"), market, side)
         payload = {k: v for k, v in payload.items() if k != "candidates"}
         return JSONResponse(payload)
+    except _NHLAlternateFeedError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="The alternate-line scan timed out after 2 minutes. Please try again; completed data will be reused from cache.")
 
@@ -16041,6 +16367,34 @@ async def nhl_historical_analysis(
 _CRON_BUSY_NHL = False
 
 
+def _nhl_safe_live_quote_display(board):
+    """Keep legacy cards/history, but never advertise an unverified old price."""
+    if not isinstance(board, dict) or board.get("simulation") or board.get("_nhlQuoteTupleVersion") == 2:
+        return board
+    def clear(node):
+        if isinstance(node, list):
+            for item in node:
+                clear(item)
+        elif isinstance(node, dict):
+            if "realOdds" in node or "realUnderOdds" in node:
+                for field in ("realOdds", "realUnderOdds", "odds_book", "over_book", "under_book"):
+                    node[field] = ""
+                for field in ("odds", "book", "ev", "edge", "impliedProbability"):
+                    if field in node:
+                        node[field] = None if field != "book" else ""
+                node["quoteVerification"] = "Legacy price withheld: exact sportsbook line/price pairing was not verified."
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    clear(value)
+    clear(board)
+    note = ("Previously saved sportsbook prices are withheld because their exact line/price "
+            "pairing was not verified. Cards and saved history remain available. "
+            "A new explicitly triggered run is required for verified prices; no run was started.")
+    if note not in str(board.get("data_note") or ""):
+        board["data_note"] = str(board.get("data_note") or "") + " " + note
+    return board
+
+
 def _nhl_valid_live_board(board, date_str: str, system: str):
     """Validate exact saved identity; never relabel A as another system."""
     if (not isinstance(board, dict) or board.get("date") != date_str
@@ -16050,7 +16404,7 @@ def _nhl_valid_live_board(board, date_str: str, system: str):
         return None
     expected = 10 if system == "D" else 9
     if board.get("_nhlCacheVersion") == expected:
-        return board
+        return _nhl_safe_live_quote_display(board)
     # The old no-props return omitted its version tag. This is an actual
     # saved empty board, NOT evidence that the system never ran.
     if (board.get("_nhlCacheVersion") is None
