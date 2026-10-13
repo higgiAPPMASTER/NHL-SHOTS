@@ -12811,8 +12811,13 @@ async def _nhl_capture_daily_coach(date_str: str, board: dict, system: str):
         if not ok:
             raise RuntimeError("Standard Coach presets could not be saved")
         board["coachCaptureStatus"] = "CAPTURE_PARTIAL"
-        payload = await asyncio.wait_for(
-            _warm_nhl_alt_coach(date_str, system, shared_games=games), timeout=120)
+        # The alternate scan has its own 540s source deadline; a shorter wait
+        # here abandoned slow Render scans that would have finished.
+        try:
+            payload = await asyncio.wait_for(
+                _warm_nhl_alt_coach(date_str, system, shared_games=games), timeout=570)
+        except asyncio.TimeoutError:
+            raise RuntimeError("Alternate Coach scan timed out")
         if payload.get("error") and "No genuine NHL alternate lines" not in payload["error"]:
             raise RuntimeError(payload["error"])
         picks = payload.get("picks") or []
@@ -12842,7 +12847,8 @@ async def _nhl_capture_daily_coach(date_str: str, board: dict, system: str):
         board["coachPresetCount"] = len(_NHL_COACH_PRESET_LABELS)
         board.pop("coachCaptureError", None)
     except Exception as exc:
-        board["coachCaptureError"] = str(exc) or "Automatic Coach capture failed"
+        board["coachCaptureError"] = (
+            str(exc) or type(exc).__name__ or "Automatic Coach capture failed")
         logger.exception("NHL automatic Coach capture failed for %s %s", system, date_str)
 
 
