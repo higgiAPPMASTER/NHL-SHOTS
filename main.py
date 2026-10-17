@@ -6913,7 +6913,13 @@ nav{position:fixed;top:0;width:100%;background:rgba(10,10,10,.95);backdrop-filte
 .nhl-nav-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
 .nhl-nav-btn{border:0;border-radius:8px;padding:9px 14px;color:#fff;font-size:.76rem;font-weight:900;white-space:nowrap;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.24)}
 .nhl-nav-btn.trk{background:#7c3aed}.nhl-nav-btn.top30{background:#be123c}.nhl-nav-btn.gp{background:#0e7490}.nhl-nav-btn.track{background:#047857}.nhl-nav-btn.overflow{background:#b45309}.nhl-nav-btn.history{background:#1d4ed8}.nhl-nav-btn.bets{background:#0e7490}
-@media(max-width:900px){nav{padding:0 12px}.nhl-nav-actions{overflow-x:auto;justify-content:flex-start;padding:8px 0}.nhl-nav-btn{padding:8px 11px;font-size:.7rem}.logo{flex:0 0 auto;margin-right:10px}}
+.nhl-menu{position:relative}
+.nhl-nav-btn.menu{background:#1d4ed8;font-size:.82rem;padding:9px 16px}
+.nhl-menu-list{display:none;position:absolute;right:0;top:calc(100% + 6px);min-width:230px;background:#0b1222;border:1px solid #334155;border-radius:10px;padding:6px;box-shadow:0 12px 30px rgba(0,0,0,.55);z-index:10000}
+.nhl-menu-list.open{display:block}
+.nhl-menu-item{display:flex;align-items:center;gap:10px;width:100%;background:transparent;border:0;border-left:4px solid var(--c);border-radius:6px;color:#f1f5f9;font-size:.86rem;font-weight:800;text-align:left;padding:10px 12px;margin:2px 0;cursor:pointer}
+.nhl-menu-item:hover,.nhl-menu-item:focus{background:#1e293b;outline:none}
+@media(max-width:900px){nav{padding:0 12px}.nhl-nav-actions{justify-content:flex-end;padding:8px 0}.nhl-nav-btn{padding:8px 11px;font-size:.7rem}.logo{flex:0 0 auto;margin-right:10px}}
 .page{position:relative;z-index:1;max-width:1300px;margin:0 auto;padding:104px 24px 40px}
 .app-hdr{text-align:center;margin-bottom:36px}
 .app-hdr h1{font-family:'Playfair Display',serif;font-size:2.6rem;font-weight:900;color:#fff;margin-bottom:6px}
@@ -7170,14 +7176,40 @@ body.is-admin #parlayCard{display:block}
 <nav>
   <div class="logo">Money <span>Picks</span> Arena</div>
   <div class="nhl-nav-actions" aria-label="NHL records and account tools">
-    <button type="button" class="nhl-nav-btn gp" onclick="openNhlGPRecord()">🔮 GP Record</button>
-    <button type="button" class="nhl-nav-btn track" onclick="openNhlTrackRecord()">📊 Track Record</button>
-    <button type="button" class="nhl-nav-btn overflow" onclick="openNhlOverflowRecord()">⭐ NHL Overflow</button>
-    <button type="button" class="nhl-nav-btn trk" onclick="openNhlDayReport()">📅 By Day / Category</button>
-    <button type="button" class="nhl-nav-btn top30" onclick="openNhlTop30Record()">🏒 Top 30 Record</button>
-    <button type="button" class="nhl-nav-btn history" onclick="toggleNhlHistoricalAnalysis()">📚 Historical Analysis</button>
-    <button type="button" class="nhl-nav-btn bets" onclick="openNhlMyBets()">💰 My Bets</button>
+    <div class="nhl-menu">
+      <button type="button" class="nhl-nav-btn menu" aria-haspopup="true" aria-expanded="false" id="nhlNavMenuBtn" onclick="_nhlNavToggle(event)">☰ Records &amp; Tools ▾</button>
+      <div class="nhl-menu-list" id="nhlNavMenu" role="menu">
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlGPRecord)">🔮 GP Record</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#047857" onclick="_nhlNavGo(openNhlTrackRecord)">📊 Track Record</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#b45309" onclick="_nhlNavGo(openNhlOverflowRecord)">⭐ NHL Overflow</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlDayReport)">📅 By Day / Category</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(openNhlTop30Record)">🏒 Top 30 Record</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#1d4ed8" onclick="_nhlNavGo(toggleNhlHistoricalAnalysis)">📚 Historical Analysis</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlMyBets)">💰 My Bets</button>
+      </div>
+    </div>
   </div>
+<script>
+function _nhlNavToggle(e){
+  if(e)e.stopPropagation();
+  var m=document.getElementById('nhlNavMenu'),b=document.getElementById('nhlNavMenuBtn');
+  if(!m)return;
+  var open=!m.classList.contains('open');
+  m.classList.toggle('open',open);
+  if(b)b.setAttribute('aria-expanded',open?'true':'false');
+}
+function _nhlNavGo(fn){
+  var m=document.getElementById('nhlNavMenu'),b=document.getElementById('nhlNavMenuBtn');
+  if(m)m.classList.remove('open');
+  if(b)b.setAttribute('aria-expanded','false');
+  if(typeof fn==='function')fn();
+}
+document.addEventListener('click',function(e){
+  var m=document.getElementById('nhlNavMenu');
+  if(m&&m.classList.contains('open')&&!e.target.closest('.nhl-menu'))_nhlNavGo(null);
+});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')_nhlNavGo(null);});
+</script>
 </nav>
 
 <style>
@@ -9409,7 +9441,20 @@ function _nhlTop30Form(p){
     +'<div class="hc-note" style="margin-bottom:4px">Last '+f.games+' (this season): point in '+f.with_point+'/'+f.games+' · '+f.points+' PTS</div>'
     +'<div style="display:flex;gap:4px;flex-wrap:nowrap">'+log+'</div></div>';
 }
-var _nhlTop30Rec=null;
+var _nhlTop30Rec=null,_nhlTop30Period='day',_nhlTop30Anchor='';
+function _nhlTop30Bounds(){
+  var a=_nhlTop30Anchor||_nhlGpToday();
+  if(_nhlTop30Period==='season'){var y=Number(a.slice(0,4)),m=Number(a.slice(5,7));if(m<7)y-=1;return {start:y+'-07-01',end:(y+1)+'-06-30',label:y+'–'+String(y+1).slice(2)+' Season'};}
+  var b=_nhlPeriodBounds(_nhlTop30Period,a);
+  b.label=_nhlTop30Period==='all'?'All Time':_nhlTop30Period==='day'?b.start:b.start+' through '+b.end;
+  return b;
+}
+function _nhlTop30SetPeriod(){
+  var p=document.getElementById('nhlTop30Period'),d=document.getElementById('nhlTop30Date');
+  if(p)_nhlTop30Period=p.value;if(d&&d.value)_nhlTop30Anchor=d.value;
+  if(d)d.style.display=_nhlTop30Period==='all'?'none':'inline-block';
+  _nhlTop30RecRender();
+}
 function openNhlTop30Record(){
   var m=document.getElementById('nhlTop30RecModal');
   if(!m){
@@ -9423,6 +9468,12 @@ function openNhlTop30Record(){
     +'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px"><h2 style="font-size:1.1rem;margin:0;color:#f8fafc">🏒 Top 30 PPG vs Team — Track Record</h2>'
     +'<div><button type="button" class="hc-btn" onclick="_nhlTop30RecLoad(true)">Get Results</button> <button type="button" class="hc-btn" onclick="document.getElementById(&quot;nhlTop30RecModal&quot;).style.display=&quot;none&quot;">Close</button></div></div>'
     +'<div class="hc-note" style="margin-bottom:10px">Separate record. Each qualifier is tracked as Points 1+ (Over 0.5), saved before puck drop. Win/loss only — no sportsbook price is attached. Not counted in any other record.</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">'
+    +'<label style="color:#94a3b8;font-size:.72rem;font-weight:800">PERIOD <select id="nhlTop30Period" onchange="_nhlTop30SetPeriod()" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px;color:#fff">'
+    +[['day','Day'],['week','Week · last 7 days'],['month','Month'],['season','Season'],['all','All Time']].map(function(o){return '<option value="'+o[0]+'"'+(o[0]===_nhlTop30Period?' selected':'')+'>'+o[1]+'</option>';}).join('')
+    +'</select></label>'
+    +'<label style="color:#94a3b8;font-size:.72rem;font-weight:800">DATE <input type="date" id="nhlTop30Date" value="'+(_nhlTop30Anchor||_nhlGpToday())+'" onchange="_nhlTop30SetPeriod()" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px;color:#fff;color-scheme:dark;'+(_nhlTop30Period==='all'?'display:none':'')+'"></label>'
+    +'<span id="nhlTop30Caption" style="color:#fde68a;font-size:.8rem;font-weight:800"></span></div>'
     +'<div id="nhlTop30RecBody"><div class="hc-note">Loading…</div></div></div>';
   if(_nhlTop30Rec)_nhlTop30RecRender();
   _nhlTop30RecLoad(false);
@@ -9438,7 +9489,9 @@ async function _nhlTop30RecLoad(grade){
 }
 function _nhlTop30RecRender(){
   var body=document.getElementById('nhlTop30RecBody');if(!body||!_nhlTop30Rec)return;
-  var days=_nhlTop30Rec.daily||[],all=[];
+  var bounds=_nhlTop30Bounds(),cap=document.getElementById('nhlTop30Caption');
+  if(cap)cap.textContent=bounds.label;
+  var days=(_nhlTop30Rec.daily||[]).filter(function(d){var dt=String(d.date||'').slice(0,10);return dt>=bounds.start&&dt<=bounds.end;}),all=[];
   days.forEach(function(d){(d.picks||[]).forEach(function(p){all.push(p);});});
   function tally(list){
     var w=list.filter(function(p){return p.result==='WIN';}).length,l=list.filter(function(p){return p.result==='LOSS';}).length;
@@ -9446,6 +9499,7 @@ function _nhlTop30RecRender(){
   }
   function rateTxt(t){return t.rate==null?'—':t.rate.toFixed(1)+'%';}
   function rateColor(t){return t.rate==null?'#94a3b8':t.rate>=70?'#4ade80':t.rate>=55?'#facc15':'#f87171';}
+  if(!all.length&&(_nhlTop30Rec.daily||[]).length){body.innerHTML='<div class="hc-note">No Top 30 picks saved for '+_nhlSafe(bounds.label)+'. Pick another date or period.</div>';return;}
   if(!all.length){body.innerHTML='<div class="hc-note">No Top 30 picks saved yet. They save automatically on each Run A+B+C+D and whenever the Top 30 list is loaded before puck drop.</div>';return;}
   var t=tally(all),html='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px">';
   [['Record',t.w+'-'+t.l,'#f8fafc'],['Hit rate',rateTxt(t),rateColor(t)],['Pending',String(t.pend),'#93c5fd'],['Void (DNP)',String(t.v),'#94a3b8']].forEach(function(c){
@@ -9460,7 +9514,7 @@ function _nhlTop30RecRender(){
   var th='padding:6px 8px;color:#94a3b8;font-size:.68rem;text-align:left;border-bottom:1px solid #334155';
   days.forEach(function(d,i){
     var dt=tally(d.picks||[]);
-    html+='<details'+(i===0?' open':'')+' style="border:1px solid #1e293b;border-radius:9px;margin-bottom:8px;background:#0f172a">'
+    html+='<details'+(i===0||_nhlTop30Period==='day'?' open':'')+' style="border:1px solid #1e293b;border-radius:9px;margin-bottom:8px;background:#0f172a">'
       +'<summary style="cursor:pointer;padding:9px 12px;font-weight:900;color:#f8fafc">'+_nhlSafe(d.date)+' · <span style="color:'+rateColor(dt)+'">'+dt.w+'-'+dt.l+' ('+rateTxt(dt)+')</span>'+(dt.pend?' <span style="color:#93c5fd;font-weight:600">· '+dt.pend+' pending</span>':'')+'</summary>'
       +'<div style="overflow-x:auto;padding:0 8px 8px"><table style="width:100%;border-collapse:collapse;font-size:.8rem"><thead><tr><th style="'+th+'">Player</th><th style="'+th+'">Matchup</th><th style="'+th+'">Career PPG</th><th style="'+th+'">Form</th><th style="'+th+'">Pick</th><th style="'+th+'">PTS</th><th style="'+th+'">Result</th></tr></thead><tbody>'
       +(d.picks||[]).map(function(p){
