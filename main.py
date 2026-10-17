@@ -9522,12 +9522,21 @@ function _nhlTop30RecRender(){
     var ft=tally(all.filter(function(p){return (p.form||'')===f[0];}));
     return '<span style="display:inline-block;margin:0 10px 4px 0">'+f[1]+': <b style="color:'+rateColor(ft)+'">'+ft.w+'-'+ft.l+' ('+rateTxt(ft)+')</b></span>';
   }).join('');
+  function venueTxt(list){
+    return [['HOME','🏠 Home'],['AWAY','✈️ Away']].map(function(v){
+      var vt=tally(list.filter(function(p){return p.venue===v[0];}));
+      return v[1]+' <b style="color:'+rateColor(vt)+'">'+vt.w+'-'+vt.l+' ('+rateTxt(vt)+')</b>'+(vt.pend?' <span style="color:#93c5fd">'+vt.pend+' pending</span>':'');
+    });
+  }
+  html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:12px">'+venueTxt(all).map(function(v){
+    return '<div style="border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center;background:#0f172a;color:#e2e8f0;font-size:.95rem">'+v+'</div>';
+  }).join('')+'</div>';
   html+='<div class="hc-note" style="margin-bottom:12px">By Last 5 badge at save time: '+forms+'</div>';
   var th='padding:6px 8px;color:#94a3b8;font-size:.68rem;text-align:left;border-bottom:1px solid #334155';
   days.forEach(function(d,i){
     var dt=tally(d.picks||[]);
     html+='<details'+(i===0||_nhlTop30Period==='day'?' open':'')+' style="border:1px solid #1e293b;border-radius:9px;margin-bottom:8px;background:#0f172a">'
-      +'<summary style="cursor:pointer;padding:9px 12px;font-weight:900;color:#f8fafc">'+_nhlSafe(d.date)+' · <span style="color:'+rateColor(dt)+'">'+dt.w+'-'+dt.l+' ('+rateTxt(dt)+')</span>'+(dt.pend?' <span style="color:#93c5fd;font-weight:600">· '+dt.pend+' pending</span>':'')+'</summary>'
+      +'<summary style="cursor:pointer;padding:9px 12px;font-weight:900;color:#f8fafc">'+_nhlSafe(d.date)+' · <span style="color:'+rateColor(dt)+'">'+dt.w+'-'+dt.l+' ('+rateTxt(dt)+')</span>'+(dt.pend?' <span style="color:#93c5fd;font-weight:600">· '+dt.pend+' pending</span>':'')+'<div style="font-size:.75rem;font-weight:600;color:#cbd5e1;margin-top:3px">'+venueTxt(d.picks||[]).join(' · ')+'</div></summary>'
       +'<div style="overflow-x:auto;padding:0 8px 8px"><table style="width:100%;border-collapse:collapse;font-size:.8rem"><thead><tr><th style="'+th+'">Player</th><th style="'+th+'">Matchup</th><th style="'+th+'">Career PPG</th><th style="'+th+'">Form</th><th style="'+th+'">Pick</th><th style="'+th+'">PTS</th><th style="'+th+'">Result</th></tr></thead><tbody>'
       +(d.picks||[]).map(function(p){
         var res=p.result||'PENDING',rc=res==='WIN'?'#4ade80':res==='LOSS'?'#f87171':res==='VOID'?'#94a3b8':'#93c5fd';
