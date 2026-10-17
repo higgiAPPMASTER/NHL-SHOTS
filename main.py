@@ -7380,6 +7380,8 @@ body.is-admin .frank-ai-systems{display:flex!important}
       <span style="color:#64748b;font-size:.67rem">display only · does not run the model</span>
     </div>
     <div id="nhlReplayChoices" style="display:none;margin:14px auto 0">
+      <button type="button" id="nhlPastToggle" aria-expanded="false" onclick="_nhlTogglePastDates()" style="background:#1e293b;color:#e2e8f0;border:1px solid #475569;border-radius:9px;padding:8px 16px;font-size:.78rem;font-weight:900;cursor:pointer">📅 Past dates ▾</button>
+      <div id="nhlPastBody" style="display:none;margin-top:12px">
       <div style="color:#fbbf24;font-size:.72rem;font-weight:900;margin-bottom:8px">HISTORICAL REPLAY · CHOOSE A SYSTEM</div>
       <div style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
         <button id="nhlReplayA" onclick="_nhlSelectReplay('A')" style="background:#1d4ed8;color:#fff;border:2px solid #60a5fa;border-radius:10px;padding:10px 18px;font-weight:900;cursor:pointer">A · NEW</button>
@@ -7401,7 +7403,17 @@ body.is-admin .frank-ai-systems{display:flex!important}
          <div id="nhlReplayAllPct" style="margin-top:5px;color:#a78bfa;font-size:.67rem;font-weight:900">STARTING · 3%</div>
        </div>
        <div id="nhlReplayAllResults" style="display:none;margin-top:12px"></div>
+      </div>
     </div>
+<script>
+function _nhlTogglePastDates(force){
+  var body=document.getElementById('nhlPastBody'),btn=document.getElementById('nhlPastToggle');
+  if(!body)return;
+  var open=typeof force==='boolean'?force:body.style.display==='none';
+  body.style.display=open?'block':'none';
+  if(btn){btn.textContent=open?'📅 Past dates ▴':'📅 Past dates ▾';btn.setAttribute('aria-expanded',open?'true':'false');}
+}
+</script>
   </div>
 
   <div class="card frank-ai-card" id="frankAiCard">
