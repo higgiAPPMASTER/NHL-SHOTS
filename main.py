@@ -9382,8 +9382,15 @@ function _nhlTop30Form(p){
   var f=p.last5_form;
   if(!f)return '';
   if(!f.available)return '<div class="hc-note">Last 5: unavailable — refresh list to retry</div>';
-  var log=(f.log||[]).map(function(g){return '<span title="'+_nhlSafe(g.date+' vs '+g.opponent)+'" style="display:inline-block;min-width:18px;text-align:center;border-radius:4px;padding:0 3px;margin-right:2px;font-weight:800;background:'+(g.points>0?'rgba(74,222,128,.18);color:#4ade80':'rgba(148,163,184,.15);color:#94a3b8')+'">'+g.points+'</span>';}).join('');
-  return '<div class="hc-note">Last '+f.games+' (this season): point in '+f.with_point+'/'+f.games+' · '+f.points+' PTS · '+log+'</div>';
+  var log=(f.log||[]).map(function(g){
+    var on=g.points>0;
+    return '<div title="'+_nhlSafe(g.date+' vs '+g.opponent)+'" style="flex:1 1 0;min-width:0;text-align:center;border-radius:6px;padding:4px 2px;background:'+(on?'rgba(74,222,128,.16);border:1px solid rgba(74,222,128,.35)':'rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.25)')+'">'
+      +'<div style="font-size:.95rem;font-weight:900;color:'+(on?'#4ade80':'#94a3b8')+'">'+g.points+'</div>'
+      +'<div style="font-size:.6rem;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+_nhlSafe(g.opponent||'')+'</div></div>';
+  }).join('');
+  return '<div style="margin-top:6px">'
+    +'<div class="hc-note" style="margin-bottom:4px">Last '+f.games+' (this season): point in '+f.with_point+'/'+f.games+' · '+f.points+' PTS</div>'
+    +'<div style="display:flex;gap:4px;flex-wrap:nowrap">'+log+'</div></div>';
 }
 function _nhlTop30Splits(p){
   var today=p.today_venue==='HOME'?'home':p.today_venue==='AWAY'?'away':'';
