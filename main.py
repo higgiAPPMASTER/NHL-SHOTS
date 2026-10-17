@@ -9405,12 +9405,12 @@ function _nhlTop30Section(raw){
       if(rows.length){
         body+='<div class="hc-grid">'+rows.map(function(p){
           var photo=p.headshot?'<img src="'+_nhlSafe(p.headshot)+'" alt="" loading="lazy" style="width:48px;height:48px;object-fit:contain;border-radius:50%">':'';
-          return '<article class="hc-card" style="cursor:pointer" onclick="_nhlTop30Toggle(this,event)" title="Click for home/away career stats"><div style="display:flex;align-items:center;gap:10px">'+photo
+          return '<article class="hc-card"><div style="display:flex;align-items:center;gap:10px">'+photo
             +'<div><div style="font-weight:900;color:#f8fafc">'+_nhlSafe(p.name)+_nhlTop30Badge(p)+'</div>'
             +'<div class="hc-note">'+_nhlSafe(p.team)+' vs '+_nhlSafe(p.opponent)+'</div></div></div>'
             +'<div class="hc-note">NHL points rank #'+p.rank+' · '+p.season_points+' points this season</div>'
             +'<div style="font-size:1.35rem;font-weight:900;color:#4ade80">'+Number(p.career_ppg).toFixed(2)+' PPG vs '+_nhlSafe(p.opponent)+'</div>'
-            +'<div class="hc-note">'+p.career_points+' career points in '+p.career_games+' games · Home + Away · <span style="color:#93c5fd">Click for Home/Away</span></div>'
+            +'<div class="hc-note">'+p.career_points+' career points in '+p.career_games+' games · Home + Away</div>'
             +_nhlTop30Form(p)
             +_nhlTop30Splits(p)+'</article>';
         }).join('')+'</div>';
@@ -9539,7 +9539,7 @@ function _nhlTop30Splits(p){
   }
   var th='padding:5px 8px;color:#94a3b8;font-size:.68rem;text-align:left;border-bottom:1px solid #334155';
   var total={games:p.career_games,goals:p.career_goals,assists:p.career_assists,points:p.career_points};
-  return '<div class="nhl-top30-splits" style="display:none;margin-top:8px;overflow-x:auto">'
+  return '<div class="nhl-top30-splits" style="display:block;margin-top:8px;overflow-x:auto">'
     +'<div class="hc-note" style="margin-bottom:4px">Career regular season vs '+_nhlSafe(p.opponent)+' · Today: '+(today?'<b style="color:#fde68a">'+today.toUpperCase()+'</b>':'venue unknown')+'</div>'
     +'<table style="width:100%;border-collapse:collapse;font-size:.78rem"><thead><tr><th style="'+th+'">Venue</th><th style="'+th+'">GP</th><th style="'+th+'">G</th><th style="'+th+'">A</th><th style="'+th+'">PTS</th><th style="'+th+'">PPG</th></tr></thead><tbody>'
     +row('Home','home',p.home_split)+row('Away','away',p.away_split)
