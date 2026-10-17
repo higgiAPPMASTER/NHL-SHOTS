@@ -1332,6 +1332,50 @@ async def _nhl_top30_ppg_build(target_date: str) -> dict:
         groups = await asyncio.gather(*(
             career_group(opp, players) for opp, players in by_opponent.items()))
         rows = sorted([row for group, _ in groups for row in group], key=lambda p: p["rank"])
+
+        async def recent_form(row):
+            # Display-only badge: current-season Last 5 (all venues) using the
+            # app's existing Points Hot/Cold rule. Never affects qualification.
+            try:
+                async with sem:
+                    payload = await read(
+                        f"{NHL_API}/player/{row['pid']}/game-log/{season}/2")
+                logs = [{"date": str(g.get("gameDate") or "")[:10],
+                         "opponent": g.get("opponentAbbrev", ""),
+                         "goals": g.get("goals"), "assists": g.get("assists"),
+                         "points": g.get("points")}
+                        for g in payload.get("gameLog") or [] if isinstance(g, dict)]
+                seen, games = set(), []
+                for g in sorted(_nhl_current_season_logs(logs, target_date),
+                                key=lambda g: g["date"], reverse=True):
+                    if g["date"] and g["date"] not in seen:
+                        seen.add(g["date"])
+                        games.append(g)
+                games = games[:5]
+                points = [_nhl_last5_display_stats(g)["points"] for g in games]
+                if not games or any(v is None for v in points):
+                    row["last5_form"] = {"games": len(games), "badge": None,
+                                         "available": False}
+                    return
+                with_point = sum(v > 0 for v in points)
+                total = sum(points)
+                badge = None
+                if len(games) >= _nhl_hot_cold_min_games(target_date):
+                    if with_point * 5 >= len(games) * 4 and total / len(games) > 0.5:
+                        badge = "HOT"
+                    elif (len(games) - with_point) * 5 >= len(games) * 4 and total / len(games) < 0.5:
+                        badge = "COLD"
+                row["last5_form"] = {
+                    "available": True, "games": len(games), "with_point": with_point,
+                    "points": total, "badge": badge,
+                    "log": [{"date": g["date"], "opponent": g["opponent"],
+                             "points": v} for g, v in zip(games, points)],
+                }
+            except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                row["last5_form"] = {"available": False, "games": 0, "badge": None}
+
+        if rows:
+            await asyncio.gather(*(recent_form(row) for row in rows))
         unavailable = [opponent for _, opponent in groups if opponent]
         if groups and len(unavailable) == len(groups):
             raise ValueError("Career opponent history unavailable; retry the category")
@@ -1353,7 +1397,7 @@ async def nhl_top30_ppg_vs_team(
     ds = date_str or _nhl_record_today()
     if ds != _nhl_record_today():
         raise HTTPException(status_code=400, detail="This daily category is available for today only")
-    key = ("top30-career-ppg-v2", ds, get_season_for_date(date.fromisoformat(ds)))
+    key = ("top30-career-ppg-v3", ds, get_season_for_date(date.fromisoformat(ds)))
     cached = _nhl_display_cached(key)
     if cached is not None and not refresh:
         return JSONResponse(cached, headers={"Cache-Control": "no-store"})
@@ -9313,11 +9357,12 @@ function _nhlTop30Section(raw){
         body+='<div class="hc-grid">'+rows.map(function(p){
           var photo=p.headshot?'<img src="'+_nhlSafe(p.headshot)+'" alt="" loading="lazy" style="width:48px;height:48px;object-fit:contain;border-radius:50%">':'';
           return '<article class="hc-card" style="cursor:pointer" onclick="_nhlTop30Toggle(this,event)" title="Click for home/away career stats"><div style="display:flex;align-items:center;gap:10px">'+photo
-            +'<div><div style="font-weight:900;color:#f8fafc">'+_nhlSafe(p.name)+'</div>'
+            +'<div><div style="font-weight:900;color:#f8fafc">'+_nhlSafe(p.name)+_nhlTop30Badge(p)+'</div>'
             +'<div class="hc-note">'+_nhlSafe(p.team)+' vs '+_nhlSafe(p.opponent)+'</div></div></div>'
             +'<div class="hc-note">NHL points rank #'+p.rank+' · '+p.season_points+' points this season</div>'
             +'<div style="font-size:1.35rem;font-weight:900;color:#4ade80">'+Number(p.career_ppg).toFixed(2)+' PPG vs '+_nhlSafe(p.opponent)+'</div>'
             +'<div class="hc-note">'+p.career_points+' career points in '+p.career_games+' games · Home + Away · <span style="color:#93c5fd">Click for Home/Away</span></div>'
+            +_nhlTop30Form(p)
             +_nhlTop30Splits(p)+'</article>';
         }).join('')+'</div>';
       }else body+='<div class="hc-note">'+(data.unavailable?'No qualifiers found in the available histories.':'No Top 30 player with a team game today averages at least 1.00 career PPG against that opponent.')+'</div>';
@@ -9326,6 +9371,19 @@ function _nhlTop30Section(raw){
   return '<section id="nhl-section-top30" class="hc-section"><h2 style="font-size:1rem;color:#f8fafc;margin:0 0 8px">Top 30 Point Per Game vrs Team</h2>'
     +'<div class="hc-note">This season’s Top 30 by total points → today’s opponent → career regular-season average of at least 1.00 PPG. Home and away combined. No edge gate or Top 10 cap.</div>'
     +body+'</section>';
+}
+function _nhlTop30Badge(p){
+  var f=p.last5_form||{};
+  if(f.badge==='HOT')return ' <span title="Point in at least 80% of last '+f.games+' games" style="font-size:.66rem;background:#dc2626;color:#fff;border-radius:4px;padding:1px 5px;font-weight:900;vertical-align:middle">🔥 HOT</span>';
+  if(f.badge==='COLD')return ' <span title="No point in at least 80% of last '+f.games+' games" style="font-size:.66rem;background:#2563eb;color:#fff;border-radius:4px;padding:1px 5px;font-weight:900;vertical-align:middle">❄️ COLD</span>';
+  return '';
+}
+function _nhlTop30Form(p){
+  var f=p.last5_form;
+  if(!f)return '';
+  if(!f.available)return '<div class="hc-note">Last 5: unavailable — refresh list to retry</div>';
+  var log=(f.log||[]).map(function(g){return '<span title="'+_nhlSafe(g.date+' vs '+g.opponent)+'" style="display:inline-block;min-width:18px;text-align:center;border-radius:4px;padding:0 3px;margin-right:2px;font-weight:800;background:'+(g.points>0?'rgba(74,222,128,.18);color:#4ade80':'rgba(148,163,184,.15);color:#94a3b8')+'">'+g.points+'</span>';}).join('');
+  return '<div class="hc-note">Last '+f.games+' (this season): point in '+f.with_point+'/'+f.games+' · '+f.points+' PTS · '+log+'</div>';
 }
 function _nhlTop30Splits(p){
   var today=p.today_venue==='HOME'?'home':p.today_venue==='AWAY'?'away':'';
