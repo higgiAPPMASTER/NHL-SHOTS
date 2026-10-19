@@ -8829,11 +8829,11 @@ function _frankParse(question,props){
   if(neg.length>=2){var nums=neg.slice(0,2).map(Number);f.minOdds=Math.min.apply(null,nums);f.maxOdds=Math.max.apply(null,nums);}
   var edge=q.match(/([0-9]+(?:[.][0-9]+)?) *%? *(?:edge|advantage)/);
   if(edge)f.minEdge=Number(edge[1]);
-  var teamSeen={};
+  var teamSeen={},words=' '+q.replace(/[^a-z0-9]+/g,' ')+' ';
   props.forEach(function(p){
     [p.team,p.opponent].forEach(function(t){
       var tl=String(t||'').toLowerCase();
-      if(tl&&q.indexOf(tl)>=0&&!teamSeen[tl]){teamSeen[tl]=1;f.teams.push(tl);}
+      if(tl&&words.indexOf(' '+tl+' ')>=0&&!teamSeen[tl]){teamSeen[tl]=1;f.teams.push(tl);}
     });
     var nl=String(p.player||'').toLowerCase();
     if(nl&&q.indexOf(nl)>=0&&f.players.indexOf(nl)<0)f.players.push(nl);
