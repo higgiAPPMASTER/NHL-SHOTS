@@ -7555,6 +7555,9 @@ body.is-admin .frank-ai-systems{display:flex!important}
 .fgt-tag{font-size:.58rem;font-weight:900;text-transform:uppercase;letter-spacing:.07em;border-radius:6px;padding:3px 6px;text-align:center}
 .fgt-g{background:rgba(249,115,22,.16);color:#fdba74}
 .fgt-t{background:#18181b;color:#a1a1aa}
+.fgt-s{background:rgba(34,197,94,.16);color:#86efac}
+.fgt-st{background:#0f1f17;color:#86efac}
+.fgt-sep{margin:8px 0 2px;padding-top:7px;border-top:1px dashed #27272a;font-size:.6rem;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#4ade80}
 .fgt-play{min-width:0}
 .fgt-mk{color:#94a3b8}
 .fgt-same{font-size:.55rem;color:#fdba74;border:1px solid rgba(249,115,22,.4);border-radius:999px;padding:1px 5px}
@@ -8993,7 +8996,7 @@ async function generateFrankSelected(){
 }
 // Best play per game plus best play per team, grouped by matchup. Rows arrive
 // already filtered, ranked and one-per-player, so qualification is unchanged.
-function _frankRenderGameTeam(question,rows,totalPriced,mode){
+function _frankRenderGameTeam(question,rows,totalPriced,mode,safeRows){
   var q='<div class="frank-ai-question">'+_frankEsc(question)+'</div>';
   if(!rows.length){
     _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">'+(mode==='board'?'No app-produced picks match the selected category, side and game.':'No loaded NHL prop has a genuine price and positive Coach Edge for the selected filters.')+'</div></div></div>');
@@ -9010,6 +9013,16 @@ function _frankRenderGameTeam(question,rows,totalPriced,mode){
     if(!(op in g.teams))g.teams[op]=null;
     if(!g.teams[tm])g.teams[tm]=p;
   });
+  (safeRows||[]).forEach(function(p){
+    var key=_nhlParlayGameKey(p.team,p.opponent);
+    if(!games[key]){games[key]={key:key,best:null,teams:{}};order.push(key);}
+    var g=games[key],tm=String(p.team||'').toUpperCase(),op=String(p.opponent||'').toUpperCase();
+    if(!g.safe)g.safe=p;
+    g.safeTeams=g.safeTeams||{};
+    if(!(tm in g.teams))g.teams[tm]=null;
+    if(!(op in g.teams))g.teams[op]=null;
+    if(!g.safeTeams[tm])g.safeTeams[tm]=p;
+  });
   var labels={},sel=document.getElementById('frankAiGame'),rank={};
   if(sel)Array.from(sel.options).forEach(function(o,i){if(o.value){labels[o.value]=o.text;rank[o.value]=i;}});
   order.sort(function(a,b){
@@ -9018,19 +9031,20 @@ function _frankRenderGameTeam(question,rows,totalPriced,mode){
   });
   var flat=[];
   function idx(p){var i=flat.indexOf(p);if(i<0){flat.push(p);i=flat.length-1;}return i;}
-  function val(p){
+  function val(p,safe){
+    if(safe)return '<span style="color:#86efac">App '+_frankPct(p.appProb)+'</span><br><span style="color:'+(p.edge>=0?'#4ade80':'#f87171')+';font-size:.85em">'+_frankSigned(p.edge)+' pts</span>';
     if(mode==='board')return '<span style="color:#93c5fd">App '+_frankPct(p.probabilityUnavailable?null:p.appProb)+'</span>';
     return '<span style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' pts</span>';
   }
-  function line(tag,cls,p,same){
+  function line(tag,cls,p,same,sameLabel,safe){
     if(!p)return '<div class="fgt-row"><span class="fgt-tag '+cls+'">'+_frankEsc(tag)+'</span><span class="fgt-none">No qualifying play</span></div>';
     var i=idx(p);
     return '<div class="fgt-row"><span class="fgt-tag '+cls+'">'+_frankEsc(tag)+'</span>'
       +'<span class="fgt-play"><button type="button" class="frank-ai-player-link" onclick="_frankOpenPlayer('+i+')">'+_frankEsc(p.player)+'</button>'
       +' <span class="fgt-mk">'+_frankEsc(p.market)+'</span> <b style="color:'+(p.side==='OVER'?'#4ade80':'#f87171')+'">'+p.side+' '+p.line+'</b>'
-      +(same?' <span class="fgt-same">game best</span>':'')+'</span>'
+      +(same?' <span class="fgt-same">'+_frankEsc(sameLabel||'game best')+'</span>':'')+'</span>'
       +'<span class="fgt-odds">'+_frankOdds(p.odds)+(p.odds!=null?_nhlBookBadge(p):'')+'</span>'
-      +'<span class="fgt-val">'+val(p)+'</span></div>';
+      +'<span class="fgt-val">'+val(p,safe)+'</span></div>';
   }
   var cards=order.map(function(key){
     var g=games[key],teams=Object.keys(g.teams);
@@ -9040,12 +9054,14 @@ function _frankRenderGameTeam(question,rows,totalPriced,mode){
     return '<div class="fgt-card"><div class="fgt-head">'+_frankEsc(lab)+'</div>'
       +line('Game best','fgt-g',g.best,false)
       +teams.map(function(t){return line(t+' best','fgt-t',g.teams[t],g.teams[t]&&g.teams[t]===g.best);}).join('')
+      +(safeRows?'<div class="fgt-sep">Safest bets · highest app % · minus odds</div>'+line('Game safest','fgt-s',g.safe,false,'',true)
+        +teams.map(function(t){var sp=(g.safeTeams||{})[t];return line(t+' safest','fgt-st',sp,sp&&sp===g.safe,'game safest',true);}).join(''):'')
       +'</div>';
   }).join('');
   window.__FRANK_LAST_ROWS__=flat.slice();
   var summary=order.length+' game'+(order.length===1?'':'s')+' · '+(mode==='board'
     ?'best app-produced pick per game and per team, in the app board order.'
-    :'highest positive Coach Edge per game and per team, one play per player.');
+    :'highest positive Coach Edge per game and per team, plus the safest bet per game and per team (highest app probability at minus odds, edge or not); one play per player in each list.');
   _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div><div class="fgt-wrap">'+cards+'</div></div>');
 }
 function _frankPresetSyncFilters(question){
@@ -9256,10 +9272,7 @@ async function askFrank(){
     f.players=[String(window.__FRANK_LAST_ROWS__[0].player).toLowerCase()];
     f.limit=1;
   }
-  var rows=candidates.filter(function(p){
-    // Every Coach recommendation must be a positive-edge side that actually
-    // qualified for the loaded board. Never manufacture the opposite side.
-    if(!window.__NHL_ALT_COACH_ACTIVE__&&!boardMode&&!(p.edge>f.minEdge))return false;
+  function _frankBaseMatch(p){
     if(category&&p.marketKey!==category)return false;
     if(game&&_nhlParlayGameKey(p.team,p.opponent)!==game)return false;
     if(selectedSide&&p.side!==selectedSide)return false;
@@ -9273,6 +9286,12 @@ async function askFrank(){
       if(f.teams.indexOf(tm)<0&&f.teams.indexOf(op)<0)return false;
     }
     return true;
+  }
+  var rows=candidates.filter(function(p){
+    // Every Coach recommendation must be a positive-edge side that actually
+    // qualified for the loaded board. Never manufacture the opposite side.
+    if(!window.__NHL_ALT_COACH_ACTIVE__&&!boardMode&&!(p.edge>f.minEdge))return false;
+    return _frankBaseMatch(p);
   });
   rows.sort(boardMode
     ?function(a,b){return a.boardOrder-b.boardOrder;}
@@ -9292,7 +9311,22 @@ async function askFrank(){
     return true;
   });
   if(f.perTeam&&!window.__NHL_ALT_COACH_ACTIVE__){
-    _frankRenderGameTeam(question,rows,candidates.length,f.mode);
+    // Safest companion rows: genuine minus-odds app plays (-101 to -1000),
+    // edge or not, ranked by highest app probability; one per player.
+    var safeRows=null;
+    if(!boardMode){
+      var safeSeen={};
+      safeRows=candidates.filter(function(p){
+        var o=Number(p.odds);
+        return Number.isFinite(o)&&o<0&&o>=-1000&&Number.isFinite(Number(p.appProb))&&_frankBaseMatch(p);
+      }).sort(function(a,b){return b.appProb-a.appProb||b.edge-a.edge;})
+        .filter(function(p){
+          var player=String(p.player||'').trim().toLowerCase();
+          if(!player||safeSeen[player])return false;
+          safeSeen[player]=true;return true;
+        });
+    }
+    _frankRenderGameTeam(question,rows,candidates.length,f.mode,safeRows);
     return;
   }
   if(f.perGame&&!window.__NHL_ALT_COACH_ACTIVE__){
