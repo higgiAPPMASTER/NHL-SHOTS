@@ -7321,6 +7321,7 @@ body.is-admin #parlayCard{display:block}
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlDayReport)">📅 By Day / Category</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(openNhlTop30Record)">🏒 Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#1d4ed8" onclick="_nhlNavGo(toggleNhlHistoricalAnalysis)">📚 Historical Analysis</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openFrankParlay)">🧠 Edge Coach Parlay Builder</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlMyBets)">💰 My Bets</button>
       </div>
     </div>
@@ -7345,6 +7346,22 @@ document.addEventListener('click',function(e){
   if(m&&m.classList.contains('open')&&!e.target.closest('.nhl-menu'))_nhlNavGo(null);
 });
 document.addEventListener('keydown',function(e){if(e.key==='Escape')_nhlNavGo(null);});
+function openFrankParlay(){
+  var o=document.getElementById('frankParlayOv');if(!o)return;
+  // Lift out of the Coach card so its stacking/overflow rules never clip the popup.
+  if(o.parentNode!==document.body)document.body.appendChild(o);
+  var p=document.getElementById('frankParlayPanel');if(p)p.open=true;
+  o.classList.add('open');
+}
+function closeFrankParlay(){
+  var o=document.getElementById('frankParlayOv');if(o)o.classList.remove('open');
+  var c=document.getElementById('frankParlayCategories');if(c)c.open=false;
+}
+document.addEventListener('keydown',function(e){
+  if(e.key!=='Escape')return;
+  var o=document.getElementById('frankParlayOv');
+  if(o&&o.classList.contains('open')&&!document.querySelector('.lad-ov'))closeFrankParlay();
+});
 </script>
 </nav>
 
@@ -7406,6 +7423,9 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape')_nhlNavGo(nu
 .frank-ai-side-btn:disabled{opacity:.5;cursor:not-allowed}
 .frank-parlay-panel>summary::-webkit-details-marker{display:none}
 .frank-parlay-panel>summary:focus-visible{outline:2px solid #c4b5fd;outline-offset:4px;border-radius:6px}
+.frank-parlay-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:150;overflow:auto;padding:16px;box-sizing:border-box}
+.frank-parlay-ov.open{display:flex}
+.frank-parlay-ov>.frank-parlay-panel{margin:auto !important;width:100%;max-width:820px;box-sizing:border-box}
 .frank-parlay-close-label{display:none}
 .frank-parlay-panel[open] .frank-parlay-close-label{display:inline}
 .frank-parlay-panel[open] .frank-parlay-open-label{display:none}
@@ -7664,8 +7684,9 @@ function _nhlTogglePastDates(force){
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
     <div class="frank-ai-note">Only Coach Edge, Safest Bets, Top 3, Best Overs and Best Unders require positive edge and genuine prices. All other standard categories show the loaded app picks in their original order, including negative-edge and unpriced model picks. Existing category limits and sides stay unchanged.</div>
+    <div id="frankParlayOv" class="frank-parlay-ov" onclick="if(event.target===this)closeFrankParlay()">
     <details id="frankParlayPanel" class="frank-parlay-panel" open style="margin-top:14px;padding:14px;border:1px solid rgba(167,139,250,.35);border-radius:12px;background:#11121b">
-      <summary style="display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer;font-size:.93rem;font-weight:900;color:#ddd6fe;margin-bottom:5px">
+      <summary onclick="event.preventDefault();closeFrankParlay()" style="display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer;font-size:.93rem;font-weight:900;color:#ddd6fe;margin-bottom:5px">
         <span>Edge Coach Parlay Builder</span>
         <span style="flex-shrink:0;border:1px solid #7c3aed;border-radius:6px;background:#312e81;color:#fff;padding:5px 10px;font-size:.7rem"><span class="frank-parlay-close-label">Close</span><span class="frank-parlay-open-label">Open</span></span>
       </summary>
@@ -7728,6 +7749,7 @@ function _nhlTogglePastDates(force){
       <div style="font-size:.67rem;color:#94a3b8;margin-top:8px">Category displays retain unpriced app picks. This priced parlay builder needs genuine quotes, but does not require edge for market or Hot/Cold legs.</div>
       <div id="frankParlayResult" aria-live="polite" style="margin-top:10px"></div>
     </details>
+    </div>
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
 
