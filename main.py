@@ -10475,18 +10475,33 @@ var _nhlVsOppCache={};
 function _nhlVsOppBox(p,isGoalie){
   var raw=window.__NHL_RAW__||{},dt=raw.targetDate||raw.date||window.__NHL_DATE__||'';
   var opp=String(p.opponent||'').toUpperCase(),pos=isGoalie?'G':'F';
-  var key=String(p.pid||'')+'|'+opp+'|'+dt+'|'+pos;
+  var l5=p.last5VenueStats,hr=(l5&&l5.venue)||p.homeRoad||p.last5HomeRoad||'';
+  if(hr!=='H'&&hr!=='R'){
+    hr='';
+    (raw.games||[]).some(function(game){
+      if(game.homeTeam===p.team){hr='H';return true;}
+      if(game.awayTeam===p.team){hr='R';return true;}
+      return false;
+    });
+  }
+  var key=String(p.pid||'')+'|'+opp+'|'+dt+'|'+pos+'|'+hr;
   var data=_nhlVsOppCache[key],ok=!!p.pid&&!!opp&&!!dt;
-  return '<section class="nhl-vsopp-box" data-key="'+_nhlEsc(key)+'" data-pid="'+_nhlEsc(p.pid||'')+'" data-opp="'+_nhlEsc(opp)+'" data-date="'+_nhlEsc(dt)+'" data-position="'+pos+'" data-load="'+(data?'ready':ok?'pending':'unavailable')+'" style="margin:12px 0;padding:10px;border:1px solid rgba(244,114,182,.45);border-radius:10px;background:#140b18;min-width:0">'
+  return '<section class="nhl-vsopp-box" data-key="'+_nhlEsc(key)+'" data-pid="'+_nhlEsc(p.pid||'')+'" data-opp="'+_nhlEsc(opp)+'" data-date="'+_nhlEsc(dt)+'" data-position="'+pos+'" data-hr="'+hr+'" data-load="'+(data?'ready':ok?'pending':'unavailable')+'" style="margin:12px 0;padding:10px;border:1px solid rgba(244,114,182,.45);border-radius:10px;background:#140b18;min-width:0">'
     +_nhlVsOppContent(data,opp,ok?'Loading last 5 games vs '+opp+'…':'Last 5 vs opponent unavailable: player or game details missing.',pos)+'</section>';
 }
 function _nhlVsOppContent(data,opp,message,position){
-  var goalie=position==='G';
-  var title='LAST 5 GAMES VS '+(opp||'OPPONENT')+' · ALL VENUES';
-  var games=data&&Array.isArray(data.games)?data.games:[];
+  var all=_nhlVsOppTable(data,opp,message,position,data?data.games:null,'');
+  var hr=data&&(data.homeRoad==='H'||data.homeRoad==='R')?data.homeRoad:'';
+  if(!hr)return all;
+  return _nhlVsOppTable(data,opp,message,position,data.venueGames,hr)+'<div style="height:1px;background:rgba(244,114,182,.3);margin:12px 0"></div>'+all;
+}
+function _nhlVsOppTable(data,opp,message,position,list,hr){
+  var goalie=position==='G',venueWord=hr==='H'?'HOME':hr==='R'?'AWAY':'';
+  var title='LAST 5 GAMES VS '+(opp||'OPPONENT')+' · '+(venueWord?venueWord+' ONLY · SAME AS TONIGHT':'ALL VENUES');
+  var games=Array.isArray(list)?list:[];
   var head='<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;color:#f472b6;font-size:.69rem;font-weight:900;letter-spacing:.04em">'+_nhlEsc(title)+(data?'<span style="color:#94a3b8;font-weight:500">'+games.length+' available</span>':'')+'</div>';
   if(!data)return head+'<div style="font-size:.7rem;color:#94a3b8">'+_nhlEsc(message)+'</div>';
-  if(!games.length)return head+'<div style="font-size:.7rem;color:#94a3b8">No earlier games vs '+_nhlEsc(opp)+' in the saved NHL history.</div>';
+  if(!games.length)return head+'<div style="font-size:.7rem;color:#94a3b8">No earlier '+(venueWord?venueWord.toLowerCase()+' ':'')+'games vs '+_nhlEsc(opp)+' in the saved NHL history.</div>';
   var cols=goalie
     ?[['saves','SV','Saves'],['shotsAgainst','SA','Shots Against'],['goalsAgainst','GA','Goals Against'],['savePct','SV%','Save Percentage'],['decision','Result','Game Decision']]
     :[['goals','G','Goals'],['points','P','Points'],['assists','A','Assists'],['powerPlayPoints','PPP','Power Play Points'],['plusMinus','+/−','Plus/Minus'],['shots','SOG','Shots on Goal']];
@@ -10503,13 +10518,13 @@ function _nhlVsOppContent(data,opp,message,position){
     }).join('')+'</tr>';
   }).join('');
   return head+'<div style="overflow-x:auto"><table aria-label="'+_nhlEsc(title)+'" style="width:100%;min-width:300px;border-collapse:collapse;text-align:center;font-size:.67rem"><thead style="color:#94a3b8;border-bottom:1px solid #334155"><tr>'+headers+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
-    +'<div style="margin-top:6px;color:#64748b;font-size:.62rem">Most recent meetings vs '+_nhlEsc(opp)+' before '+_nhlEsc(data.asOf)+' · home and away · regular season + playoffs (PO) · display only</div>';
+    +'<div style="margin-top:6px;color:#64748b;font-size:.62rem">Most recent meetings vs '+_nhlEsc(opp)+' before '+_nhlEsc(data.asOf)+' · '+(venueWord?venueWord.toLowerCase()+' games only':'home and away')+' · regular season + playoffs (PO) · display only</div>';
 }
 function _nhlVsOppMount(ov){
   var box=ov&&ov.querySelector('.nhl-vsopp-box[data-load="pending"]');
   if(!box)return;
   var key=box.dataset.key,opp=box.dataset.opp,pos=box.dataset.position;
-  fetch('/api/nhl/player-vs-opponent-five?'+new URLSearchParams({pid:box.dataset.pid,date_str:box.dataset.date,opponent:opp,position:pos}).toString())
+  fetch('/api/nhl/player-vs-opponent-five?'+new URLSearchParams({pid:box.dataset.pid,date_str:box.dataset.date,opponent:opp,position:pos,home_road:box.dataset.hr||''}).toString())
     .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
     .then(function(data){
       if(!data||!Array.isArray(data.games))throw new Error('Invalid response');
@@ -10547,7 +10562,7 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
     +'<div id="nhl-player-season-context"></div>'
     +'<div id="nhl-player-opp-ranks"></div>'
     +_nhlLast5Box(Object.assign({},p,{last5VenueStats:last5,positionGroup:isGoalie?'G':p.positionGroup}))
-    +_nhlVsOppBox(p,isGoalie)
+    +_nhlVsOppBox(Object.assign({},p,{last5VenueStats:last5}),isGoalie)
     +_nhlHcHistory(p)
     +'<div class="lad-market-grid">'+cards+'</div></div>';
   var ov=document.createElement('div');
@@ -14836,14 +14851,15 @@ async def nhl_player_last_five(pid: int, date_str: str, home_road: str,
 
 @app.get("/api/nhl/player-vs-opponent-five")
 async def nhl_player_vs_opponent_five(pid: int, date_str: str, opponent: str,
-                                      position: str = "F"):
+                                      position: str = "F", home_road: str = ""):
     """Read-only card display: last five meetings vs today's opponent."""
     try:
         selected = date.fromisoformat(date_str)
     except ValueError:
         raise HTTPException(status_code=400, detail="Date must use YYYY-MM-DD")
     opponent = str(opponent or "").strip().upper()[:4]
-    if pid <= 0 or not opponent or position not in ("F", "D", "G"):
+    home_road = str(home_road or "").strip().upper()
+    if pid <= 0 or not opponent or position not in ("F", "D", "G") or home_road not in ("", "H", "R"):
         raise HTTPException(status_code=400, detail="Player and opponent are required")
     payloads = await _nhl_cached_log_payloads(
         pid, asyncio.Semaphore(1), get_season_for_date(selected))
@@ -14859,19 +14875,24 @@ async def nhl_player_vs_opponent_five(pid: int, date_str: str, opponent: str,
         for key, data in available for game in data["gameLog"]
         if isinstance(game, dict)
     ]
-    rows, seen = [], set()
+    rows, venue_rows, seen = [], [], set()
     for game in sorted((g for g in _nhl_pre_game_logs(logs, date_str)
                         if g.get("date") and str(g.get("opponent") or "").upper() == opponent),
                        key=lambda g: g["date"], reverse=True):
         if game["date"] in seen:
             continue
         seen.add(game["date"])
-        rows.append({"date": game["date"], "opponent": game["opponent"],
-                     "homeRoad": game["homeRoad"], "playoff": game["playoff"],
-                     **game["stats"]})
-        if len(rows) == 5:
+        row = {"date": game["date"], "opponent": game["opponent"],
+               "homeRoad": game["homeRoad"], "playoff": game["playoff"],
+               **game["stats"]}
+        if len(rows) < 5:
+            rows.append(row)
+        if home_road and game["homeRoad"] == home_road and len(venue_rows) < 5:
+            venue_rows.append(row)
+        if len(rows) == 5 and (not home_road or len(venue_rows) == 5):
             break
     result = {"opponent": opponent, "asOf": date_str, "games": rows,
+              "homeRoad": home_road, "venueGames": venue_rows if home_road else None,
               "position": "G" if position == "G" else "F"}
     return JSONResponse(result, headers={"Cache-Control": "private, max-age=600"})
 
