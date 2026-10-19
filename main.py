@@ -7055,6 +7055,8 @@ nav{position:fixed;top:0;width:100%;background:rgba(10,10,10,.95);backdrop-filte
 .nhl-menu-list.open{display:block}
 .nhl-menu-item{display:flex;align-items:center;gap:10px;width:100%;background:transparent;border:0;border-left:4px solid var(--c);border-radius:6px;color:#f1f5f9;font-size:.86rem;font-weight:800;text-align:left;padding:10px 12px;margin:2px 0;cursor:pointer}
 .nhl-menu-item:hover,.nhl-menu-item:focus{background:#1e293b;outline:none}
+.nhl-menu-head{color:#fbbf24;font-size:.66rem;font-weight:900;letter-spacing:.14em;text-transform:uppercase;padding:8px 12px 5px;margin-top:2px;border-bottom:1px solid #263244}
+.nhl-menu-head.tools{color:#7dd3fc;margin-top:8px;padding-top:10px;border-top:1px solid #263244}
 @media(max-width:900px){nav{padding:0 12px}.nhl-nav-actions{justify-content:flex-end;padding:8px 0}.nhl-nav-btn{padding:8px 11px;font-size:.7rem}.logo{flex:0 0 auto;margin-right:10px}}
 .page{position:relative;z-index:1;max-width:1300px;margin:0 auto;padding:104px 24px 40px}
 .app-hdr{text-align:center;margin-bottom:36px}
@@ -7288,6 +7290,17 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
 .lad-profile-team{font-size:.72rem;color:#9ca3af;margin-top:3px}
 .lad-market-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .lad-market{background:#111;border:1px solid #262626;border-radius:12px;padding:12px}
+.lad-market.lad-focus{border:2px solid #f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.15)}
+.lad-focus-tag{display:inline-block;background:#f59e0b;color:#111;font-size:.58rem;font-weight:900;letter-spacing:.06em;border-radius:6px;padding:3px 7px;margin-bottom:6px}
+.lad-market-stat.hl-vs{background:rgba(56,189,248,.12);box-shadow:inset 0 0 0 1px rgba(56,189,248,.45)}
+.lad-market-stat.hl-vs .k{color:#7dd3fc;font-weight:900}
+.lad-market-stat.hl-venue{background:rgba(245,158,11,.12);box-shadow:inset 0 0 0 1px rgba(245,158,11,.5)}
+.lad-market-stat.hl-venue .k{color:#fbbf24;font-weight:900}
+.lad-hl-note{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 10px;font-size:.66rem;color:#cbd5e1}
+.lad-hl-chip{font-size:.6rem;font-weight:900;letter-spacing:.06em;border-radius:999px;padding:3px 8px}
+.lad-hl-chip.vs{background:rgba(56,189,248,.15);color:#7dd3fc;border:1px solid rgba(56,189,248,.5)}
+.lad-hl-chip.venue{background:rgba(245,158,11,.15);color:#fbbf24;border:1px solid rgba(245,158,11,.55)}
+.lad-modal .nhl-last5-box{border:2px solid #f59e0b!important;background:rgba(245,158,11,.06)!important}
 .lad-market h4{color:#fbbf24;font-size:.78rem;font-weight:900;letter-spacing:.04em;margin:0 0 4px}
 .lad-market-meta{color:#6b7280;font-size:.66rem;margin-bottom:8px}
 .lad-market-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px}
@@ -7320,12 +7333,14 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
     <div class="nhl-menu">
       <button type="button" class="nhl-nav-btn menu" aria-haspopup="true" aria-expanded="false" id="nhlNavMenuBtn" onclick="_nhlNavToggle(event)">☰ Records &amp; Tools ▾</button>
       <div class="nhl-menu-list" id="nhlNavMenu" role="menu">
+        <div class="nhl-menu-head" role="presentation">&#128202; Records</div>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlGPRecord)">🔮 GP Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#047857" onclick="_nhlNavGo(openNhlTrackRecord)">📊 Track Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#b45309" onclick="_nhlNavGo(openNhlOverflowRecord)">⭐ NHL Overflow</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlDayReport)">📅 By Day / Category</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(openNhlTop30Record)">🏒 Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#1d4ed8" onclick="_nhlNavGo(toggleNhlHistoricalAnalysis)">📚 Historical Analysis</button>
+        <div class="nhl-menu-head tools" role="presentation">&#128736;&#65039; Tools</div>
         <button type="button" role="menuitem" class="nhl-menu-item admin-only" style="--c:#d97706" onclick="_nhlNavGo(openNhlParlay)">🎰 Auto Parlay Builder</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openFrankParlay)">🧠 Edge Coach Parlay Builder</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlMyBets)">💰 My Bets</button>
@@ -8805,10 +8820,13 @@ function _frankOpenPlayer(index){
         &&(!row.team||!p.team||String(p.team)===String(row.team));
     })||null;
   }
-  openNhlPlayerSummary(source||{
+  var base=String(row.marketKey||_frankMarketKey(row.market)||'').replace(/^(double_cold|hot|cold)_/,'');
+  var focus={label:({shots:'Shots on Goal',points:'Points (1+)',pp:'Power Play Points (1+)',pm:'Plus/Minus',assists:'Assists (1+)',goals:'Goals (1+)',saves:'Goalie Saves'})[base]||'',
+    market:row.market||'',side:row.side||'',line:row.line};
+  openNhlPlayerSummary(Object.assign({},source||{
     pid:row.pid,name:row.player,team:row.team,opponent:row.opponent,
     homeRoad:row.homeRoad||(row.source&&row.source.homeRoad)||''
-  });
+  },{_coachFocus:focus}));
 }
 function _frankRate(p,split){
   var row=(p.splits||{})[split]||{};
@@ -8876,45 +8894,6 @@ function _frankRender(question,rows,totalPriced,mode){
       +'<td>'+_frankOdds(p.odds)+(p.odds!=null?_nhlBookBadge(p):'')+'</td><td>'+_frankPct(p.probabilityUnavailable?null:p.appProb)+'</td><td>'+_frankPct(p.implied)+'</td>'
       +'<td class="frank-ai-edge" style="color:'+(mode==='board'||p.isAlternate?'#93c5fd':p.edge>=0?'#4ade80':'#f87171')+'!important">'+(mode==='board'||p.isAlternate?i+1:_frankSigned(p.edge)+' pts')+'</td></tr>';
   }).join('');
-  var detail=rows.map(function(p,i){
-    var sys=window.IS_ADMIN?'<span class="frank-ai-system-tag" style="color:#fb923c">'+_frankEsc(p.poolTag||((p.system||'A')+' T10'))+'</span>':'';
-    var head='https://assets.nhle.com/mugs/nhl/'+(window.__NHL_SEASON__||'20252026')+'/'+(p.team||'')+'/'+(p.source?p.source.pid:p.pid||'')+'.png';
-    var initialStr=_nhlSafe(_initials(p.player));
-    var sideColor = p.side === 'OVER' ? '#10b981' : '#f43f5e';
-    var sideBg = p.side === 'OVER' ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)';
-    return '<details class="frank-ai-play" open><summary style="background:linear-gradient(to right, '+sideBg+', transparent);">'
-      + '<div class="frank-ai-play-summary-inner" style="display:flex;align-items:center;gap:16px;flex:1;min-width:0;">'
-      + '<div class="frank-ai-player-face" style="border:2px solid '+sideColor+';">'
-      + '<span class="frank-ai-player-initials">'+initialStr+'</span>'
-      + '<img src="'+_nhlSafe(head)+'" onerror="this.style.display=\\'none\\'" />'
-      + '</div>'
-      + '<div class="frank-ai-play-name-col" style="flex:1;min-width:0;">'
-      + '<div style="font-size:1.4rem;font-weight:900;color:#fff;line-height:1.1;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:Georgia,serif;"><span style="color:#64748b;font-size:1rem;margin-right:6px;">'+(i+1)+'.</span><button type="button" class="frank-ai-player-link" onclick="event.stopPropagation();_frankOpenPlayer('+i+')" title="View full player stats">'+_frankEsc(p.player)+'</button> '+sys+'</div>'
-      + '<div style="color:#94a3b8;font-size:0.85rem;font-weight:700;">'+_frankEsc(p.team)+' vs '+_frankEsc(p.opponent)+_nhlInjuryBadge(p)+'</div>'
-      + '</div>'
-      + '<div class="frank-ai-play-side-col" style="text-align:right;flex:0 0 auto;">'
-      + '<div style="font-size:1.8rem;font-weight:900;color:'+sideColor+';line-height:1;margin-bottom:4px;white-space:nowrap;">'+p.side+' '+p.line+'</div>'
-      + '<div style="color:#e2e8f0;font-size:0.8rem;font-weight:800;text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap;">'+_frankEsc(p.market)+'</div>'
-      + '</div>'
-      + '</div>'
-      + '</summary><div class="frank-ai-play-body">'
-      + '<div class="frank-ai-metric-grid">'
-      + '<div class="frank-ai-metric">'
-      + '<div class="frank-ai-metric-val" style="color:#fbbf24">'+_frankOdds(p.odds)+'</div>'
-      + '<div class="frank-ai-metric-lbl">Odds'+(p.odds!=null?_nhlBookBadge(p):'')+'</div>'
-      + '</div>'
-      + '<div class="frank-ai-metric">'
-      + '<div class="frank-ai-metric-val" style="color:#e2e8f0">'+_frankPct(p.probabilityUnavailable?null:p.appProb)+'</div>'
-      + '<div class="frank-ai-metric-lbl">App Prob</div>'
-      + '</div>'
-      + '<div class="frank-ai-metric">'
-      + '<div class="frank-ai-metric-val" style="color:'+(mode==='board'||p.isAlternate?'#93c5fd':p.edge>=0?'#4ade80':'#f87171')+'">'+(mode==='board'||p.isAlternate?(i+1):_frankSigned(p.edge)+' pts')+'</div>'
-      + '<div class="frank-ai-metric-lbl">'+(mode==='board'?'App Board Rank':p.isAlternate?'Hit Rate Rank':'Coach Edge')+'</div>'
-      + '</div>'
-      + '</div>'
-      + '<div class="frank-ai-play-copy">'+(mode==='board'?'Original qualified app pick. No edge requirement. '+(p.odds==null?'Unpriced: no sportsbook payout or edge is claimed. ':'') :p.isAlternate?'Ranked by model hit probability. No edge requirement. App Probability '+p.appProb.toFixed(1)+'%; sportsbook-implied probability '+p.implied.toFixed(1)+'%. ':(mode==='safe'?'<b style="color:#fbbf24">Safety rank: '+p.implied.toFixed(1)+'% sportsbook-implied probability.</b> ':'')+'App Probability '+p.appProb.toFixed(1)+'% versus '+p.implied.toFixed(1)+'% implied = <b style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' Coach Edge points</b>. ')+_frankEsc(_frankEvidence(p))+'.</div>'
-      +_frankAccordions(p)+'</div></details>';
-  }).join('');
   window.__FRANK_LAST_ROWS__=rows.slice();
   var summary=window.__NHL_ALT_COACH_ACTIVE__
     ?'I checked '+totalPriced+' genuinely priced NHL alternate-line candidates. Every result recomputes the exact alternate line from pregame NHL game-log evidence and has at least 85% app probability and 70% sportsbook-implied probability. No positive-edge requirement. Each player keeps their highest-hit-probability line; better genuine price breaks ties.'
@@ -8926,7 +8905,8 @@ function _frankRender(question,rows,totalPriced,mode){
     if(window.__NHL_ALT_COACH_ACTIVE__&&window.__NHL_ALT_COACH_SOURCE_SUMMARY__)
       summary+='<br/><br/>'+_frankEsc(window.__NHL_ALT_COACH_SOURCE_SUMMARY__);
     _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div>'
-    +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>'+(mode==='board'?'App Board Rank':window.__NHL_ALT_COACH_ACTIVE__?'Hit Rate Rank':'Coach Edge')+'</th></tr></thead><tbody>'+table+'</tbody></table></div>'+detail+'</div>');
+    +'<div class="frank-ai-table-wrap"><table class="frank-ai-table"><thead><tr><th>#</th><th>Player</th><th>Play</th><th>Odds</th><th>App Prob</th><th>Implied</th><th>'+(mode==='board'?'App Board Rank':window.__NHL_ALT_COACH_ACTIVE__?'Hit Rate Rank':'Coach Edge')+'</th></tr></thead><tbody>'+table+'</tbody></table></div>'
+    +'<div style="color:#94a3b8;font-size:.68rem;margin-top:8px">Tap a player name to open their full player card.</div></div>');
 }
 async function generateFrankSelected(){
   var button=document.getElementById('frankGeneratePicks');
@@ -10160,7 +10140,7 @@ function _nhlLast5Box(p){
 }
 function _nhlLast5Content(data,venue,message,position){
   var goalie=position==='G'||(data&&data.position==='G');
-  var title='LAST 5 '+(venue==='H'?'HOME':venue==='R'?'AWAY':'HOME / AWAY')+' GAMES · THIS SEASON';
+  var title='LAST 5 '+(venue==='H'?'HOME GAMES ONLY':venue==='R'?'AWAY GAMES ONLY':'HOME / AWAY GAMES')+' · THIS SEASON';
   var games=data?_nhlCurrentSeasonGames(data.games,data.asOf):[];
   var head='<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;color:#7dd3fc;font-size:.69rem;font-weight:900;letter-spacing:.04em">'+title+(data?'<span style="color:#94a3b8;font-weight:500">'+games.length+' available</span>':'')+'</div>';
   if(!data)return head+'<div style="font-size:.7rem;color:#94a3b8">'+_nhlEsc(message)+'</div>';
@@ -10397,8 +10377,8 @@ function _nhlRecordsForPlayer(target){
   });
   return byMarket;
 }
-function _nhlMarketStat(label,value){
-  return '<div class="lad-market-stat"><div class="k">'+label+'</div><div class="v">'+value+'</div></div>';
+function _nhlMarketStat(label,value,hl){
+  return '<div class="lad-market-stat'+(hl?' '+hl:'')+'"><div class="k">'+label+'</div><div class="v">'+value+'</div></div>';
 }
 function _nhlGameDateLabel(raw){
   var s=String(raw||'').slice(0,10),m=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -10407,12 +10387,15 @@ function _nhlGameDateLabel(raw){
   var month=parseInt(m[2],10),day=parseInt(m[3],10);
   return months[month-1]+' '+day+', '+m[1];
 }
-function _nhlMarketCard(label,record,opponent){
+function _nhlMarketCard(label,record,opponent,focus){
+  var isFocus=!!(focus&&focus.label===label);
+  var banner=isFocus?'<div class="lad-focus-tag">COACH PICK · '+_nhlSafe(focus.market)+' · '+_nhlSafe(focus.side)+' '+_nhlSafe(focus.line)+'</div>':'';
+  var cls=isFocus?'lad-market lad-focus':'lad-market';
   if(!record){
-    return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">Game-log history unavailable for this category.</div></article>';
+    return '<article class="'+cls+'">'+banner+'<h4>'+label+'</h4><div class="lad-unavailable">Game-log history unavailable for this category.</div></article>';
   }
   if(record.historyUnavailable)
-    return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">Not stored in the board snapshot. Full goalie logs load on request; see the history status above.</div></article>';
+    return '<article class="'+cls+'">'+banner+'<h4>'+label+'</h4><div class="lad-unavailable">Not stored in the board snapshot. Full goalie logs load on request; see the history status above.</div></article>';
   var hasLine=record.dispLine!=null;
   var line=record.realLine!=null?'Book line '+record.realLine
     :(label==='Power Play Points (1+)'||label==='Plus/Minus')?'Model line 0.5 · unpriced'
@@ -10427,12 +10410,12 @@ function _nhlMarketCard(label,record,opponent){
   var under=(hasLine&&record.underTotal?record.underHits+'/'+record.underTotal+' ('+record.underRate+'%)':'—');
   var note=record.historyOnly?'<div style="color:#94a3b8;font-size:.65rem;margin-bottom:7px">History only · not a qualifying pick'
     +(record.positionGroup==='G'&&record.gameDayEligible===false?' · game-day goalie unconfirmed':'')+'</div>':'';
-  return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-market-meta">'+_nhlSafe(line)+' · '+(record.totA||0)+' vs '+_nhlSafe(opponent)+' game'+(record.totA===1?'':'s')+'</div>'
+  return '<article class="'+cls+'">'+banner+'<h4>'+label+'</h4><div class="lad-market-meta">'+_nhlSafe(line)+' · '+(record.totA||0)+' vs '+_nhlSafe(opponent)+' game'+(record.totA===1?'':'s')+'</div>'
     +note
     +'<div class="lad-market-stats">'
-    +_nhlMarketStat('Vs '+_nhlSafe(opponent),vs)
-    +_nhlMarketStat('Vs avg',record.totA?record.avgA:'—')
-    +_nhlMarketStat('L10 '+(record.homeRoad==='H'?'home':'away'),recent)
+    +_nhlMarketStat('Vs '+_nhlSafe(opponent),vs,'hl-vs')
+    +_nhlMarketStat('Vs avg',record.totA?record.avgA:'—','hl-vs')
+    +_nhlMarketStat('L10 '+(record.homeRoad==='H'?'home':'away')+' only',recent,'hl-venue')
     +_nhlMarketStat('L10 avg',record.totB?record.avg:'—')
     +'</div><div class="lad-market-games">'+games+'</div>'
     +'<div style="color:#6b7280;font-size:.62rem;margin-top:7px">Recent values'+(hasLine?' · green = over line · under L10 '+under:' · no sportsbook line to grade against')+'</div></article>';
@@ -10448,14 +10431,19 @@ function openNhlPlayerSummary(p, freshRecords, errorText){
   var cards=categories.map(function(label){
     if((label==='Goalie Saves')!==isGoalie)
       return '<article class="lad-market"><h4>'+label+'</h4><div class="lad-unavailable">Not applicable to this position.</div></article>';
-    return _nhlMarketCard(label,records[label],opponent);
+    return _nhlMarketCard(label,records[label],opponent,p._coachFocus);
   }).join('');
+  var venueWord=p.homeRoad==='H'?'HOME':p.homeRoad==='R'?'AWAY':'';
+  var hlNote='<div class="lad-hl-note"><span class="lad-hl-chip vs">VS '+_nhlSafe(p.opponent||'OPPONENT')+'</span>'
+    +(venueWord?'<span class="lad-hl-chip venue">'+venueWord+' GAMES ONLY</span>':'')
+    +'<span>Highlighted stats are vs today&#39;s opponent'+(venueWord?' and from '+venueWord.toLowerCase()+' games only (today&#39;s venue)':'')+'.</span></div>';
   var head='https://assets.nhle.com/mugs/nhl/'+(window.__NHL_SEASON__||'20252026')+'/'+(p.team||'')+'/'+(p.pid||'')+'.png';
   var html='<div class="lad-modal" onclick="event.stopPropagation()">'
     +'<button class="lad-close" onclick="closeNhlLadder()">✕</button>'
     +'<div class="lad-profile"><div class="hs-wrap"><span class="hs-ini">'+_nhlSafe(_initials(p.name))+'</span><img class="hs-img" src="'+_nhlSafe(head)+'" onerror="this.style.display=\\'none\\'"/></div><div><h3>'+_nhlSafe(p.name)+'</h3><div class="lad-profile-team">'+_nhlSafe(p.team||'')+' vs '+_nhlSafe(opponent)+' · '+(p.homeRoad==='H'?'HOME':'AWAY')+'</div></div></div>'
     +'<div style="font-size:.68rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin-bottom:8px">'+(isGoalie?'Goalie saves history':'Category history')+' vs '+_nhlSafe(opponent)+'</div>'
     +'<div style="color:#94a3b8;font-size:.65rem;margin-bottom:8px">'+(freshRecords?'Full pregame game-log history':errorText?_nhlSafe(errorText):'Loading full game-log history…')+'</div>'
+    +hlNote
     +'<div id="nhl-player-season-context"></div>'
     +'<div id="nhl-player-opp-ranks"></div>'
     +_nhlLast5Box(Object.assign({},p,{last5VenueStats:last5,positionGroup:isGoalie?'G':p.positionGroup}))
