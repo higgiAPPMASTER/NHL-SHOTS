@@ -7179,6 +7179,11 @@ footer{text-align:center;padding:32px 24px;color:#4b5563;font-size:.78rem;border
 body.is-admin .admin-only{display:inline-block !important}
 #parlayCard{display:none}
 body.is-admin #parlayCard{display:block}
+body.is-admin .nhl-menu-item.admin-only{display:flex !important}
+.nhl-parlay-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:150;overflow:auto;padding:16px;box-sizing:border-box}
+.nhl-parlay-ov.open{display:flex}
+.nhl-parlay-ov #parlayCard{position:relative;margin:auto !important;width:100%}
+.nhl-parlay-x{position:absolute;top:10px;right:10px;background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:8px;width:30px;height:30px;font-weight:900;cursor:pointer}
 /* ===== NBA-style trading cards ===== */
 .picks-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:10px}
 .nhl-toolbar{display:flex;justify-content:flex-end;margin:0 0 14px}
@@ -7321,6 +7326,7 @@ body.is-admin #parlayCard{display:block}
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlDayReport)">📅 By Day / Category</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(openNhlTop30Record)">🏒 Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#1d4ed8" onclick="_nhlNavGo(toggleNhlHistoricalAnalysis)">📚 Historical Analysis</button>
+        <button type="button" role="menuitem" class="nhl-menu-item admin-only" style="--c:#d97706" onclick="_nhlNavGo(openNhlParlay)">🎰 Auto Parlay Builder</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openFrankParlay)">🧠 Edge Coach Parlay Builder</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlMyBets)">💰 My Bets</button>
       </div>
@@ -7346,6 +7352,18 @@ document.addEventListener('click',function(e){
   if(m&&m.classList.contains('open')&&!e.target.closest('.nhl-menu'))_nhlNavGo(null);
 });
 document.addEventListener('keydown',function(e){if(e.key==='Escape')_nhlNavGo(null);});
+function openNhlParlay(){
+  var o=document.getElementById('nhlParlayOv');if(!o)return;
+  if(o.parentNode!==document.body)document.body.appendChild(o);
+  // Refresh games/categories so a board loaded after page start is listed.
+  try{if(typeof _renderNhlParlayGames==='function')_renderNhlParlayGames();}catch(e){}
+  try{if(typeof _renderNhlParlayCoachCats==='function')_renderNhlParlayCoachCats();}catch(e){}
+  o.classList.add('open');
+}
+function closeNhlParlay(){
+  var o=document.getElementById('nhlParlayOv');if(o)o.classList.remove('open');
+  var m=document.getElementById('nhl-parlay-cats-menu');if(m)m.style.display='none';
+}
 function openFrankParlay(){
   var o=document.getElementById('frankParlayOv');if(!o)return;
   // Lift out of the Coach card so its stacking/overflow rules never clip the popup.
@@ -7360,7 +7378,9 @@ function closeFrankParlay(){
 document.addEventListener('keydown',function(e){
   if(e.key!=='Escape')return;
   var o=document.getElementById('frankParlayOv');
-  if(o&&o.classList.contains('open')&&!document.querySelector('.lad-ov'))closeFrankParlay();
+  if(document.querySelector('.lad-ov'))return;
+  if(o&&o.classList.contains('open'))closeFrankParlay();
+  var a=document.getElementById('nhlParlayOv');if(a&&a.classList.contains('open'))closeNhlParlay();
 });
 </script>
 </nav>
@@ -7753,7 +7773,9 @@ function _nhlTogglePastDates(force){
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
 
+  <div class="nhl-parlay-ov" id="nhlParlayOv" onclick="if(event.target===this)closeNhlParlay()">
   <div class="card" id="parlayCard" style="text-align:center;max-width:600px;margin:20px auto 0">
+    <button type="button" class="nhl-parlay-x" aria-label="Close" onclick="closeNhlParlay()">&#10005;</button>
     <h2 style="font-family:'Playfair Display',serif;font-size:1.3rem;font-weight:700;color:#fff;margin-bottom:6px">🎰 Auto Parlay Builder <span style="font-size:.7rem;color:#777;font-family:sans-serif">admin only</span></h2>
     <p style="font-size:.74rem;color:#888;margin-bottom:14px">Best available legs from today&#39;s selected categories — priced odds combined</p>
     <div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">
@@ -7832,6 +7854,7 @@ function _nhlTogglePastDates(force){
       <button class="btn-run" onclick="generateParlay()" style="background:#7c3aed;box-shadow:0 4px 14px rgba(124,58,237,.28)">🎲 Generate New</button>
     </div>
     <div id="parlayResult" style="margin-top:16px;text-align:left"></div>
+  </div>
   </div>
 
   <div class="status-msg" id="statusMsg"></div>
