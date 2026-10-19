@@ -9048,8 +9048,20 @@ function _frankRenderGameTeam(question,rows,totalPriced,mode){
     :'highest positive Coach Edge per game and per team, one play per player.');
   _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div><div class="fgt-wrap">'+cards+'</div></div>');
 }
+function _frankPresetSyncFilters(question){
+  // A tile's own market and side always win over leftover dropdown/side
+  // selections, so a previous click can never filter the next tile to nothing.
+  var q=String(question||'').toLowerCase();
+  var tileSide=/(^| )unders?( |$)/.test(q)?'UNDER':/(^| )overs?( |$)/.test(q)?'OVER':'';
+  var tileMarket=/shots|points|assists|goals|saves/.test(q)||q.indexOf('plus/minus')>=0;
+  var category=document.getElementById('frankAiCategory');
+  if(category&&(tileMarket||window.__NHL_FRANK_AUTO_CAT__))category.value='';
+  window.__NHL_FRANK_AUTO_CAT__=false;
+  if(tileSide||tileMarket)_frankSetSide(tileSide);
+}
 function askFrankPreset(question){
   window.__NHL_ALT_COACH_ACTIVE__=false;
+  _frankPresetSyncFilters(question);
   var isEdgePreset=/highest positive edge plays|safest bets|top 3 positive edge|positive edge (over|under) plays|best positive edge play for each game/i.test(question);
   window.__NHL_FRANK_BOARD_REQUEST__=!isEdgePreset;
   if(!isEdgePreset)question=question.replace(/positive edge /gi,'app-produced ');
@@ -9060,6 +9072,7 @@ async function askFrankPlusMinusPreset(side){
   window.__NHL_FRANK_BOARD_REQUEST__=true;
   var category=document.getElementById('frankAiCategory');
   if(category)category.value='pm';
+  window.__NHL_FRANK_AUTO_CAT__=true;
   _frankSetSide(side);
   var question='Show the top 10 plus/minus '+side.toLowerCase()+' props';
   var input=document.getElementById('frankAiInput');if(input)input.value=question;
