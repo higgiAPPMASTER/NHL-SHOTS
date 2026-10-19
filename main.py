@@ -7352,6 +7352,46 @@ document.addEventListener('click',function(e){
   if(m&&m.classList.contains('open')&&!e.target.closest('.nhl-menu'))_nhlNavGo(null);
 });
 document.addEventListener('keydown',function(e){if(e.key==='Escape')_nhlNavGo(null);});
+function _frankTab(btn){
+  var key=btn&&btn.getAttribute('data-tab');if(!key)return;
+  document.querySelectorAll('#frankAiCard .frank-tab').forEach(function(t){var on=t===btn;t.classList.toggle('on',on);t.setAttribute('aria-selected',on?'true':'false');});
+  document.querySelectorAll('#frankAiCard .frank-pane').forEach(function(p){p.hidden=p.getAttribute('data-pane')!==key;});
+}
+function _frankEsc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function _frankShowing(what){
+  var el=document.getElementById('frankShowing');if(!el)return;
+  var sideBtn=document.querySelector('#frankAiCard .frank-ai-side-btn.active');
+  var g=document.getElementById('frankAiGame');
+  var side=sideBtn?sideBtn.textContent.trim():'All';
+  var game=g&&g.value&&g.selectedIndex>=0?g.options[g.selectedIndex].text:'All games';
+  el.innerHTML='Showing: <b>'+_frankEsc(what)+'</b> · Side: '+_frankEsc(side)+' · '+_frankEsc(game);
+  el.hidden=false;
+}
+document.addEventListener('click',function(e){
+  var card=document.getElementById('frankAiCard');if(!card||!card.contains(e.target))return;
+  var pre=e.target.closest('.frank-ai-preset');
+  if(pre){
+    card.querySelectorAll('.frank-ai-preset.is-on').forEach(function(b){b.classList.remove('is-on');});
+    pre.classList.add('is-on');
+    _frankShowing(pre.getAttribute('data-label')||pre.textContent);return;
+  }
+  if(e.target.closest('#frankGeneratePicks')){
+    card.querySelectorAll('.frank-ai-preset.is-on').forEach(function(b){b.classList.remove('is-on');});
+    var c=document.getElementById('frankAiCategory');
+    _frankShowing(c&&c.selectedIndex>=0?c.options[c.selectedIndex].text:'All categories');return;
+  }
+  if(e.target.closest('#frankAiSend')){
+    card.querySelectorAll('.frank-ai-preset.is-on').forEach(function(b){b.classList.remove('is-on');});
+    var q=document.getElementById('frankAiInput');
+    _frankShowing('Your question'+(q&&q.value.trim()?': '+q.value.trim():''));
+  }
+},true);
+document.addEventListener('keydown',function(e){
+  if(e.key!=='Enter'||!e.target||e.target.id!=='frankAiInput')return;
+  var card=document.getElementById('frankAiCard');
+  if(card)card.querySelectorAll('.frank-ai-preset.is-on').forEach(function(b){b.classList.remove('is-on');});
+  var v=e.target.value.trim();_frankShowing('Your question'+(v?': '+v:''));
+},true);
 function openNhlParlay(){
   var o=document.getElementById('nhlParlayOv');if(!o)return;
   if(o.parentNode!==document.body)document.body.appendChild(o);
@@ -7454,6 +7494,44 @@ document.addEventListener('keydown',function(e){
 .frank-ai-system.active{color:#fff;border-color:#fb923c;background:rgba(234,88,12,.18);box-shadow:inset 0 0 0 1px rgba(251,146,60,.22)}
 .frank-ai-system-tag{display:inline-block;margin-left:7px;border:1px solid currentColor;border-radius:999px;padding:2px 6px;font-size:.55rem;font-weight:950;vertical-align:1px}
 body.is-admin .frank-ai-systems{display:flex!important}
+.frank-head-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex:0 0 auto}
+.frank-src{position:relative}
+.frank-src>summary{list-style:none;cursor:pointer;background:#171717;border:1px solid #3f3f46;border-radius:8px;padding:6px 10px;font-size:.66rem;font-weight:800;color:#9ca3af;white-space:nowrap}
+.frank-src>summary::-webkit-details-marker{display:none}
+.frank-src>summary b{color:#fdba74}
+.frank-src-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:40;background:#0f0f10;border:1px solid #3f3f46;border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:6px;min-width:220px;box-shadow:0 14px 30px rgba(0,0,0,.6)}
+.frank-src-k{color:#94a3b8;font-size:.6rem;font-weight:900;text-transform:uppercase;letter-spacing:.09em}
+.frank-src-menu .frank-ai-system{text-align:left}
+.frank-filter{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:16px 0 14px;padding:12px;background:rgba(255,255,255,.025);border:1px solid #27272a;border-radius:12px;position:relative}
+.frank-f{display:flex;flex-direction:column;gap:5px;margin:0;max-width:100%}
+.frank-f>span{color:#a1a1aa;font-size:.6rem;font-weight:900;text-transform:uppercase;letter-spacing:.1em}
+.frank-filter #frankGeneratePicks{margin-left:auto;padding:10px 18px!important}
+.frank-tabs{display:flex;gap:4px;border-bottom:1px solid #27272a;overflow-x:auto;scrollbar-width:none;position:relative}
+.frank-tabs::-webkit-scrollbar{display:none}
+.frank-tab{flex:0 0 auto;background:transparent;border:0;border-bottom:2px solid transparent;color:#9ca3af;font-size:.74rem;font-weight:900;padding:9px 12px;cursor:pointer;white-space:nowrap}
+.frank-tab i{font-style:normal;font-size:.6rem;color:#71717a;background:#18181b;border-radius:999px;padding:1px 6px;margin-left:4px}
+.frank-tab:hover{color:#e5e7eb}
+.frank-tab.on{color:#fdba74;border-bottom-color:#f97316}
+.frank-tab.on i{color:#fdba74;background:rgba(249,115,22,.15)}
+.frank-panes{position:relative;padding:12px 0 14px}
+.frank-pane[hidden]{display:none}
+.frank-panes .frank-ai-presets{margin:0}
+.frank-ai-preset.frank-alt{border-color:#a16207;color:#fde68a}
+.frank-ai-preset.is-on{background:rgba(249,115,22,.16);border-color:#f97316;color:#fff}
+.frank-mk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:8px}
+.frank-mk{background:#121212;border:1px solid #27272a;border-radius:10px;padding:8px 10px}
+.frank-mk-t{color:#e5e7eb;font-size:.72rem;font-weight:900;margin-bottom:6px}
+.frank-mk-b{display:flex;gap:6px}
+.frank-mk-b .frank-ai-preset{flex:1;text-align:center;padding:6px 8px}
+.frank-ai-preset.frank-ov:not(.is-on){color:#86efac;border-color:rgba(74,222,128,.3)}
+.frank-ai-preset.frank-un:not(.is-on){color:#fca5a5;border-color:rgba(248,113,113,.3)}
+.frank-how{margin-top:8px;position:relative}
+.frank-how>summary{list-style:none;cursor:pointer;color:#71717a;font-size:.66rem;font-weight:800;display:inline-block}
+.frank-how>summary::-webkit-details-marker{display:none}
+.frank-how>summary:hover{color:#d4d4d8}
+.frank-showing{margin-top:14px;padding:8px 12px;border-radius:9px;background:rgba(249,115,22,.08);border:1px solid rgba(249,115,22,.25);color:#fed7aa;font-size:.72rem;font-weight:800;position:relative}
+.frank-showing b{color:#fff}
+@media(max-width:620px){.frank-head-right{flex-direction:row;align-items:center;margin-top:9px}.frank-filter #frankGeneratePicks{margin-left:0;width:100%}.frank-f,.frank-f select{width:100%}}
 .frank-ai-row{display:flex;gap:8px;align-items:stretch;position:relative}
 .frank-ai-input{flex:1;min-width:0;background:#0b0b0b;color:#fff;border:1px solid #3f3f46;border-radius:11px;padding:12px 14px;font:inherit;font-size:.84rem;outline:none}
 .frank-ai-input:focus{border-color:#f97316;box-shadow:0 0 0 3px rgba(249,115,22,.1)}
@@ -7597,13 +7675,26 @@ function _nhlTogglePastDates(force){
       <div>
         <div class="frank-ai-kicker">Grounded NHL analysis</div>
         <div class="frank-ai-title">The Edge Coach · NHL Props Analyst</div>
-        <div class="frank-ai-sub">Five edge presets find positive Coach Edge. Market and Hot/Cold categories show the app's original qualified picks without an edge filter.</div>
+        <div class="frank-ai-sub">Pick a category, side and game, or tap a preset below.</div>
       </div>
-      <div class="frank-ai-badge">NO INVENTED PLAYS</div>
+      <div class="frank-head-right">
+        <div class="frank-ai-badge">NO INVENTED PLAYS</div>
+        <details class="frank-src admin-only" id="frankAiSystems">
+          <summary>Source: <b id="frankSrcLabel">A · NEW</b> &#9662;</summary>
+          <div class="frank-src-menu" onclick="if(event.target.closest(&#39;.frank-ai-system&#39;))this.parentNode.open=false">
+            <div class="frank-src-k">Coach source</div>
+        <button id="frankSysA" class="frank-ai-system active" onclick="_frankSetSystem('A')">A · NEW</button>
+        <button id="frankSysB" class="frank-ai-system" onclick="_frankSetSystem('B')">B · OLD</button>
+        <button id="frankSysC" class="frank-ai-system" onclick="_frankSetSystem('C')">C · SELECTIVE</button>
+        <button id="frankSysD" class="frank-ai-system" onclick="_frankSetSystem('D')">D · TOP PLAYERS</button>
+        <span id="frankAiSystemStatus" style="color:#fbbf24;font-size:.64rem;font-weight:800">System A loaded board</span>
+          </div>
+        </details>
+      </div>
     </div>
-    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:#fbbf24;font-size:.71rem;font-weight:900;margin:12px 0">
-      <label for="frankAiCategory">EDGE COACH CATEGORY</label>
-      <select id="frankAiCategory" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;cursor:pointer">
+    <div class="frank-filter">
+      <label class="frank-f"><span>Category</span>
+        <select id="frankAiCategory" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;cursor:pointer">
         <option value="">All categories</option>
         <option value="shots">Shots on Goal</option>
         <option value="points">Points</option>
@@ -7634,76 +7725,43 @@ function _nhlTogglePastDates(force){
         <option value="double_cold_pm">Double Cold Plus/Minus</option>
         <option value="double_cold_saves">Double Cold Saves</option>
       </select>
+      </label>
+      <div class="frank-f"><span>Side</span>
       <div role="group" aria-label="Edge Coach side" style="display:inline-flex;gap:5px;flex-wrap:wrap">
         <button type="button" id="frankSideAll" class="frank-ai-side-btn active" aria-pressed="true" onclick="_frankSetSide('')">All</button>
         <button type="button" id="frankSideOver" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('OVER')">Over</button>
         <button type="button" id="frankSideUnder" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('UNDER')">Under</button>
       </div>
-      <label style="display:inline-flex;align-items:center;gap:9px;flex-wrap:wrap;max-width:100%;color:#fbbf24;font-size:.71rem;font-weight:900;margin:0">
-        EDGE COACH GAME
+      </div>
+      <label class="frank-f"><span>Game</span>
         <select id="frankAiGame" onchange="_frankCategoryChanged()" style="background:#18181b;color:#fff;border:1px solid #f59e0b;border-radius:8px;padding:9px 12px;font-size:.78rem;min-width:190px;max-width:100%;cursor:pointer">
           <option value="">All games · load a board to choose</option>
         </select>
       </label>
       <button type="button" id="frankGeneratePicks" onclick="generateFrankSelected()" title="Generate standard-line picks from the selected saved board; no typed question needed" style="background:#f97316;color:#fff;border:1px solid #fb923c;border-radius:8px;padding:9px 14px;font-size:.78rem;font-weight:900;cursor:pointer">Generate Picks</button>
-      <span style="color:#9ca3af;font-size:.68rem;font-weight:600">Choose category, side and game, then Generate Picks. Also applies to presets, Analyze, and Best Alt-Line Hit Rate.</span>
     </div>
-    <div class="frank-ai-presets">
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays at any eligible odds')">Coach Edge · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show me the top 10 safest bets')">Safest Bets · Top 10</button>
-      <button class="frank-ai-preset" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" style="border-color:#f59e0b;color:#fde68a">Best Alt-Line Hit Rate · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')">Top 3 Plays</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge over plays')">Best Overs · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge under plays')">Best Unders · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge shots over props')">Shots Overs · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge shots under props')">Shots Unders · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge points over props')">Points Overs · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge points under props')">Points Unders · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge power play points over props')">PP Points Overs · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge power play points under props')">PP Points Unders · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPlusMinusPreset('OVER')" title="Model-only while genuine Plus/Minus odds are unavailable">Plus/Minus Overs · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPlusMinusPreset('UNDER')" title="Model-only while genuine Plus/Minus odds are unavailable">Plus/Minus Unders · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge assists over props')">Assists Overs · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge assists under props')">Assists Unders · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goals over props')">Goals Overs · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goals under props')">Goals Unders · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goalie saves over props')">Saves Overs · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 5 positive edge goalie saves under props')">Saves Unders · Top 5</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot shots over props')">Hot Shots · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot points over props')">Hot Points · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot goals over props')">Hot Goals · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot assists over props')">Hot Assists · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot pp points over props')">Hot PP Points · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot plus/minus over props')">Hot Plus/Minus · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot saves over props')">Hot Saves · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold shots under props')">Cold Shots · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold points under props')">Cold Points · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold goals under props')">Cold Goals · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold assists under props')">Cold Assists · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold pp points under props')">Cold PP Points · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold plus/minus under props')">Cold Plus/Minus · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold saves under props')">Cold Saves · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold shots under props')">Double Cold Shots · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold points under props')">Double Cold Points · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold goals under props')">Double Cold Goals · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold assists under props')">Double Cold Assists · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold pp points under props')">Double Cold PP Points · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold plus/minus under props')">Double Cold Plus/Minus · Top 10</button>
-      <button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold saves under props')">Double Cold Saves · Top 10</button>
+    <div class="frank-tabs" role="tablist" aria-label="Edge Coach presets">
+      <button type="button" class="frank-tab on" data-tab="edge" role="tab" aria-selected="true" onclick="_frankTab(this)">&#11088; Edge Picks <i>6</i></button>
+      <button type="button" class="frank-tab" data-tab="markets" role="tab" aria-selected="false" onclick="_frankTab(this)">&#128202; Markets <i>14</i></button>
+      <button type="button" class="frank-tab" data-tab="hot" role="tab" aria-selected="false" onclick="_frankTab(this)">&#128293; Hot <i>7</i></button>
+      <button type="button" class="frank-tab" data-tab="cold" role="tab" aria-selected="false" onclick="_frankTab(this)">&#10052;&#65039; Cold <i>7</i></button>
+      <button type="button" class="frank-tab" data-tab="dcold" role="tab" aria-selected="false" onclick="_frankTab(this)">&#129482; Double Cold <i>7</i></button>
     </div>
-    <div class="frank-ai-systems admin-only" id="frankAiSystems">
-      <span style="color:#94a3b8;font-size:.65rem;font-weight:900;text-transform:uppercase;letter-spacing:.09em">Coach source</span>
-      <button id="frankSysA" class="frank-ai-system active" onclick="_frankSetSystem('A')">A · NEW</button>
-      <button id="frankSysB" class="frank-ai-system" onclick="_frankSetSystem('B')">B · OLD</button>
-      <button id="frankSysC" class="frank-ai-system" onclick="_frankSetSystem('C')">C · SELECTIVE</button>
-      <button id="frankSysD" class="frank-ai-system" onclick="_frankSetSystem('D')">D · TOP PLAYERS</button>
-      <span id="frankAiSystemStatus" style="color:#fbbf24;font-size:.64rem;font-weight:800">System A loaded board</span>
+    <div class="frank-panes">
+      <div class="frank-pane" data-pane="edge" role="tabpanel"><div class="frank-ai-presets"><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays at any eligible odds')" data-label="Coach Edge · Top 10">Coach Edge · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show me the top 10 safest bets')" data-label="Safest Bets · Top 10">Safest Bets · Top 10</button><button class="frank-ai-preset frank-alt" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" data-label="Best Alt-Line Hit Rate · Top 10">Best Alt-Line Hit Rate · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')" data-label="Top 3 Plays">Top 3 Plays</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge over plays')" data-label="Best Overs · Top 10">Best Overs · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge under plays')" data-label="Best Unders · Top 10">Best Unders · Top 10</button></div></div>
+      <div class="frank-pane" data-pane="markets" role="tabpanel" hidden><div class="frank-mk-grid"><div class="frank-mk"><div class="frank-mk-t">Shots on Goal</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge shots over props')" data-label="Shots Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge shots under props')" data-label="Shots Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Points</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge points over props')" data-label="Points Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge points under props')" data-label="Points Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Power Play Points</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge power play points over props')" data-label="PP Points Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge power play points under props')" data-label="PP Points Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Plus/Minus</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPlusMinusPreset('OVER')" title="Model-only while genuine Plus/Minus odds are unavailable" data-label="Plus/Minus Overs · Top 10">Over · Top 10</button><button class="frank-ai-preset frank-un" onclick="askFrankPlusMinusPreset('UNDER')" title="Model-only while genuine Plus/Minus odds are unavailable" data-label="Plus/Minus Unders · Top 10">Under · Top 10</button></div></div><div class="frank-mk"><div class="frank-mk-t">Assists</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge assists over props')" data-label="Assists Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge assists under props')" data-label="Assists Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Goals</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge goals over props')" data-label="Goals Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge goals under props')" data-label="Goals Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Goalie Saves</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge goalie saves over props')" data-label="Saves Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge goalie saves under props')" data-label="Saves Unders · Top 5">Under · Top 5</button></div></div></div></div>
+      <div class="frank-pane" data-pane="hot" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot shots over props')" data-label="Hot Shots · Top 10">Shots · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot points over props')" data-label="Hot Points · Top 10">Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot goals over props')" data-label="Hot Goals · Top 10">Goals · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot assists over props')" data-label="Hot Assists · Top 10">Assists · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot pp points over props')" data-label="Hot PP Points · Top 10">PP Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot plus/minus over props')" data-label="Hot Plus/Minus · Top 10">Plus/Minus · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot saves over props')" data-label="Hot Saves · Top 10">Saves · Top 10</button></div></div>
+      <div class="frank-pane" data-pane="cold" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold shots under props')" data-label="Cold Shots · Top 10">Shots · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold points under props')" data-label="Cold Points · Top 10">Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold goals under props')" data-label="Cold Goals · Top 10">Goals · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold assists under props')" data-label="Cold Assists · Top 10">Assists · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold pp points under props')" data-label="Cold PP Points · Top 10">PP Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold plus/minus under props')" data-label="Cold Plus/Minus · Top 10">Plus/Minus · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold saves under props')" data-label="Cold Saves · Top 10">Saves · Top 10</button></div></div>
+      <div class="frank-pane" data-pane="dcold" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold shots under props')" data-label="Double Cold Shots · Top 10">Shots · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold points under props')" data-label="Double Cold Points · Top 10">Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold goals under props')" data-label="Double Cold Goals · Top 10">Goals · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold assists under props')" data-label="Double Cold Assists · Top 10">Assists · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold pp points under props')" data-label="Double Cold PP Points · Top 10">PP Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold plus/minus under props')" data-label="Double Cold Plus/Minus · Top 10">Plus/Minus · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold saves under props')" data-label="Double Cold Saves · Top 10">Saves · Top 10</button></div></div>
     </div>
     <div class="frank-ai-row">
       <input id="frankAiInput" class="frank-ai-input" type="text" placeholder="Example: Top 10 positive edge shots props in TOR vs MTL at any eligible odds" onkeydown="if(event.key==='Enter')askFrank()"/>
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
-    <div class="frank-ai-note">Only Coach Edge, Safest Bets, Top 3, Best Overs and Best Unders require positive edge and genuine prices. All other standard categories show the loaded app picks in their original order, including negative-edge and unpriced model picks. Existing category limits and sides stay unchanged.</div>
+    <details class="frank-how"><summary>&#9432; How it works</summary>
+      <div class="frank-ai-note">Choose category, side and game, then Generate Picks. Also applies to presets, Analyze, and Best Alt-Line Hit Rate. Only Coach Edge, Safest Bets, Top 3, Best Overs and Best Unders require positive edge and genuine prices. All other standard categories show the loaded app picks in their original order, including negative-edge and unpriced model picks. Existing category limits and sides stay unchanged.</div>
+    </details>
+    <div id="frankShowing" class="frank-showing" hidden></div>
     <div id="frankParlayOv" class="frank-parlay-ov" onclick="if(event.target===this)closeFrankParlay()">
     <details id="frankParlayPanel" class="frank-parlay-panel" open style="margin-top:14px;padding:14px;border:1px solid rgba(167,139,250,.35);border-radius:12px;background:#11121b">
       <summary onclick="event.preventDefault();closeFrankParlay()" style="display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;cursor:pointer;font-size:.93rem;font-weight:900;color:#ddd6fe;margin-bottom:5px">
@@ -8315,6 +8373,8 @@ function _frankPaintSystemButtons(){
     b.classList.toggle('active',window.NHL_FRANK_SYSTEM===system);
     b.style.opacity=_frankRawForSystem(system)?'1':'.48';
   });
+  var srcLbl=document.getElementById('frankSrcLabel');
+  if(srcLbl)srcLbl.textContent=({A:'A · NEW',B:'B · OLD',C:'C · SELECTIVE',D:'D · TOP PLAYERS'})[window.NHL_FRANK_SYSTEM]||'A · NEW';
   var status=document.getElementById('frankAiSystemStatus');
   var state=_frankBoardState[_frankBoardEpoch+'|'+_frankBoardDate()+'|'+window.NHL_FRANK_SYSTEM]||{};
   if(status)status.textContent=_frankRawForSystem(window.NHL_FRANK_SYSTEM)
@@ -8335,6 +8395,7 @@ async function _frankSetSystem(system){
   _frankLoadGames((raw&&raw.games)||[]);
   var answer=document.getElementById('frankAiAnswer');
   if(answer){answer.innerHTML='';answer.style.display='none';}
+  var shw=document.getElementById('frankShowing');if(shw)shw.hidden=true;
   if(raw)return;
   try{
     raw=await _frankEnsureSystemBoard(requested);
