@@ -7357,14 +7357,14 @@ function _frankTab(btn){
   document.querySelectorAll('#frankAiCard .frank-tab').forEach(function(t){var on=t===btn;t.classList.toggle('on',on);t.setAttribute('aria-selected',on?'true':'false');});
   document.querySelectorAll('#frankAiCard .frank-pane').forEach(function(p){p.hidden=p.getAttribute('data-pane')!==key;});
 }
-function _frankEsc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function _frankShowEsc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function _frankShowing(what){
   var el=document.getElementById('frankShowing');if(!el)return;
   var sideBtn=document.querySelector('#frankAiCard .frank-ai-side-btn.active');
   var g=document.getElementById('frankAiGame');
   var side=sideBtn?sideBtn.textContent.trim():'All';
   var game=g&&g.value&&g.selectedIndex>=0?g.options[g.selectedIndex].text:'All games';
-  el.innerHTML='Showing: <b>'+_frankEsc(what)+'</b> · Side: '+_frankEsc(side)+' · '+_frankEsc(game);
+  el.innerHTML='Showing: <b>'+_frankShowEsc(what)+'</b> · Side: '+_frankShowEsc(side)+' · '+_frankShowEsc(game);
   el.hidden=false;
 }
 document.addEventListener('click',function(e){
@@ -7532,6 +7532,22 @@ body.is-admin .frank-ai-systems{display:flex!important}
 .frank-showing{margin-top:14px;padding:8px 12px;border-radius:9px;background:rgba(249,115,22,.08);border:1px solid rgba(249,115,22,.25);color:#fed7aa;font-size:.72rem;font-weight:800;position:relative}
 .frank-showing b{color:#fff}
 @media(max-width:620px){.frank-head-right{flex-direction:row;align-items:center;margin-top:9px}.frank-filter #frankGeneratePicks{margin-left:0;width:100%}.frank-f,.frank-f select{width:100%}}
+.fgt-wrap{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px;margin-top:10px}
+.fgt-card{background:#121212;border:1px solid #27272a;border-radius:12px;padding:10px 12px}
+.fgt-head{color:#fdba74;font-weight:900;font-size:.8rem;letter-spacing:.04em;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid #27272a}
+.fgt-row{display:grid;grid-template-columns:86px 1fr auto auto;gap:8px;align-items:center;padding:6px 0;font-size:.72rem;color:#d4d4d8;border-bottom:1px dashed #1f1f23}
+.fgt-row:last-child{border-bottom:0}
+.fgt-tag{font-size:.58rem;font-weight:900;text-transform:uppercase;letter-spacing:.07em;border-radius:6px;padding:3px 6px;text-align:center}
+.fgt-g{background:rgba(249,115,22,.16);color:#fdba74}
+.fgt-t{background:#18181b;color:#a1a1aa}
+.fgt-play{min-width:0}
+.fgt-mk{color:#94a3b8}
+.fgt-same{font-size:.55rem;color:#fdba74;border:1px solid rgba(249,115,22,.4);border-radius:999px;padding:1px 5px}
+.fgt-odds{white-space:nowrap;color:#e5e7eb;font-weight:800}
+.fgt-val{white-space:nowrap;font-weight:900}
+.fgt-none{grid-column:2/5;color:#64748b;font-style:italic}
+.frank-ai-preset.frank-game{border-color:#9a3412;color:#fed7aa}
+@media(max-width:620px){.fgt-wrap{grid-template-columns:1fr}.fgt-row{grid-template-columns:74px 1fr auto}.fgt-val{grid-column:2/4;text-align:right}}
 .frank-ai-row{display:flex;gap:8px;align-items:stretch;position:relative}
 .frank-ai-input{flex:1;min-width:0;background:#0b0b0b;color:#fff;border:1px solid #3f3f46;border-radius:11px;padding:12px 14px;font:inherit;font-size:.84rem;outline:none}
 .frank-ai-input:focus{border-color:#f97316;box-shadow:0 0 0 3px rgba(249,115,22,.1)}
@@ -7741,14 +7757,14 @@ function _nhlTogglePastDates(force){
       <button type="button" id="frankGeneratePicks" onclick="generateFrankSelected()" title="Generate standard-line picks from the selected saved board; no typed question needed" style="background:#f97316;color:#fff;border:1px solid #fb923c;border-radius:8px;padding:9px 14px;font-size:.78rem;font-weight:900;cursor:pointer">Generate Picks</button>
     </div>
     <div class="frank-tabs" role="tablist" aria-label="Edge Coach presets">
-      <button type="button" class="frank-tab on" data-tab="edge" role="tab" aria-selected="true" onclick="_frankTab(this)">&#11088; Edge Picks <i>6</i></button>
+      <button type="button" class="frank-tab on" data-tab="edge" role="tab" aria-selected="true" onclick="_frankTab(this)">&#11088; Edge Picks <i>7</i></button>
       <button type="button" class="frank-tab" data-tab="markets" role="tab" aria-selected="false" onclick="_frankTab(this)">&#128202; Markets <i>14</i></button>
       <button type="button" class="frank-tab" data-tab="hot" role="tab" aria-selected="false" onclick="_frankTab(this)">&#128293; Hot <i>7</i></button>
       <button type="button" class="frank-tab" data-tab="cold" role="tab" aria-selected="false" onclick="_frankTab(this)">&#10052;&#65039; Cold <i>7</i></button>
       <button type="button" class="frank-tab" data-tab="dcold" role="tab" aria-selected="false" onclick="_frankTab(this)">&#129482; Double Cold <i>7</i></button>
     </div>
     <div class="frank-panes">
-      <div class="frank-pane" data-pane="edge" role="tabpanel"><div class="frank-ai-presets"><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays at any eligible odds')" data-label="Coach Edge · Top 10">Coach Edge · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show me the top 10 safest bets')" data-label="Safest Bets · Top 10">Safest Bets · Top 10</button><button class="frank-ai-preset frank-alt" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" data-label="Best Alt-Line Hit Rate · Top 10">Best Alt-Line Hit Rate · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')" data-label="Top 3 Plays">Top 3 Plays</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge over plays')" data-label="Best Overs · Top 10">Best Overs · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge under plays')" data-label="Best Unders · Top 10">Best Unders · Top 10</button></div></div>
+      <div class="frank-pane" data-pane="edge" role="tabpanel"><div class="frank-ai-presets"><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays at any eligible odds')" data-label="Coach Edge · Top 10">Coach Edge · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show me the top 10 safest bets')" data-label="Safest Bets · Top 10">Safest Bets · Top 10</button><button class="frank-ai-preset frank-alt" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" data-label="Best Alt-Line Hit Rate · Top 10">Best Alt-Line Hit Rate · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')" data-label="Top 3 Plays">Top 3 Plays</button><button class="frank-ai-preset frank-game" onclick="askFrankPreset(&#39;Show the best positive edge play for each game and each team&#39;)" data-label="Best Play Each Game &amp; Team">Best Play Each Game &amp; Team</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge over plays')" data-label="Best Overs · Top 10">Best Overs · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge under plays')" data-label="Best Unders · Top 10">Best Unders · Top 10</button></div></div>
       <div class="frank-pane" data-pane="markets" role="tabpanel" hidden><div class="frank-mk-grid"><div class="frank-mk"><div class="frank-mk-t">Shots on Goal</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge shots over props')" data-label="Shots Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge shots under props')" data-label="Shots Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Points</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge points over props')" data-label="Points Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge points under props')" data-label="Points Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Power Play Points</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge power play points over props')" data-label="PP Points Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge power play points under props')" data-label="PP Points Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Plus/Minus</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPlusMinusPreset('OVER')" title="Model-only while genuine Plus/Minus odds are unavailable" data-label="Plus/Minus Overs · Top 10">Over · Top 10</button><button class="frank-ai-preset frank-un" onclick="askFrankPlusMinusPreset('UNDER')" title="Model-only while genuine Plus/Minus odds are unavailable" data-label="Plus/Minus Unders · Top 10">Under · Top 10</button></div></div><div class="frank-mk"><div class="frank-mk-t">Assists</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge assists over props')" data-label="Assists Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge assists under props')" data-label="Assists Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Goals</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge goals over props')" data-label="Goals Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge goals under props')" data-label="Goals Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Goalie Saves</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge goalie saves over props')" data-label="Saves Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge goalie saves under props')" data-label="Saves Unders · Top 5">Under · Top 5</button></div></div></div></div>
       <div class="frank-pane" data-pane="hot" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot shots over props')" data-label="Hot Shots · Top 10">Shots · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot points over props')" data-label="Hot Points · Top 10">Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot goals over props')" data-label="Hot Goals · Top 10">Goals · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot assists over props')" data-label="Hot Assists · Top 10">Assists · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot pp points over props')" data-label="Hot PP Points · Top 10">PP Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot plus/minus over props')" data-label="Hot Plus/Minus · Top 10">Plus/Minus · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge hot saves over props')" data-label="Hot Saves · Top 10">Saves · Top 10</button></div></div>
       <div class="frank-pane" data-pane="cold" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold shots under props')" data-label="Cold Shots · Top 10">Shots · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold points under props')" data-label="Cold Points · Top 10">Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold goals under props')" data-label="Cold Goals · Top 10">Goals · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold assists under props')" data-label="Cold Assists · Top 10">Assists · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold pp points under props')" data-label="Cold PP Points · Top 10">PP Points · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold plus/minus under props')" data-label="Cold Plus/Minus · Top 10">Plus/Minus · Top 10</button><button class="frank-ai-preset" onclick="askFrankPreset('Show the top 10 positive edge cold saves under props')" data-label="Cold Saves · Top 10">Saves · Top 10</button></div></div>
@@ -8726,6 +8742,12 @@ function _frankParse(question,props){
   var f={limit:5,side:'',market:'',teams:[],players:[],minOdds:null,maxOdds:null,minEdge:0,mode:'edge'};
   if(q.indexOf('safest')>=0||q.indexOf('safe bet')>=0||q.indexOf('most likely')>=0||q.indexOf('highest probability')>=0)f.mode='safe';
   var top=q.match(/top +([0-9]{1,2})/);if(top)f.limit=Math.max(1,Math.min(10,Number(top[1])));
+  // "best play for each game" / "every game" / "per game" / "by game": one play per matchup
+  // (or "top N per game"); ranking and qualification rules are unchanged.
+  if(/(each|every) +(nhl +)?(game|matchup)/.test(q)||/(play|plays|pick|picks|bet|bets|prop|props) +(per|by) +(game|matchup)/.test(q)||q.indexOf('all games')>=0&&q.indexOf('best')>=0){
+    f.perGame=top?f.limit:1;
+  }
+  if(/(each|every) +(nhl +)?team/.test(q)||/(play|plays|pick|picks|bet|bets|prop|props) +(per|by|for) +(each +)?team/.test(q))f.perTeam=true;
   if(padded.indexOf(' under ')>=0)f.side='UNDER';
   if(padded.indexOf(' over ')>=0)f.side='OVER';
   var form=_NHL_FORM_TYPES.slice().reverse().find(function(item){return q.indexOf(item.label.toLowerCase())>=0;});
@@ -8938,9 +8960,66 @@ async function generateFrankSelected(){
     if(button){button.disabled=false;button.textContent='Generate Picks';button.removeAttribute('aria-busy');}
   }
 }
+// Best play per game plus best play per team, grouped by matchup. Rows arrive
+// already filtered, ranked and one-per-player, so qualification is unchanged.
+function _frankRenderGameTeam(question,rows,totalPriced,mode){
+  var q='<div class="frank-ai-question">'+_frankEsc(question)+'</div>';
+  if(!rows.length){
+    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">'+(mode==='board'?'No app-produced picks match the selected category, side and game.':'No loaded NHL prop has a genuine price and positive Coach Edge for the selected filters.')+'</div></div></div>');
+    window.__FRANK_LAST_ROWS__=[];
+    return;
+  }
+  var games={},order=[];
+  rows.forEach(function(p){
+    var key=_nhlParlayGameKey(p.team,p.opponent);
+    if(!games[key]){games[key]={key:key,best:null,teams:{}};order.push(key);}
+    var g=games[key],tm=String(p.team||'').toUpperCase(),op=String(p.opponent||'').toUpperCase();
+    if(!g.best)g.best=p;
+    if(!(tm in g.teams))g.teams[tm]=null;
+    if(!(op in g.teams))g.teams[op]=null;
+    if(!g.teams[tm])g.teams[tm]=p;
+  });
+  var labels={},sel=document.getElementById('frankAiGame'),rank={};
+  if(sel)Array.from(sel.options).forEach(function(o,i){if(o.value){labels[o.value]=o.text;rank[o.value]=i;}});
+  order.sort(function(a,b){
+    var ra=a in rank?rank[a]:999,rb=b in rank?rank[b]:999;
+    return ra-rb;
+  });
+  var flat=[];
+  function idx(p){var i=flat.indexOf(p);if(i<0){flat.push(p);i=flat.length-1;}return i;}
+  function val(p){
+    if(mode==='board')return '<span style="color:#93c5fd">App '+_frankPct(p.probabilityUnavailable?null:p.appProb)+'</span>';
+    return '<span style="color:'+(p.edge>=0?'#4ade80':'#f87171')+'">'+_frankSigned(p.edge)+' pts</span>';
+  }
+  function line(tag,cls,p,same){
+    if(!p)return '<div class="fgt-row"><span class="fgt-tag '+cls+'">'+_frankEsc(tag)+'</span><span class="fgt-none">No qualifying play</span></div>';
+    var i=idx(p);
+    return '<div class="fgt-row"><span class="fgt-tag '+cls+'">'+_frankEsc(tag)+'</span>'
+      +'<span class="fgt-play"><button type="button" class="frank-ai-player-link" onclick="_frankOpenPlayer('+i+')">'+_frankEsc(p.player)+'</button>'
+      +' <span class="fgt-mk">'+_frankEsc(p.market)+'</span> <b style="color:'+(p.side==='OVER'?'#4ade80':'#f87171')+'">'+p.side+' '+p.line+'</b>'
+      +(same?' <span class="fgt-same">game best</span>':'')+'</span>'
+      +'<span class="fgt-odds">'+_frankOdds(p.odds)+(p.odds!=null?_nhlBookBadge(p):'')+'</span>'
+      +'<span class="fgt-val">'+val(p)+'</span></div>';
+  }
+  var cards=order.map(function(key){
+    var g=games[key],teams=Object.keys(g.teams);
+    var lab=labels[key]||(teams.join(' vs '));
+    var away=lab.indexOf(' @ ')>0?lab.split(' @ ')[0]:'';
+    teams.sort(function(a,b){return (a===away?0:1)-(b===away?0:1);});
+    return '<div class="fgt-card"><div class="fgt-head">'+_frankEsc(lab)+'</div>'
+      +line('Game best','fgt-g',g.best,false)
+      +teams.map(function(t){return line(t+' best','fgt-t',g.teams[t],g.teams[t]&&g.teams[t]===g.best);}).join('')
+      +'</div>';
+  }).join('');
+  window.__FRANK_LAST_ROWS__=flat.slice();
+  var summary=order.length+' game'+(order.length===1?'':'s')+' · '+(mode==='board'
+    ?'best app-produced pick per game and per team, in the app board order.'
+    :'highest positive Coach Edge per game and per team, one play per player.');
+  _frankCommit('<div>'+q+'<div class="frank-ai-summary">'+summary+'</div><div class="fgt-wrap">'+cards+'</div></div>');
+}
 function askFrankPreset(question){
   window.__NHL_ALT_COACH_ACTIVE__=false;
-  var isEdgePreset=/highest positive edge plays|safest bets|top 3 positive edge|positive edge (over|under) plays/i.test(question);
+  var isEdgePreset=/highest positive edge plays|safest bets|top 3 positive edge|positive edge (over|under) plays|best positive edge play for each game/i.test(question);
   window.__NHL_FRANK_BOARD_REQUEST__=!isEdgePreset;
   if(!isEdgePreset)question=question.replace(/positive edge /gi,'app-produced ');
   var input=document.getElementById('frankAiInput');if(input)input.value=question;askFrank();
@@ -9109,7 +9188,7 @@ async function askFrank(){
   var selectedSide=window.NHL_FRANK_SIDE||'';
   var boardOverride=window.__NHL_FRANK_BOARD_REQUEST__;
   delete window.__NHL_FRANK_BOARD_REQUEST__;
-  var coreRequest=/highest positive edge plays|safest bets|safe bets|top 3 positive edge|positive edge (over|under) plays/i.test(question);
+  var coreRequest=/highest positive edge plays|safest bets|safe bets|top 3 positive edge|positive edge (over|under) plays|best positive edge play for each game/i.test(question);
   var boardMode=!window.__NHL_ALT_COACH_ACTIVE__&&(boardOverride!=null?boardOverride:!coreRequest&&!!(category||_frankParse(question,[]).market));
   var props=window.__NHL_ALT_COACH_ACTIVE__
     ?(window.__NHL_ALT_COACH_ROWS__||[]):_frankAllProps(boardMode);
@@ -9168,6 +9247,20 @@ async function askFrank(){
     seenPlayers[player]=true;
     return true;
   });
+  if(f.perTeam&&!window.__NHL_ALT_COACH_ACTIVE__){
+    _frankRenderGameTeam(question,rows,candidates.length,f.mode);
+    return;
+  }
+  if(f.perGame&&!window.__NHL_ALT_COACH_ACTIVE__){
+    var perGameCount={};
+    rows=rows.filter(function(p){
+      var gk=_nhlParlayGameKey(p.team,p.opponent);
+      perGameCount[gk]=(perGameCount[gk]||0)+1;
+      return perGameCount[gk]<=f.perGame;
+    });
+    _frankRender(question,rows,candidates.length,f.mode);
+    return;
+  }
   _frankRender(question,rows.slice(0,window.__NHL_ALT_COACH_ACTIVE__?10:f.limit),candidates.length,f.mode);
 }
 
