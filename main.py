@@ -7477,6 +7477,7 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
       <div class="nhl-menu-list" id="nhlNavMenu" role="menu">
         <div class="nhl-menu-head" role="presentation">&#128202; Records</div>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlGPRecord)">🔮 GP Record</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlSimRecord)">🎲 Sim Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#047857" onclick="_nhlNavGo(openNhlTrackRecord)">📊 Track Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#b45309" onclick="_nhlNavGo(openNhlOverflowRecord)">⭐ NHL Overflow</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlDayReport)">📅 By Day / Category</button>
@@ -7486,6 +7487,7 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
         <div class="nhl-menu-head tools" role="presentation">&#128736;&#65039; Tools</div>
         <button type="button" role="menuitem" class="nhl-menu-item admin-only" style="--c:#d97706" onclick="_nhlNavGo(openNhlParlay)">🎰 Auto Parlay Builder</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openFrankParlay)">🧠 Edge Coach Parlay Builder</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlGameSim)">🎲 10K Game Simulator</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlMyBets)">💰 My Bets</button>
       </div>
     </div>
@@ -11428,6 +11430,7 @@ function _nhlPaint(q){
   // ── Game Predictor ────────────────────────────────────────────────────────
   var _gpPreds = d.game_predictions || [];
   h += '<div class="sec">\\uD83D\\uDD2E Game Predictor \u2014 Win Probability & Projected Totals</div>';
+  h += '<div style="margin:-4px 0 10px"><button type="button" onclick="if(window.openNhlGameSim)openNhlGameSim()" style="background:#0e7490;border:none;color:#fff;border-radius:8px;padding:7px 12px;font-size:.76rem;font-weight:800;cursor:pointer">&#127922; Run 10K Game Simulator</button></div>';
   if(d.savedGamePredictorNote)
     h += '<div class="gp-history-note">'+_nhlEsc(d.savedGamePredictorNote)+'</div>';
   if(_gpPreds.length){
@@ -15145,6 +15148,926 @@ async def nhl_gp_meetings(date_str: str, home: str, away: str):
         raise HTTPException(status_code=400, detail="Invalid matchup")
     return await _nhl_gp_recent_meetings(date_str, home, away)
 
+# ─── NHL 10K Game Simulator (separate from the Game Predictor) ───────────────
+# On demand only. Free NHL data (club schedules, schedule context, goalie
+# stats, posted starting goalies) plus ONE bulk Odds API call per slate for
+# moneyline, puck line and total (cached 10 minutes). Its own engine plays
+# every game 10,000 times: Poisson goals around opponent-adjusted home/road
+# ratings, late empty-net goals, 3-on-3 overtime and shootouts. Its pregame
+# picks are saved and graded in their own record namespace.
+import random as _gsim_random
+import hashlib as _gsim_hashlib
+
+_NHL_GSIM_APP = "nhl_game_sim"
+_NHL_GSIM_SNAP_CAT = "__sim_snapshot__"
+_NHL_GSIM_GRADED_CAT = "__sim_graded__"
+_NHL_GSIM_N = 10000
+_NHL_GSIM_PRIOR_HOME = 3.15     # league goals per game, home team (final score)
+_NHL_GSIM_PRIOR_ROAD = 2.95
+_NHL_GSIM_STRIP = 0.93          # share of final-score goals that are not OT/SO deciders or empty-netters
+_NHL_GSIM_PACE_SHAPE = 60.0     # shared game-pace variation
+_NHL_GSIM_TEAM_SHAPE = 40.0     # team-night variation
+_NHL_GSIM_SV_PRIOR_SA = 750.0   # shrink goalie save % toward league average
+_NHL_GSIM_LOCK = _bt_th.Lock()
+_NHL_GSIM_ODDS_CACHE: Dict[str, tuple] = {}
+_NHL_GSIM_BUCKETS = ((65, "65%+"), (60, "60-65%"), (55, "55-60%"), (0, "50-55%"))
+
+
+def _nhl_gsim_bucket(prob):
+    p = float(prob or 0)
+    return next(lbl for lo, lbl in _NHL_GSIM_BUCKETS if p >= lo)
+
+
+def _nhl_gsim_clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def _nhl_gsim_price_ok(v):
+    try:
+        p = float(v)
+        return p != 0 and -1000 <= p and math.isfinite(p)
+    except (TypeError, ValueError):
+        return False
+
+
+def _nhl_gsim_implied(odds):
+    o = float(odds)
+    return 100.0 / (o + 100.0) if o > 0 else -o / (-o + 100.0)
+
+
+def _nhl_gsim_team_form(schedule: dict, team: str, ds: str) -> dict:
+    """Current-season regular-season rows strictly before the target date."""
+    rows = []
+    for g in (schedule or {}).get("games", []):
+        if not isinstance(g, dict) or g.get("gameType") != 2:
+            continue
+        if g.get("gameState") not in ("OFF", "FINAL") or str(g.get("gameDate") or "") >= ds:
+            continue
+        h, a = g.get("homeTeam") or {}, g.get("awayTeam") or {}
+        hg, ag = h.get("score"), a.get("score")
+        if not isinstance(hg, int) or not isinstance(ag, int):
+            continue
+        if h.get("abbrev") == team:
+            rows.append({"date": g["gameDate"], "home": True, "gf": hg, "ga": ag})
+        elif a.get("abbrev") == team:
+            rows.append({"date": g["gameDate"], "home": False, "gf": ag, "ga": hg})
+    rows.sort(key=lambda r: r["date"])
+
+    def avg(rs):
+        return {"games": len(rs),
+                "gf": round(sum(r["gf"] for r in rs) / len(rs), 3) if rs else None,
+                "ga": round(sum(r["ga"] for r in rs) / len(rs), 3) if rs else None}
+    l10 = rows[-10:]
+    return {"home": avg([r for r in rows if r["home"]]), "away": avg([r for r in rows if not r["home"]]),
+            "all": avg(rows), "l10": {**avg(l10), "w": sum(r["gf"] > r["ga"] for r in l10),
+                                      "l": sum(r["gf"] < r["ga"] for r in l10)}}
+
+
+def _nhl_gsim_blend(cur: dict, prev: dict, k: float = 12.0):
+    """Blend this season's venue split into last season's as games accrue."""
+    n = (cur or {}).get("games") or 0
+    pn = (prev or {}).get("games") or 0
+    if n and pn and prev.get("gf") is not None:
+        w = n / (n + k)
+        return (w * cur["gf"] + (1 - w) * prev["gf"], w * cur["ga"] + (1 - w) * prev["ga"], w)
+    if n >= 3:
+        return cur["gf"], cur["ga"], 1.0
+    if pn and prev.get("gf") is not None:
+        return prev["gf"], prev["ga"], 0.0
+    return None
+
+
+async def _nhl_gsim_goalie_stats(season: str) -> dict:
+    """Goalie save totals keyed by name, plus team aggregates (free NHL stats)."""
+    import urllib.parse as _up
+    key = f"goalies_{season}"
+    cached = _cache_get("nhl_gsim_goalies", key)
+    if cached is not None:
+        return cached
+    sort_p = _up.quote('[{"property":"gamesPlayed","direction":"DESC"}]')
+    url = (f"{NHL_STATS}/goalie/summary?isAggregate=false&isGame=false&sort={sort_p}"
+           f"&start=0&limit=200&factCayenneExp=gamesPlayed>=1"
+           f"&cayenneExp=gameTypeId=2 and seasonId<={season} and seasonId>={season}")
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
+        data = await _fetch(url, c)
+    out = {"goalies": {}, "teams": {}}
+    for g in (data or {}).get("data", []) or []:
+        name = _nhl_starter_name_key(g.get("goalieFullName") or "")
+        try:
+            sa, sv = float(g.get("shotsAgainst") or 0), float(g.get("saves") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not name or sa <= 0:
+            continue
+        teams = [t.strip() for t in str(g.get("teamAbbrevs") or "").split(",") if t.strip()]
+        out["goalies"][name] = {"sa": sa, "sv": sv, "teams": teams, "gp": int(g.get("gamesPlayed") or 0)}
+        if len(teams) == 1:
+            t = out["teams"].setdefault(teams[0], {"sa": 0.0, "sv": 0.0})
+            t["sa"] += sa; t["sv"] += sv
+    if out["goalies"]:
+        _cache_set("nhl_gsim_goalies", key, out)
+    return out
+
+
+async def _nhl_gsim_odds(ds: str, games: list) -> dict:
+    """One bulk call: best US/Canada price per side for ML, puck line and total."""
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if not api_key or not games:
+        return {}
+    hit = _NHL_GSIM_ODDS_CACHE.get(ds)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(f"{ODDS_API}/sports/icehockey_nhl/odds",
+                        params={"apiKey": api_key, "regions": "us,us2,ca",
+                                "markets": "h2h,spreads,totals", "oddsFormat": "american",
+                                "dateFormat": "iso"})
+    if r.status_code != 200:
+        raise RuntimeError(f"Odds API HTTP {r.status_code}")
+    lines = {}
+    for ev in r.json() or []:
+        if not _nhl_gp_event_matches_game(ev, games):
+            continue
+        h_abbr = _nhl_match_team_name(ev.get("home_team", ""))
+        a_abbr = _nhl_match_team_name(ev.get("away_team", ""))
+        ml, spreads, totals = {}, {}, {}
+        for bk in ev.get("bookmakers", []) or []:
+            title = bk.get("title") or bk.get("key", "")
+            for mkt in bk.get("markets", []) or []:
+                mk = mkt.get("key")
+                for oc in mkt.get("outcomes", []) or []:
+                    pr = oc.get("price")
+                    if not _nhl_gsim_price_ok(pr):
+                        continue
+                    pr = float(pr)
+                    if mk == "h2h":
+                        side = "home" if _nhl_match_team_name(oc.get("name", "")) == h_abbr else (
+                            "away" if _nhl_match_team_name(oc.get("name", "")) == a_abbr else None)
+                        if side and (side not in ml or pr > ml[side][0]):
+                            ml[side] = (pr, title)
+                    elif mk == "spreads" and oc.get("point") is not None:
+                        team = _nhl_match_team_name(oc.get("name", ""))
+                        if team != h_abbr:
+                            continue
+                        pt = float(oc["point"])
+                        other = next((x for x in mkt.get("outcomes", [])
+                                      if _nhl_match_team_name(x.get("name", "")) == a_abbr
+                                      and x.get("point") is not None and float(x["point"]) == -pt
+                                      and _nhl_gsim_price_ok(x.get("price"))), None)
+                        if other is None:
+                            continue
+                        row = spreads.setdefault(pt, {"n": 0})
+                        row["n"] += 1
+                        if "home" not in row or pr > row["home"][0]:
+                            row["home"] = (pr, title)
+                        op = float(other["price"])
+                        if "away" not in row or op > row["away"][0]:
+                            row["away"] = (op, title)
+                    elif mk == "totals" and oc.get("point") is not None:
+                        nm = str(oc.get("name", "")).upper()
+                        if nm not in ("OVER", "UNDER"):
+                            continue
+                        pt = float(oc["point"])
+                        row = totals.setdefault(pt, {"n": 0, "books": set()})
+                        if title not in row["books"]:
+                            row["books"].add(title); row["n"] += 1
+                        k = "over" if nm == "OVER" else "under"
+                        if k not in row or pr > row[k][0]:
+                            row[k] = (pr, title)
+        entry = {}
+        if "home" in ml:
+            entry.update(home_ml=ml["home"][0], home_ml_book=ml["home"][1])
+        if "away" in ml:
+            entry.update(away_ml=ml["away"][0], away_ml_book=ml["away"][1])
+        sp = [(pt, row) for pt, row in spreads.items() if abs(pt) == 1.5]
+        if sp:
+            pt, row = max(sp, key=lambda x: x[1]["n"])
+            entry.update(home_spread=pt, home_spread_odds=row["home"][0], home_spread_book=row["home"][1],
+                         away_spread_odds=row["away"][0], away_spread_book=row["away"][1])
+        tt = [(pt, row) for pt, row in totals.items() if "over" in row and "under" in row]
+        if tt:
+            pt, row = max(tt, key=lambda x: x[1]["n"])
+            entry.update(total=pt, over_odds=row["over"][0], over_book=row["over"][1],
+                         under_odds=row["under"][0], under_book=row["under"][1])
+        if entry and h_abbr and a_abbr:
+            lines[(a_abbr, h_abbr)] = entry
+    _NHL_GSIM_ODDS_CACHE.clear()
+    _NHL_GSIM_ODDS_CACHE[ds] = (time.time(), lines)
+    return lines
+
+
+def _nhl_gsim_goalie_factor(starter: dict, team: str, gstats: dict, gprev: dict, lg_sv: float):
+    """Starter save % vs the team's goalie average → multiplier on goals allowed."""
+    if not starter or not starter.get("name"):
+        return 1.0, "Starter not posted yet · neutral"
+    key = _nhl_starter_name_key(starter["name"])
+    cur = (gstats.get("goalies") or {}).get(key) or {}
+    prev = (gprev.get("goalies") or {}).get(key) or {}
+    sa = cur.get("sa", 0) + 0.5 * prev.get("sa", 0)
+    sv = cur.get("sv", 0) + 0.5 * prev.get("sv", 0)
+    s_pct = (sv + _NHL_GSIM_SV_PRIOR_SA * lg_sv) / (sa + _NHL_GSIM_SV_PRIOR_SA)
+    t = (gstats.get("teams") or {}).get(team) or {}
+    tp = (gprev.get("teams") or {}).get(team) or {}
+    tsa = t.get("sa", 0) + 0.5 * tp.get("sa", 0)
+    tsv = t.get("sv", 0) + 0.5 * tp.get("sv", 0)
+    t_pct = (tsv + _NHL_GSIM_SV_PRIOR_SA * lg_sv) / (tsa + _NHL_GSIM_SV_PRIOR_SA)
+    f = _nhl_gsim_clamp((1 - s_pct) / (1 - t_pct), 0.85, 1.15) if t_pct < 1 else 1.0
+    raw = (cur.get("sv", 0) / cur["sa"]) if cur.get("sa") else None
+    note = (f"{starter['name']} ({str(starter.get('status') or '').title() or 'Posted'})"
+            + (f" · {raw:.3f} SV% this season" if raw else " · no NHL games this season")
+            + f" vs team {t_pct:.3f} (shrunk)")
+    return f, note
+
+
+async def _nhl_gsim_inputs(ds: str) -> dict:
+    selected = date.fromisoformat(ds)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as c:
+        data = await _fetch(f"{NHL_API}/schedule/{ds}", c)
+    if not data:
+        raise RuntimeError(f"NHL schedule could not be read for {ds}")
+    games = []
+    for day in data.get("gameWeek", []):
+        if day.get("date") != ds:
+            continue
+        for g in day.get("games", []):
+            if g.get("gameType") not in (1, 2, 3):
+                continue
+            h, a = g.get("homeTeam") or {}, g.get("awayTeam") or {}
+            games.append({
+                "gameId": g.get("id"), "homeTeam": h.get("abbrev", ""), "awayTeam": a.get("abbrev", ""),
+                "homeFull": (h.get("commonName") or {}).get("default", ""),
+                "awayFull": (a.get("commonName") or {}).get("default", ""),
+                "homeLogo": h.get("logo", ""), "awayLogo": a.get("logo", ""),
+                "startTime": g.get("startTimeUTC", ""), "gameState": g.get("gameState", ""),
+                "gameType": int(g.get("gameType")), "homeScore": h.get("score"), "awayScore": a.get("score"),
+                "venue": (g.get("venue") or {}).get("default", ""),
+                "season": get_season_for_date(selected, g),
+            })
+    if not games:
+        return {"date": ds, "games": []}
+    season = games[0]["season"]
+    prior = f"{int(season[:4]) - 1}{int(season[:4])}"
+    teams = sorted({t for g in games for t in (g["homeTeam"], g["awayTeam"]) if t})
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as c:
+        cur_s = await asyncio.gather(*[_nhl_gp_club_schedule(t, season, c) for t in teams],
+                                     return_exceptions=True)
+        prev_s = await asyncio.gather(*[_nhl_gp_club_schedule(t, prior, c) for t in teams],
+                                      return_exceptions=True)
+    form, prev_venue, missing = {}, {}, 0
+    for t, cs, ps in zip(teams, cur_s, prev_s):
+        if isinstance(cs, Exception):
+            missing += 1
+            cs = {}
+        form[t] = _nhl_gsim_team_form(cs, t, ds)
+        if isinstance(ps, Exception):
+            missing += 1
+            prev_venue[t] = {}
+        else:
+            prev_venue[t] = _nhl_gp_venue_rates(ps, t)
+    sched = await _nhl_schedule_context(ds, games)
+    is_live_date = ds >= _nhl_record_today()
+    if is_live_date:
+        try:
+            await _attach_pregame_starting_goalies(games, ds)
+        except Exception as exc:
+            print(f"[nhl_gamesim] starting goalies unavailable: {exc}")
+    gstats, gprev = await asyncio.gather(_nhl_gsim_goalie_stats(season), _nhl_gsim_goalie_stats(prior),
+                                         return_exceptions=True)
+    gstats = gstats if isinstance(gstats, dict) else {}
+    gprev = gprev if isinstance(gprev, dict) else {}
+    lines, odds_note = {}, ""
+    if is_live_date:
+        try:
+            lines = await _nhl_gsim_odds(ds, games)
+        except Exception as exc:
+            odds_note = f"Sportsbook lines unavailable right now ({exc}); sims run without book comparisons."
+    return {"date": ds, "season": season, "games": games, "form": form, "prevVenue": prev_venue,
+            "sched": sched, "gstats": gstats, "gprev": gprev, "lines": lines,
+            "partialHistory": missing > 0, "oddsNote": odds_note}
+
+
+def _nhl_gsim_league(inp: dict):
+    home_g, road_g = [], []
+    for g in inp["games"]:
+        h = _nhl_gsim_blend(inp["form"].get(g["homeTeam"], {}).get("home"),
+                            inp["prevVenue"].get(g["homeTeam"], {}).get("home"))
+        a = _nhl_gsim_blend(inp["form"].get(g["awayTeam"], {}).get("away"),
+                            inp["prevVenue"].get(g["awayTeam"], {}).get("away"))
+        if h:
+            home_g.append(h[0]); road_g.append(h[1])
+        if a:
+            road_g.append(a[0]); home_g.append(a[1])
+    k = 6.0
+    return ((sum(home_g) + k * _NHL_GSIM_PRIOR_HOME) / (len(home_g) + k),
+            (sum(road_g) + k * _NHL_GSIM_PRIOR_ROAD) / (len(road_g) + k))
+
+
+def _nhl_gsim_expected(g: dict, inp: dict, lh: float, lr: float, lg_sv: float):
+    home, away = g["homeTeam"], g["awayTeam"]
+    fh, fa = inp["form"].get(home, {}), inp["form"].get(away, {})
+    hb = _nhl_gsim_blend(fh.get("home"), inp["prevVenue"].get(home, {}).get("home"))
+    ab = _nhl_gsim_blend(fa.get("away"), inp["prevVenue"].get(away, {}).get("away"))
+    if not hb or not ab:
+        raise ValueError("no home/road history for one of the teams")
+    factors = []
+    eh = hb[0] * ab[1] / lh
+    ea = ab[0] * hb[1] / lr
+    factors.append({"name": "Opponent-adjusted ratings", "home": round(eh, 2), "away": round(ea, 2),
+                    "note": f"{home} home offense x {away} road defense and the reverse, vs league home "
+                            f"{lh:.2f} / road {lr:.2f} ({int(hb[2] * 100)}% / {int(ab[2] * 100)}% this season)"})
+    dh = da = 0.0
+    hl, al = fh.get("l10") or {}, fa.get("l10") or {}
+    hs, as_ = fh.get("all") or {}, fa.get("all") or {}
+    if (hl.get("games") or 0) >= 5 and (al.get("games") or 0) >= 5:
+        dh = _nhl_gsim_clamp(0.25 * (hl["gf"] - hs["gf"]), -0.25, 0.25) + \
+             _nhl_gsim_clamp(0.25 * (al["ga"] - as_["ga"]), -0.25, 0.25)
+        da = _nhl_gsim_clamp(0.25 * (al["gf"] - as_["gf"]), -0.25, 0.25) + \
+             _nhl_gsim_clamp(0.25 * (hl["ga"] - hs["ga"]), -0.25, 0.25)
+        dh, da = _nhl_gsim_clamp(dh, -0.35, 0.35), _nhl_gsim_clamp(da, -0.35, 0.35)
+    eh += dh; ea += da
+    factors.append({"name": "Last 10 form", "home": round(dh, 2), "away": round(da, 2),
+                    "note": f"{home} L10 {hl.get('w', 0)}-{hl.get('l', 0)} · {away} L10 "
+                            f"{al.get('w', 0)}-{al.get('l', 0)} goals vs season level"})
+    sh, sa_ = inp["sched"].get(home) or {}, inp["sched"].get(away) or {}
+    mh = ma = 1.0
+    notes = []
+    if sh.get("b2b"):
+        mh *= 0.96; ma *= 1.03; notes.append(f"{home} back-to-back")
+    if sa_.get("b2b"):
+        ma *= 0.96; mh *= 1.03; notes.append(f"{away} back-to-back")
+    rh, ra = eh * mh - eh, ea * ma - ea
+    eh += rh; ea += ra
+    factors.append({"name": "Rest", "home": round(rh, 2), "away": round(ra, 2),
+                    "note": "; ".join(notes) or "No back-to-back on either side"})
+    starters = g.get("startingGoalies") or {}
+    f_home_g, n_home_g = _nhl_gsim_goalie_factor(starters.get(home), home, inp["gstats"], inp["gprev"], lg_sv)
+    f_away_g, n_away_g = _nhl_gsim_goalie_factor(starters.get(away), away, inp["gstats"], inp["gprev"], lg_sv)
+    gh, ga = eh * f_away_g - eh, ea * f_home_g - ea
+    eh += gh; ea += ga
+    factors.append({"name": "Starting goalies", "home": round(gh, 2), "away": round(ga, 2),
+                    "note": f"{away} net: {n_away_g} | {home} net: {n_home_g}"})
+    eh, ea = _nhl_gsim_clamp(eh, 1.4, 5.5), _nhl_gsim_clamp(ea, 1.4, 5.5)
+    goalies = {"home": starters.get(home), "away": starters.get(away)}
+    return eh, ea, factors, goalies
+
+
+def _nhl_gsim_pct(n, d):
+    return round(n / d * 100.0, 1) if d else None
+
+
+def _nhl_gsim_poisson(rng, lam):
+    lim, k, p = math.exp(-lam), 0, 1.0
+    while True:
+        p *= rng.random()
+        if p <= lim:
+            return k
+        k += 1
+
+
+def _nhl_gsim_run_one(g: dict, inp: dict, lh: float, lr: float, lg_sv: float) -> dict:
+    ds = inp["date"]
+    exp_h, exp_a, factors, goalies = _nhl_gsim_expected(g, inp, lh, lr, lg_sv)
+    reg_h, reg_a = exp_h * _NHL_GSIM_STRIP, exp_a * _NHL_GSIM_STRIP
+    seed = int(_gsim_hashlib.sha256(f"{ds}|{g['gameId']}|{reg_h:.4f}|{reg_a:.4f}".encode()).hexdigest()[:12], 16)
+    rng = _gsim_random.Random(seed)
+    book = inp["lines"].get((g["awayTeam"], g["homeTeam"])) or {}
+    spread, total_line = book.get("home_spread"), book.get("total")
+    n = _NHL_GSIM_N
+    home_w = ot = so = reg_home = reg_away = reg_tie = 0
+    h_cov = a_cov = s_push = over = under = t_push = 0
+    sum_h = sum_a = 0
+    totals, margins = [], []
+    scores: Dict[str, int] = {}
+    ps, ts = _NHL_GSIM_PACE_SHAPE, _NHL_GSIM_TEAM_SHAPE
+    for _ in range(n):
+        pace = rng.gammavariate(ps, 1.0 / ps)
+        lam_h = reg_h * pace * rng.gammavariate(ts, 1.0 / ts)
+        lam_a = reg_a * pace * rng.gammavariate(ts, 1.0 / ts)
+        h, a = _nhl_gsim_poisson(rng, lam_h), _nhl_gsim_poisson(rng, lam_a)
+        m = h - a
+        if abs(m) == 1:              # trailing team pulls its goalie
+            r = rng.random()
+            if r < 0.30:
+                if m > 0: h += 1
+                else: a += 1
+                if rng.random() < 0.08:
+                    if m > 0: h += 1
+                    else: a += 1
+            elif r < 0.42:
+                if m > 0: a += 1
+                else: h += 1
+        elif abs(m) == 2:
+            r = rng.random()
+            if r < 0.22:
+                if m > 0: h += 1
+                else: a += 1
+            elif r < 0.30:
+                if m > 0: a += 1
+                else: h += 1
+        if h > a: reg_home += 1
+        elif a > h: reg_away += 1
+        else:
+            reg_tie += 1
+            ot_h, ot_a = lam_h * 5.0 / 60.0 * 2.4, lam_a * 5.0 / 60.0 * 2.4
+            if rng.random() < 1.0 - math.exp(-(ot_h + ot_a)):
+                ot += 1
+                if rng.random() < ot_h / (ot_h + ot_a): h += 1
+                else: a += 1
+            else:
+                so += 1
+                if rng.random() < 0.5: h += 1
+                else: a += 1
+        m, t = h - a, h + a
+        home_w += m > 0
+        sum_h += h; sum_a += a
+        totals.append(t); margins.append(m)
+        k = f"{h}-{a}"
+        scores[k] = scores.get(k, 0) + 1
+        if spread is not None:
+            adj = m + float(spread)
+            if adj > 0: h_cov += 1
+            elif adj < 0: a_cov += 1
+            else: s_push += 1
+        if total_line is not None:
+            tl = float(total_line)
+            if t > tl: over += 1
+            elif t < tl: under += 1
+            else: t_push += 1
+    totals.sort(); margins.sort()
+    q = lambda arr, p: arr[min(len(arr) - 1, int(p * len(arr)))]
+    home_pct = _nhl_gsim_pct(home_w, n)
+    away_pct = round(100.0 - home_pct, 1)
+    H, A = g["homeTeam"], g["awayTeam"]
+    mb = [("away", 3, None, f"{A} by 3+"), ("away", 2, 2, f"{A} by 2"), ("away", 1, 1, f"{A} by 1"),
+          ("home", 1, 1, f"{H} by 1"), ("home", 2, 2, f"{H} by 2"), ("home", 3, None, f"{H} by 3+")]
+    margin_dist = []
+    for side, lo, hi, label in mb:
+        cnt = sum(1 for m in margins if (m > 0 if side == "home" else m < 0)
+                  and abs(m) >= lo and (hi is None or abs(m) <= hi))
+        margin_dist.append({"label": label, "side": side, "pct": _nhl_gsim_pct(cnt, n)})
+    total_dist = []
+    for lo, hi, label in ((0, 3, "0-3 goals"), (4, 4, "4"), (5, 5, "5"), (6, 6, "6"), (7, 7, "7"),
+                          (8, 8, "8"), (9, None, "9+")):
+        cnt = sum(1 for t in totals if t >= lo and (hi is None or t <= hi))
+        has = total_line is not None and lo <= float(total_line) + 0.5 and (hi is None or float(total_line) - 0.5 < hi)
+        total_dist.append({"label": label, "pct": _nhl_gsim_pct(cnt, n), "has_line": bool(has)})
+    top_scores = [{"score": k, "home": int(k.split("-")[0]), "away": int(k.split("-")[1]),
+                   "pct": _nhl_gsim_pct(v, n)}
+                  for k, v in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:5]]
+
+    def edge(prob, odds):
+        if odds is None:
+            return None, None
+        imp = _nhl_gsim_implied(odds) * 100
+        return round(imp, 1), round(prob - imp, 1)
+
+    win_team = H if home_w * 2 >= n else A
+    win_prob = home_pct if win_team == H else away_pct
+    is_home = win_team == H
+    w_odds = book.get("home_ml" if is_home else "away_ml")
+    w_imp, w_edge = edge(win_prob, w_odds)
+    picks = {"winner": {"pick": win_team, "prob": win_prob, "odds": w_odds,
+                        "book": book.get("home_ml_book" if is_home else "away_ml_book") if w_odds is not None else "",
+                        "implied": w_imp, "edge": w_edge, "bucket": _nhl_gsim_bucket(win_prob)}}
+    if spread is not None:
+        home_side = h_cov >= a_cov
+        cov = h_cov if home_side else a_cov
+        prob = _nhl_gsim_pct(cov, n - s_push)
+        odds = book.get("home_spread_odds" if home_side else "away_spread_odds")
+        imp, ed = edge(prob, odds)
+        picks["ats"] = {"pick": H if home_side else A,
+                        "line": float(spread) if home_side else -float(spread),
+                        "prob": prob, "push_pct": _nhl_gsim_pct(s_push, n),
+                        "home_cover_pct": _nhl_gsim_pct(h_cov, n), "away_cover_pct": _nhl_gsim_pct(a_cov, n),
+                        "odds": odds, "book": book.get("home_spread_book" if home_side else "away_spread_book", ""),
+                        "implied": imp, "edge": ed, "bucket": _nhl_gsim_bucket(prob)}
+    if total_line is not None:
+        is_over = over >= under
+        prob = _nhl_gsim_pct(over if is_over else under, n - t_push)
+        odds = book.get("over_odds" if is_over else "under_odds")
+        imp, ed = edge(prob, odds)
+        picks["ou"] = {"pick": "OVER" if is_over else "UNDER", "line": float(total_line), "prob": prob,
+                       "over_pct": _nhl_gsim_pct(over, n), "under_pct": _nhl_gsim_pct(under, n),
+                       "push_pct": _nhl_gsim_pct(t_push, n), "odds": odds,
+                       "book": book.get("over_book" if is_over else "under_book", ""),
+                       "implied": imp, "edge": ed, "bucket": _nhl_gsim_bucket(prob)}
+    return {"sims": n, "expHome": round(exp_h, 2), "expAway": round(exp_a, 2),
+            "avgHome": round(sum_h / n, 2), "avgAway": round(sum_a / n, 2),
+            "avgTotal": round((sum_h + sum_a) / n, 2), "medTotal": q(totals, 0.5),
+            "homeWinPct": home_pct, "awayWinPct": away_pct,
+            "regHomePct": _nhl_gsim_pct(reg_home, n), "regAwayPct": _nhl_gsim_pct(reg_away, n),
+            "regTiePct": _nhl_gsim_pct(reg_tie, n), "otPct": _nhl_gsim_pct(ot, n),
+            "soPct": _nhl_gsim_pct(so, n), "oneGoalPct": _nhl_gsim_pct(sum(1 for m in margins if abs(m) == 1), n),
+            "marginDist": margin_dist, "totalDist": total_dist, "topScores": top_scores,
+            "picks": picks, "factors": factors, "goalies": goalies}
+
+
+def _nhl_gsim_build(inp: dict) -> dict:
+    games = inp.get("games") or []
+    if not games:
+        return {"date": inp["date"], "games": [], "sims": _NHL_GSIM_N,
+                "message": "No NHL games are scheduled for this date."}
+    lh, lr = _nhl_gsim_league(inp)
+    tsa = sum(t.get("sa", 0) for t in (inp["gstats"].get("teams") or {}).values()) + \
+        0.5 * sum(t.get("sa", 0) for t in (inp["gprev"].get("teams") or {}).values())
+    tsv = sum(t.get("sv", 0) for t in (inp["gstats"].get("teams") or {}).values()) + \
+        0.5 * sum(t.get("sv", 0) for t in (inp["gprev"].get("teams") or {}).values())
+    lg_sv = tsv / tsa if tsa > 1000 else 0.900
+    out = []
+    for g in games:
+        state = g.get("gameState", "")
+        row = {k: g.get(k) for k in ("gameId", "homeTeam", "awayTeam", "homeFull", "awayFull", "homeLogo",
+                                     "awayLogo", "startTime", "gameState", "gameType", "venue")}
+        row["state"] = "pre" if state in ("FUT", "PRE") else ("post" if state in ("OFF", "FINAL") else "in")
+        row["completed"] = state in ("OFF", "FINAL")
+        row["homeScore"], row["awayScore"] = g.get("homeScore"), g.get("awayScore")
+        row["book"] = inp["lines"].get((g["awayTeam"], g["homeTeam"])) or {}
+        try:
+            row["sim"] = _nhl_gsim_run_one(g, inp, lh, lr, lg_sv)
+        except Exception as exc:
+            print(f"[nhl_gamesim] {g.get('awayTeam')}@{g.get('homeTeam')} failed: {exc}")
+            row["sim"] = None
+            row["simError"] = f"Simulation inputs were incomplete for this game ({exc})."
+        out.append(row)
+    out.sort(key=lambda r: r.get("startTime") or "")
+    return {"date": inp["date"], "games": out, "sims": _NHL_GSIM_N,
+            "league": {"home": round(lh, 2), "road": round(lr, 2), "sv": round(lg_sv, 3)},
+            "partialHistory": bool(inp.get("partialHistory")), "oddsNote": inp.get("oddsNote", ""),
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z"}
+
+
+def _nhl_gsim_compact(g):
+    s = g.get("sim") or {}
+    keep = ("expHome", "expAway", "avgHome", "avgAway", "avgTotal", "homeWinPct", "awayWinPct",
+            "regHomePct", "regAwayPct", "regTiePct", "otPct", "soPct", "oneGoalPct", "medTotal",
+            "picks", "sims", "goalies")
+    return {**{k: g.get(k) for k in ("gameId", "startTime", "gameType", "homeTeam", "awayTeam", "book")},
+            "sim": {k: s.get(k) for k in keep},
+            "saved_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"}
+
+
+def _nhl_gsim_snapshot_doc(ds):
+    rows = _nhl_sb_get("mpa_track_ledger", {"app": f"eq.{_NHL_GSIM_APP}", "category": f"eq.{_NHL_GSIM_SNAP_CAT}",
+                                            "side": "eq.ALL", "date": f"eq.{ds}", "select": "detail", "limit": "1"})
+    det = (rows[0].get("detail") if rows else None) or {}
+    return det if isinstance(det, dict) else {}
+
+
+def _nhl_gsim_tip(v):
+    return datetime.fromisoformat(str(v).replace("Z", "+00:00")).replace(tzinfo=None)
+
+
+def _nhl_gsim_save_snapshot(ds, games):
+    """Latest pregame sim per game wins; each game freezes at puck drop.
+    Preseason games are never tracked."""
+    now = datetime.utcnow()
+    fresh = {}
+    for g in games:
+        if g.get("gameType") not in (2, 3) or g.get("state") != "pre" or not g.get("sim"):
+            continue
+        try:
+            if now >= _nhl_gsim_tip(g.get("startTime")):
+                continue
+        except Exception:
+            continue
+        fresh[str(g["gameId"])] = _nhl_gsim_compact(g)
+    if not fresh:
+        return
+    with _NHL_GSIM_LOCK:
+        doc = _nhl_gsim_snapshot_doc(ds)
+        for gid, row in fresh.items():
+            old = doc.get(gid)
+            if old:
+                try:
+                    if now >= _nhl_gsim_tip(old.get("startTime")):
+                        continue
+                except Exception:
+                    pass
+            doc[gid] = row
+        ok = _nhl_sb_upsert("mpa_track_ledger", [{"app": _NHL_GSIM_APP, "date": ds, "category": _NHL_GSIM_SNAP_CAT,
+                                                  "side": "ALL", "wins": 0, "losses": 0, "locked": False,
+                                                  "detail": doc}], "app,date,category,side")
+    print(f"[nhl_gamesim] snapshot {'saved' if ok else 'FAILED'}: {len(fresh)} games -> {ds}")
+
+
+def _nhl_gsim_profit(odds, result):
+    """Per $100. Genuine saved prices only; no assumed price."""
+    if odds is None or not _nhl_gsim_price_ok(odds):
+        return None
+    o = float(odds)
+    if result == "WIN":
+        return round(100.0 * (o / 100.0 if o > 0 else 100.0 / -o), 2)
+    if result == "LOSS":
+        return -100.0
+    return 0.0
+
+
+def _nhl_gsim_grade(p, hs, as_):
+    home, away = p.get("homeTeam"), p.get("awayTeam")
+    sim = p.get("sim") or {}
+    picks = sim.get("picks") or {}
+    out = {"gameId": p.get("gameId"), "home": home, "away": away, "home_score": hs, "away_score": as_,
+           "expHome": sim.get("expHome"), "expAway": sim.get("expAway")}
+    w = picks.get("winner")
+    if w:
+        res = "WIN" if w.get("pick") == (home if hs > as_ else away) else "LOSS"
+        out["winner"] = {**w, "result": res, "profit": _nhl_gsim_profit(w.get("odds"), res)}
+    s = picks.get("ats")
+    if s and s.get("line") is not None:
+        mine, theirs = (hs, as_) if s.get("pick") == home else (as_, hs)
+        adj = mine + float(s["line"]) - theirs
+        res = "PUSH" if adj == 0 else ("WIN" if adj > 0 else "LOSS")
+        out["ats"] = {**s, "result": res, "profit": _nhl_gsim_profit(s.get("odds"), res)}
+    t = picks.get("ou")
+    if t and t.get("line") is not None:
+        tot, line = hs + as_, float(t["line"])
+        res = "PUSH" if tot == line else ("WIN" if (tot > line) == (t.get("pick") == "OVER") else "LOSS")
+        out["ou"] = {**t, "result": res, "profit": _nhl_gsim_profit(t.get("odds"), res), "final_total": tot}
+    return out
+
+
+def _nhl_gsim_record() -> dict:
+    snaps = _nhl_sb_get("mpa_track_ledger", {"app": f"eq.{_NHL_GSIM_APP}", "category": f"eq.{_NHL_GSIM_SNAP_CAT}",
+                                             "select": "date,detail", "limit": "2000"}) or []
+    graded = {r.get("date"): r for r in (_nhl_sb_get("mpa_track_ledger", {
+        "app": f"eq.{_NHL_GSIM_APP}", "category": f"eq.{_NHL_GSIM_GRADED_CAT}",
+        "select": "date,detail,locked", "limit": "2000"}) or [])}
+    today = _nhl_record_today()
+    todo = [s for s in snaps if s.get("date") and s["date"] <= today
+            and not (graded.get(s["date"]) or {}).get("locked")]
+    for s in sorted(todo, key=lambda x: x["date"])[-21:]:
+        ds, doc = s["date"], s.get("detail") or {}
+        by_id, by_matchup = _nhl_gp_schedule_scores(ds)
+        if not by_id and not by_matchup:
+            continue
+        rows, all_done = [], True
+        for gid, p in doc.items():
+            f = by_id.get(str(gid)) or by_matchup.get((p.get("awayTeam"), p.get("homeTeam")))
+            if not f or f.get("gameState") not in ("OFF", "FINAL") or \
+                    f.get("homeScore") is None or f.get("awayScore") is None:
+                all_done = False
+                continue
+            rows.append(_nhl_gsim_grade(p, int(f["homeScore"]), int(f["awayScore"])))
+        locked = all_done or (date.fromisoformat(today) - date.fromisoformat(ds)).days >= 3
+        if not rows and not locked:
+            continue
+        _nhl_sb_upsert("mpa_track_ledger", [{"app": _NHL_GSIM_APP, "date": ds, "category": _NHL_GSIM_GRADED_CAT,
+                                             "side": "ALL",
+                                             "wins": sum((r.get("winner") or {}).get("result") == "WIN" for r in rows),
+                                             "losses": sum((r.get("winner") or {}).get("result") == "LOSS" for r in rows),
+                                             "locked": locked, "detail": rows}], "app,date,category,side")
+        graded[ds] = {"date": ds, "detail": rows, "locked": locked}
+    pending = {s["date"]: (s.get("detail") or {}) for s in snaps if s.get("date")}
+    days = []
+    for ds in sorted(set(pending) | set(graded), reverse=True):
+        rows = (graded.get(ds) or {}).get("detail") or []
+        locked = bool((graded.get(ds) or {}).get("locked"))
+        done = {str(r.get("gameId")) for r in rows}
+        waiting = [{"gameId": gid, "home": p.get("homeTeam"), "away": p.get("awayTeam"),
+                    "startTime": p.get("startTime"), "picks": (p.get("sim") or {}).get("picks") or {}}
+                   for gid, p in (pending.get(ds) or {}).items() if str(gid) not in done]
+        days.append({"date": ds, "games": rows, "pending": [] if locked else waiting,
+                     "noResult": len(waiting) if locked else 0, "locked": locked})
+    return {"stake": 100.0, "days": days}
+
+
+@app.get("/api/nhl/game-sim")
+async def nhl_game_sim(date_str: str = ""):
+    ds = (date_str or _nhl_record_today()).strip()
+    try:
+        date.fromisoformat(ds)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date")
+    with _NHL_BATCH_PROGRESS_LOCK:
+        running = _NHL_BATCH_PROGRESS.get("status") == "RUNNING"
+    if running:
+        raise HTTPException(status_code=409, detail="A picks run is in progress. Run the sims after it finishes.")
+    try:
+        inp = await asyncio.wait_for(_nhl_gsim_inputs(ds), timeout=90)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Simulator data took too long to load. Try again in a minute.")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Simulator data unavailable: {exc}")
+    data = await asyncio.to_thread(_nhl_gsim_build, inp)
+    if not data.get("games"):
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+    if ds >= _nhl_record_today():
+        _bt_th.Thread(target=_nhl_gsim_save_snapshot, args=(ds, data["games"]), daemon=True).start()
+    try:
+        doc = await asyncio.to_thread(_nhl_gsim_snapshot_doc, ds)
+    except Exception:
+        doc = {}
+    for g in data["games"]:
+        saved = doc.get(str(g.get("gameId")))
+        if saved and g.get("state") != "pre":
+            g["sim"] = {**(g.get("sim") or {}), **(saved.get("sim") or {})}
+            g["book"] = saved.get("book") or g.get("book")
+            g["savedSim"] = True
+            g["savedAt"] = saved.get("saved_at")
+        if g.get("completed") and g.get("homeScore") is not None and g.get("awayScore") is not None and g.get("sim"):
+            g["result"] = _nhl_gsim_grade(g, int(g["homeScore"]), int(g["awayScore"]))
+        g["retro"] = (not saved) and ds < _nhl_record_today()
+        g["tracked"] = g.get("gameType") in (2, 3)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/nhl/game-sim/record")
+async def nhl_game_sim_record():
+    try:
+        payload = await asyncio.wait_for(asyncio.to_thread(_nhl_gsim_record), timeout=60)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Sim record took too long to load.")
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+_NHL_GSIM_UI = r"""
+<style>
+.ngs{max-width:960px;margin:0 auto;padding:0 16px 32px}
+.ngs-card{background:#0b1220;border:1px solid #1e293b;border-radius:14px;padding:18px 20px;margin-bottom:14px}
+.ngs h2{font-family:'Playfair Display',serif;font-size:1.35rem;font-weight:700;color:#fff;margin:0}
+.ngs-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.ngs-note{color:#94a3b8;font-size:.74rem;line-height:1.45;margin:8px 0}
+.ngs-btn{background:#1e293b;border:1px solid #334155;color:#e2e8f0;border-radius:8px;padding:7px 12px;font-size:.78rem;font-weight:800;cursor:pointer}
+.ngs-btn.go{background:#0e7490;border-color:#0e7490;color:#fff}
+.ngs-in{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px 8px;color:#fff;color-scheme:dark}
+.ngs-g{background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:14px;margin:12px 0}
+.ngs-mu{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ngs-tm{display:flex;align-items:center;gap:8px;font-weight:900;color:#f1f5f9;font-size:.95rem}
+.ngs-tm img{width:34px;height:34px}
+.ngs-mid{text-align:center;color:#94a3b8;font-size:.7rem}
+.ngs-mid b{display:block;color:#fff;font-size:1.25rem;letter-spacing:.02em}
+.ngs-bar{display:flex;height:10px;border-radius:6px;overflow:hidden;margin:10px 0 4px;background:#1e293b}
+.ngs-bar span{display:block;height:100%}
+.ngs-pk{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-top:10px}
+.ngs-p{background:#020617;border:1px solid #1e293b;border-radius:9px;padding:9px 10px;font-size:.74rem;color:#cbd5e1}
+.ngs-p .k{color:#64748b;font-size:.6rem;font-weight:900;letter-spacing:.08em;text-transform:uppercase}
+.ngs-p .v{color:#fff;font-weight:900;font-size:.92rem;margin:2px 0}
+.ngs-pos{color:#34d399}.ngs-neg{color:#f87171}.ngs-mut{color:#64748b}
+.ngs-tag{display:inline-block;border-radius:5px;padding:2px 7px;font-size:.6rem;font-weight:900;letter-spacing:.05em;margin-left:4px}
+.ngs-tbl{width:100%;border-collapse:collapse;font-size:.72rem;margin:6px 0 10px}
+.ngs-tbl th,.ngs-tbl td{padding:5px 6px;border-bottom:1px solid #1e293b;text-align:left;color:#cbd5e1}
+.ngs-tbl th{color:#64748b;font-size:.6rem;text-transform:uppercase}
+.ngs-h{color:#e2e8f0;font-size:.78rem;font-weight:900;margin:12px 0 4px;text-transform:uppercase;letter-spacing:.06em}
+.ngs-dist{display:grid;grid-template-columns:90px 1fr 46px;gap:6px;align-items:center;font-size:.7rem;color:#cbd5e1;margin:3px 0}
+.ngs-dist i{display:block;height:8px;border-radius:4px;background:#0e7490}
+.ngs-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:10px 0}
+.ngs-tile{background:#020617;border:1px solid #1e293b;border-radius:10px;padding:12px}
+.ngs-tile .t{color:#94a3b8;font-size:.66rem;font-weight:900;letter-spacing:.08em;text-transform:uppercase}
+.ngs-tile .n{color:#fff;font-weight:900;font-size:1.2rem;margin:4px 0}
+@media(max-width:600px){.ngs-tm img{width:26px;height:26px}.ngs-tm{font-size:.82rem}.ngs-card{padding:14px}}
+</style>
+<div id="nhl-gsim-section" class="ngs" style="display:none">
+<div class="ngs-card">
+  <div class="ngs-row" style="justify-content:space-between">
+    <h2>&#127922; NHL 10K Game Simulator</h2>
+    <button type="button" class="ngs-btn" onclick="document.getElementById('nhl-gsim-section').style.display='none'">Close</button>
+  </div>
+  <p class="ngs-note">Plays every game 10,000 times: goals for each team around opponent-adjusted home/road scoring, last-10 form, back-to-backs and posted starting goalies, with late empty-net goals, 3-on-3 overtime and shootouts. Gives moneyline, puck line and total calls. Separate from the Game Predictor; its pregame calls go to their own Sim Record.</p>
+  <div class="ngs-row">
+    <label style="color:#94a3b8;font-size:.74rem;font-weight:800">DATE <input type="date" id="nhlGsimDate" class="ngs-in"></label>
+    <button type="button" class="ngs-btn go" id="nhlGsimRun" onclick="runNhlGameSim()">&#127922; Run Sims</button>
+    <button type="button" class="ngs-btn" onclick="openNhlSimRecord()">&#128202; Sim Record</button>
+  </div>
+  <div id="nhlGsimBody"><p class="ngs-note">Pick a date and press Run Sims.</p></div>
+</div>
+</div>
+<div id="nhl-gsim-record-section" class="ngs" style="display:none">
+<div class="ngs-card">
+  <div class="ngs-row" style="justify-content:space-between">
+    <h2>&#127922; NHL Sim Record</h2>
+    <button type="button" class="ngs-btn" onclick="document.getElementById('nhl-gsim-record-section').style.display='none'">Close</button>
+  </div>
+  <p class="ngs-note">Pregame simulator calls saved before puck drop and graded after finals. Profit uses only the genuine saved sportsbook price for each call; calls without a price count in W/L only. Preseason games and dates simulated after the fact are never tracked.</p>
+  <div class="ngs-row">
+    <label style="color:#94a3b8;font-size:.74rem;font-weight:800">PERIOD <select id="nhlGsimPeriod" class="ngs-in" onchange="_nhlGsimRecRender()"><option value="today">Day</option><option value="week">Week</option><option value="month">Month</option><option value="all" selected>All</option></select></label>
+    <label style="color:#94a3b8;font-size:.74rem;font-weight:800">DATE <input type="date" id="nhlGsimRecDate" class="ngs-in" onchange="_nhlGsimRecRender()"></label>
+    <label style="color:#94a3b8;font-size:.74rem;font-weight:800">STAKE $ <input type="number" id="nhlGsimStake" class="ngs-in" value="100" min="1" step="1" style="width:80px" oninput="_nhlGsimRecRender()"></label>
+    <button type="button" class="ngs-btn go" onclick="loadNhlSimRecord()">&#8635; Grade &amp; Refresh</button>
+  </div>
+  <div id="nhlGsimRecBody"><p class="ngs-note">Loading...</p></div>
+</div>
+</div>
+<script>
+(function(){
+var S={data:null,rec:null,busy:false};
+function $(id){return document.getElementById(id);}
+function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function today(){return new Date().toLocaleDateString('en-CA',{timeZone:'America/Toronto'});}
+function odds(o){if(o==null||o==='')return '';var n=Number(o);return (n>0?'+':'')+n;}
+function pct(v){return v==null?'-':Number(v).toFixed(1)+'%';}
+function sgn(v){return v==null?'':((v>0?'+':'')+Number(v).toFixed(1));}
+function tip(t){try{return new Date(t).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/Toronto'})+' ET';}catch(e){return '';}}
+function line(v){var n=Number(v);return (n>0?'+':'')+n;}
+function pickBox(k,p,lbl){
+  if(!p)return '<div class="ngs-p"><div class="k">'+k+'</div><div class="v ngs-mut">No line posted</div><div class="ngs-mut">Sim % shown above</div></div>';
+  var ed=p.edge==null?'<span class="ngs-mut">No book price &middot; W/L only</span>':'Edge <b class="'+(p.edge>0?'ngs-pos':'ngs-neg')+'">'+sgn(p.edge)+' pts</b> vs '+pct(p.implied)+' implied';
+  return '<div class="ngs-p"><div class="k">'+k+'</div><div class="v">'+esc(lbl)+'</div><div>Sim <b style="color:#fff">'+pct(p.prob)+'</b>'+(p.odds!=null?' &middot; '+odds(p.odds)+(p.book?' <span class="ngs-mut">'+esc(p.book)+'</span>':''):'')+'</div><div>'+ed+'</div></div>';
+}
+function resTag(r){if(!r)return '';var c=r.result==='WIN'?'#065f46':(r.result==='LOSS'?'#7f1d1d':'#334155');return '<span class="ngs-tag" style="background:'+c+';color:#fff">'+r.result+'</span>';}
+function dist(rows,max){return rows.map(function(r){var w=max?Math.round((r.pct||0)/max*100):0;return '<div class="ngs-dist"><span>'+esc(r.label)+(r.has_line?' &#9668;':'')+'</span><i style="width:'+w+'%;background:'+(r.side==='away'?'#7c3aed':'#0e7490')+'"></i><span>'+pct(r.pct)+'</span></div>';}).join('');}
+function gameCard(g,i){
+  var s=g.sim,H=g.homeTeam,A=g.awayTeam;
+  var head='<div class="ngs-mu"><div class="ngs-tm">'+(g.awayLogo?'<img src="'+esc(g.awayLogo)+'" alt="">':'')+esc(A)+'</div><div class="ngs-mid">'+(g.state==='pre'?tip(g.startTime):(g.completed?'FINAL':'LIVE'))+(g.state!=='pre'&&g.homeScore!=null?'<b>'+g.awayScore+' - '+g.homeScore+'</b>':'')+(g.gameType===1?'<span class="ngs-tag" style="background:#78350f;color:#fde68a">PRESEASON &middot; NOT TRACKED</span>':'')+'</div><div class="ngs-tm">'+esc(H)+(g.homeLogo?'<img src="'+esc(g.homeLogo)+'" alt="">':'')+'</div></div>';
+  if(!s)return '<div class="ngs-g">'+head+'<p class="ngs-note">'+esc(g.simError||'Simulation unavailable for this game.')+'</p></div>';
+  var pk=s.picks||{},r=g.result||{};
+  var tags='';
+  if(g.savedSim)tags+='<span class="ngs-tag" style="background:#1e3a8a;color:#bfdbfe">SAVED PREGAME SIM</span>';
+  if(g.retro)tags+='<span class="ngs-tag" style="background:#334155;color:#cbd5e1">AFTER-THE-FACT &middot; NOT TRACKED</span>';
+  var h='<div class="ngs-g">'+head;
+  h+='<div class="ngs-bar"><span style="width:'+s.awayWinPct+'%;background:#7c3aed"></span><span style="width:'+s.homeWinPct+'%;background:#0e7490"></span></div>';
+  h+='<div class="ngs-row" style="justify-content:space-between;font-size:.74rem;color:#cbd5e1"><span>'+esc(A)+' <b style="color:#fff">'+pct(s.awayWinPct)+'</b></span><span class="ngs-mut">Avg score '+esc(A)+' '+s.avgAway+' - '+s.avgHome+' '+esc(H)+' &middot; total '+s.avgTotal+'</span><span><b style="color:#fff">'+pct(s.homeWinPct)+'</b> '+esc(H)+'</span></div>';
+  h+='<div class="ngs-note" style="margin:6px 0 0">After 60 min: '+esc(A)+' '+pct(s.regAwayPct)+' &middot; tie '+pct(s.regTiePct)+' &middot; '+esc(H)+' '+pct(s.regHomePct)+' &middot; OT '+pct(s.otPct)+' &middot; Shootout '+pct(s.soPct)+' &middot; One-goal game '+pct(s.oneGoalPct)+tags+'</div>';
+  h+='<div class="ngs-pk">';
+  var w=pk.winner;h+=pickBox('Moneyline',w,w?w.pick+' ML':'')+(r.winner?'':'');
+  var a=pk.ats;h+=pickBox('Puck line',a,a?a.pick+' '+line(a.line):'');
+  var o=pk.ou;h+=pickBox('Total',o,o?o.pick+' '+o.line:'');
+  h+='</div>';
+  if(r&&(r.winner||r.ats||r.ou))h+='<div class="ngs-note">Result: ML '+resTag(r.winner)+(r.ats?' &middot; Puck line '+resTag(r.ats):'')+(r.ou?' &middot; Total '+resTag(r.ou):'')+'</div>';
+  h+='<button type="button" class="ngs-btn" style="margin-top:8px" onclick="_nhlGsimToggle('+i+')">Full sim report &#9662;</button><div id="nhlGsimRep'+i+'" style="display:none">'+report(g)+'</div>';
+  return h+'</div>';
+}
+function report(g){
+  var s=g.sim,h='';
+  if(s.marginDist){var mx=Math.max.apply(null,s.marginDist.map(function(r){return r.pct||0;}));h+='<div class="ngs-h">Final margin (incl. OT/SO)</div>'+dist(s.marginDist,mx);}
+  if(s.totalDist){var mt=Math.max.apply(null,s.totalDist.map(function(r){return r.pct||0;}));h+='<div class="ngs-h">Total goals</div>'+dist(s.totalDist,mt)+(g.book&&g.book.total!=null?'<div class="ngs-note">&#9668; marks the posted total '+g.book.total+'.</div>':'');}
+  if(s.topScores)h+='<div class="ngs-h">Most common final scores</div><table class="ngs-tbl"><tr><th>Score ('+esc(g.awayTeam)+'-'+esc(g.homeTeam)+')</th><th>Share</th></tr>'+s.topScores.map(function(t){return '<tr><td>'+t.away+'-'+t.home+'</td><td>'+pct(t.pct)+'</td></tr>';}).join('')+'</table>';
+  var pk=s.picks||{};
+  if(pk.ats)h+='<div class="ngs-note">Puck line: '+esc(g.homeTeam)+' '+line(g.book.home_spread)+' covers '+pct(pk.ats.home_cover_pct)+' &middot; '+esc(g.awayTeam)+' '+line(-g.book.home_spread)+' covers '+pct(pk.ats.away_cover_pct)+'</div>';
+  if(pk.ou)h+='<div class="ngs-note">Total '+pk.ou.line+': Over '+pct(pk.ou.over_pct)+' &middot; Under '+pct(pk.ou.under_pct)+(pk.ou.push_pct?' &middot; Push '+pct(pk.ou.push_pct):'')+'</div>';
+  if(s.factors)h+='<div class="ngs-h">What drives the sim (expected goals)</div><table class="ngs-tbl"><tr><th>Factor</th><th>'+esc(g.awayTeam)+'</th><th>'+esc(g.homeTeam)+'</th><th>Detail</th></tr>'+s.factors.map(function(f,j){return '<tr><td>'+esc(f.name)+'</td><td>'+(j?sgn(f.away):f.away)+'</td><td>'+(j?sgn(f.home):f.home)+'</td><td style="color:#94a3b8">'+esc(f.note)+'</td></tr>';}).join('')+'<tr><td><b>Expected goals</b></td><td><b>'+s.expAway+'</b></td><td><b>'+s.expHome+'</b></td><td style="color:#94a3b8">Before late-game, OT and shootout goals are simulated</td></tr></table>';
+  if(g.savedSim)h+='<div class="ngs-note">This game has started, so the card shows the saved pregame sim'+(g.savedAt?' from '+esc(g.savedAt.replace('T',' ').replace('Z',' UTC')):'')+'.</div>';
+  return h;
+}
+window._nhlGsimToggle=function(i){var e=$('nhlGsimRep'+i);if(e)e.style.display=e.style.display==='none'?'block':'none';};
+window.runNhlGameSim=function(){
+  if(S.busy)return;var d=$('nhlGsimDate').value||today(),b=$('nhlGsimBody'),btn=$('nhlGsimRun');
+  S.busy=true;btn.disabled=true;btn.textContent='Simulating...';
+  b.innerHTML='<p class="ngs-note">Loading inputs and running 10,000 sims per game...</p>';
+  fetch('/api/nhl/game-sim?date_str='+encodeURIComponent(d),{credentials:'include'})
+   .then(function(r){return r.json().catch(function(){return {};}).then(function(j){if(!r.ok)throw new Error(j.detail||('HTTP '+r.status));return j;});})
+   .then(function(j){
+     S.data=j;var g=j.games||[];
+     if(!g.length){b.innerHTML='<p class="ngs-note">'+esc(j.message||'No games.')+'</p>';return;}
+     var h='<p class="ngs-note">'+g.length+' games &middot; '+(j.sims||10000).toLocaleString()+' sims each'+(j.league?' &middot; league home '+j.league.home+' / road '+j.league.road+' goals':'')+'</p>';
+     if(j.oddsNote)h+='<p class="ngs-note" style="color:#fbbf24">'+esc(j.oddsNote)+'</p>';
+     if(j.partialHistory)h+='<p class="ngs-note" style="color:#fbbf24">Some team schedules could not be read; affected games use the history that was available.</p>';
+     b.innerHTML=h+g.map(gameCard).join('');
+   })
+   .catch(function(e){b.innerHTML='<p class="ngs-note" style="color:#f87171">Could not run sims: '+esc(e.message||'request failed')+'</p>';})
+   .then(function(){S.busy=false;btn.disabled=false;btn.innerHTML='&#127922; Run Sims';});
+};
+window.openNhlGameSim=function(){
+  var s=$('nhl-gsim-section');if(!s)return;s.style.display='block';
+  var dp=$('datePicker'),di=$('nhlGsimDate');if(di&&!di.value)di.value=(dp&&dp.value)||today();
+  s.scrollIntoView({behavior:'smooth',block:'start'});
+};
+function inPeriod(ds,per,anchor){
+  if(per==='all')return true;if(per==='today')return ds===anchor;
+  var a=new Date(anchor+'T12:00:00'),d=new Date(ds+'T12:00:00');
+  if(per==='month')return ds.slice(0,7)===anchor.slice(0,7);
+  var st=new Date(a);st.setDate(a.getDate()-((a.getDay()+6)%7));var en=new Date(st);en.setDate(st.getDate()+6);
+  return d>=st&&d<=en;
+}
+function stake(){var v=Number(($('nhlGsimStake')||{}).value);return v>0?v:100;}
+window._nhlGsimRecRender=function(){
+  var b=$('nhlGsimRecBody'),R=S.rec;if(!b||!R)return;
+  var per=$('nhlGsimPeriod').value,anchor=$('nhlGsimRecDate').value||today(),k=stake()/100;
+  var days=(R.days||[]).filter(function(d){return inPeriod(d.date,per,anchor);});
+  var M={winner:'Moneyline',ats:'Puck line',ou:'Total'},agg={},bk={};
+  Object.keys(M).forEach(function(m){agg[m]={w:0,l:0,p:0,pw:0,pl:0,pr:0,profit:0};});
+  days.forEach(function(d){(d.games||[]).forEach(function(g){Object.keys(M).forEach(function(m){var x=g[m];if(!x||!x.result)return;var a=agg[m];
+    if(x.result==='WIN')a.w++;else if(x.result==='LOSS')a.l++;else a.p++;
+    if(x.profit!=null){a.pr++;a.profit+=x.profit*k;}
+    var key=m+'|'+(x.bucket||'');bk[key]=bk[key]||{m:m,b:x.bucket||'-',w:0,l:0};if(x.result==='WIN')bk[key].w++;else if(x.result==='LOSS')bk[key].l++;});});});
+  var h='<div class="ngs-tiles">'+Object.keys(M).map(function(m){var a=agg[m],n=a.w+a.l;return '<div class="ngs-tile"><div class="t">'+M[m]+'</div><div class="n">'+a.w+'-'+a.l+(a.p?'-'+a.p:'')+'</div><div style="font-size:.74rem;color:#cbd5e1">Hit rate '+(n?(a.w/n*100).toFixed(1)+'%':'-')+'</div><div style="font-size:.74rem;color:#cbd5e1">Profit <b class="'+(a.profit>=0?'ngs-pos':'ngs-neg')+'">'+(a.profit>=0?'+':'-')+'$'+Math.abs(a.profit).toFixed(2)+'</b> <span class="ngs-mut">('+a.pr+' priced)</span></div></div>';}).join('')+'</div>';
+  var bl=Object.keys(bk).sort().map(function(x){return bk[x];});
+  if(bl.length)h+='<div class="ngs-h">By sim confidence</div><table class="ngs-tbl"><tr><th>Market</th><th>Sim %</th><th>W-L</th><th>Hit %</th></tr>'+bl.map(function(r){var n=r.w+r.l;return '<tr><td>'+M[r.m]+'</td><td>'+esc(r.b)+'</td><td>'+r.w+'-'+r.l+'</td><td>'+(n?(r.w/n*100).toFixed(1)+'%':'-')+'</td></tr>';}).join('')+'</table>';
+  if(!days.length)h+='<p class="ngs-note">No saved sims in this period yet. Run Sims before puck drop to save calls.</p>';
+  days.forEach(function(d){
+    h+='<div class="ngs-h">'+esc(d.date)+(d.locked?'':' <span class="ngs-tag" style="background:#334155;color:#cbd5e1">OPEN</span>')+'</div><table class="ngs-tbl"><tr><th>Game</th><th>Final</th><th>Moneyline</th><th>Puck line</th><th>Total</th></tr>';
+    function cell(x,lbl){if(!x)return '<td class="ngs-mut">-</td>';var p=x.profit==null?'<span class="ngs-mut"> W/L only</span>':' <span class="'+(x.profit>=0?'ngs-pos':'ngs-neg')+'">'+(x.profit>=0?'+':'-')+'$'+Math.abs(x.profit*k).toFixed(2)+'</span>';return '<td>'+esc(lbl)+' '+pct(x.prob)+(x.odds!=null?' ('+odds(x.odds)+')':'')+' '+resTag(x)+p+'</td>';}
+    (d.games||[]).forEach(function(g){h+='<tr><td>'+esc(g.away)+' @ '+esc(g.home)+'</td><td>'+g.away_score+'-'+g.home_score+'</td>'+cell(g.winner,g.winner?g.winner.pick:'')+cell(g.ats,g.ats?g.ats.pick+' '+line(g.ats.line):'')+cell(g.ou,g.ou?g.ou.pick+' '+g.ou.line:'')+'</tr>';});
+    (d.pending||[]).forEach(function(g){var p=g.picks||{};h+='<tr><td>'+esc(g.away)+' @ '+esc(g.home)+'</td><td class="ngs-mut">Pending</td><td>'+(p.winner?esc(p.winner.pick)+' '+pct(p.winner.prob):'-')+'</td><td>'+(p.ats?esc(p.ats.pick)+' '+line(p.ats.line)+' '+pct(p.ats.prob):'-')+'</td><td>'+(p.ou?esc(p.ou.pick)+' '+p.ou.line+' '+pct(p.ou.prob):'-')+'</td></tr>';});
+    h+='</table>'+(d.noResult?'<div class="ngs-note">'+d.noResult+' saved game(s) never went final and are excluded.</div>':'');
+  });
+  b.innerHTML=h;
+};
+window.loadNhlSimRecord=function(){
+  var b=$('nhlGsimRecBody');if(b)b.innerHTML='<p class="ngs-note">Grading finished games and loading the Sim Record...</p>';
+  fetch('/api/nhl/game-sim/record',{credentials:'include'})
+   .then(function(r){return r.json().catch(function(){return {};}).then(function(j){if(!r.ok)throw new Error(j.detail||('HTTP '+r.status));return j;});})
+   .then(function(j){S.rec=j;window._nhlGsimRecRender();})
+   .catch(function(e){if(b)b.innerHTML='<p class="ngs-note" style="color:#f87171">Could not load Sim Record: '+esc(e.message||'request failed')+'</p>';});
+};
+window.openNhlSimRecord=function(){
+  var s=$('nhl-gsim-record-section');if(!s)return;s.style.display='block';
+  var di=$('nhlGsimRecDate');if(di&&!di.value)di.value=today();
+  s.scrollIntoView({behavior:'smooth',block:'start'});window.loadNhlSimRecord();
+};
+})();
+</script>
+"""
+
 @app.get("/api/gp-record")
 async def nhl_gp_record(grade: bool = False, date_str: str = ""):
     """Standalone, read-only NHL Game Predictor record."""
@@ -16534,7 +17457,7 @@ def _render_dashboard_shell(is_admin: bool) -> str:
     """Render the member page without allowing a template error to become 500."""
     try:
         page = HTML.replace("</head>", _NHL_TEAM_STATS_UI + "</head>", 1)
-        page = page.replace("</body>", _NHL_DAY_REPORT_UI + "</body>", 1)
+        page = page.replace("</body>", _NHL_DAY_REPORT_UI + _NHL_GSIM_UI + "</body>", 1)
         if not isinstance(page, str) or not page.strip():
             raise RuntimeError("NHL dashboard HTML is empty or invalid")
         js_flag = "true" if is_admin else "false"
