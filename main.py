@@ -7829,6 +7829,12 @@ document.addEventListener('keydown',function(e){
 .nhl-cat-chips{margin-bottom:12px}
 .nhl-cat-chip.nhl-cat-on{border-color:#f59e0b;background:#1f1a10;box-shadow:0 0 0 1px rgba(245,158,11,.45)}
 .nhl-cat-side{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 18px}
+.nhl-cat-tools{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 18px}
+.nhl-cat-tools .nhl-cat-side{margin:0}
+.nhl-lookup-slot{margin-left:auto;flex:0 1 520px;min-width:0}
+.nhl-lookup-slot .nhl-toolbar{margin:0}
+.nhl-lookup-slot .nhl-lookup{width:100%}
+@media(max-width:620px){.nhl-lookup-slot{flex-basis:100%}}
 .nhl-cat-side>span{font-size:.62rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.1em;font-weight:800;margin-right:4px}
 .nhl-cat-side button{background:#1e293b;border:1px solid #475569;color:#cbd5e1;border-radius:8px;padding:6px 12px;font-size:.72rem;font-weight:800;cursor:pointer}
 .nhl-cat-side button.on{background:#92400e;border-color:#fbbf24;color:#fff}
@@ -11721,7 +11727,7 @@ function renderResults(d){
   var _preseason=!!d.preseason;
   var _liveSystem=String(d.system||'A').toUpperCase();
   var _liveLabel={A:'A · NEW',B:'B · OLD',C:'C · SELECTIVE',D:'D · TOP PLAYERS'}[_liveSystem]||'A · NEW';
-  document.getElementById('out').innerHTML = (_preseason?'<div style="margin:0 0 12px;padding:11px 14px;border:1px solid rgba(251,191,36,.55);background:rgba(120,53,15,.22);border-radius:10px;color:#fde68a;font-size:.75rem;font-weight:900;letter-spacing:.04em">PRESEASON · TUNING / VIEW-ONLY · OFFICIAL RECORDS NOT WRITTEN</div>':'')+'<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
+  document.getElementById('out').innerHTML = (_preseason?'<div style="margin:0 0 12px;padding:11px 14px;border:1px solid rgba(251,191,36,.55);background:rgba(120,53,15,.22);border-radius:10px;color:#fde68a;font-size:.75rem;font-weight:900;letter-spacing:.04em">PRESEASON · TUNING / VIEW-ONLY · OFFICIAL RECORDS NOT WRITTEN</div>':'')+'<div class="nhl-toolbar" id="nhlToolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
   if(window.IS_ADMIN){
     var loadedSystem=String(d.system||window.NHL_HIST_SYSTEM||'A').toUpperCase();
     if(['A','B','C','D'].indexOf(loadedSystem)>=0)window.NHL_FRANK_SYSTEM=loadedSystem;
@@ -11835,10 +11841,11 @@ function _nhlCatBoard(d,html,hcCount){
     h+='<div class="chip nhl-jump-chip nhl-cat-chip" data-cat="'+c[0]+'" onclick="_nhlCatPick(&#39;'+c[0]+'&#39;)" role="button" tabindex="0"><div class="val">'+counts[c[0]]+'</div><div class="lbl">'+c[1]+'</div></div>';
   });
   h+='<div class="chip nhl-jump-chip" onclick="_nhlPanOpen(&#39;hc&#39;)" role="button" tabindex="0" title="Open Hot and Cold Players"><div class="val">'+hcCount+'</div><div class="lbl">Hot/Cold</div></div>';
-  h+='</div><div class="nhl-cat-side" id="nhlCatSide"><span>Show</span>'
+  h+='</div><div class="nhl-cat-tools"><div class="nhl-cat-side" id="nhlCatSide"><span>Show</span>'
     +'<button type="button" data-side="ALL" onclick="_nhlCatSide(&#39;ALL&#39;)">Over + Under</button>'
     +'<button type="button" data-side="OVER" onclick="_nhlCatSide(&#39;OVER&#39;)">Over Top 10</button>'
-    +'<button type="button" data-side="UNDER" onclick="_nhlCatSide(&#39;UNDER&#39;)">Under Top 10</button></div>';
+    +'<button type="button" data-side="UNDER" onclick="_nhlCatSide(&#39;UNDER&#39;)">Under Top 10</button></div>'
+    +'<div id="nhlLookupSlot" class="nhl-lookup-slot"></div></div>';
   _NHL_CATS.forEach(function(c){
     var inner=html[c[0]]||'';
     if(inner.indexOf('class="sec"')<0&&inner.indexOf('no-picks')<0)inner+='<div class="no-picks">No qualifying '+c[1]+' plays on this board.</div>';
@@ -12192,7 +12199,17 @@ function _nhlPaint(q){
     +_nhlPanWrap('top30',_panTop30)+_nhlPanWrap('outside',_panOutside)+_nhlPanWrap('team',_panTeam)
     +_nhlPanWrap('funnel',_panFunnel);
 
-  document.getElementById('nhlBody').innerHTML = h;
+  // Player lookup lives outside #nhlBody (keeps typing focus) and is docked under the category chips.
+  var _tb=document.getElementById('nhlToolbar'),_tbIn=document.getElementById('nhlSearch');
+  var _tbFocus=!!(_tbIn&&document.activeElement===_tbIn),_tbSel=_tbFocus?[_tbIn.selectionStart,_tbIn.selectionEnd]:null;
+  var _nb=document.getElementById('nhlBody');
+  if(_tb&&_nb&&_nb.contains(_tb))_nb.parentNode.insertBefore(_tb,_nb);
+  _nb.innerHTML = h;
+  var _slot=document.getElementById('nhlLookupSlot');
+  if(_tb&&_slot){
+    _slot.appendChild(_tb);
+    if(_tbFocus&&_tbIn){try{_tbIn.focus();if(_tbSel)_tbIn.setSelectionRange(_tbSel[0],_tbSel[1]);}catch(e){}}
+  }
   nhlTeamStatsMount(raw);
   _nhlHcBind();
   _nhlCatApply();
