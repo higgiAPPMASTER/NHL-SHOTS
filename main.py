@@ -7465,7 +7465,14 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
     <div class="nhl-menu">
       <button type="button" class="nhl-nav-btn menu" aria-haspopup="true" aria-expanded="false" id="nhlNavMenuBtn" onclick="_nhlNavToggle(event)">☰ Records &amp; Tools ▾</button>
       <div class="nhl-menu-list" id="nhlNavMenu" role="menu">
-        <div class="nhl-menu-head" role="presentation">&#128202; Records</div>
+        <div class="nhl-menu-head" role="presentation" style="color:#7dd3fc">&#127954; Boards</div>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#f59e0b" onclick="_nhlNavGo(function(){_nhlPanOpen('locks');})">🔒 80–100% Locks</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(function(){_nhlPanOpen('gp');})">🔮 Game Predictor</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#ea580c" onclick="_nhlNavGo(function(){_nhlPanOpen('hc');})">🔥 Hot and Cold Players</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(function(){_nhlPanOpen('top30');})">🏒 Top 30 PPG vs Team</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#9f1239" onclick="_nhlNavGo(function(){_nhlPanOpen('outside');})">🏒 Outside Top 30 PPG vs Team</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#2563eb" onclick="_nhlNavGo(function(){_nhlPanOpen('team');})">📊 Team Rankings</button>
+        <div class="nhl-menu-head tools" role="presentation" style="color:#fbbf24">&#128202; Records</div>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlGPRecord)">🔮 GP Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlSimRecord)">🎲 Sim Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#047857" onclick="_nhlNavGo(openNhlTrackRecord)">📊 Track Record</button>
@@ -7475,13 +7482,6 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(function(){openNhlTop30Record('top30');})">🏒 Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#9f1239" onclick="_nhlNavGo(function(){openNhlTop30Record('outside');})">🏒 Outside Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#1d4ed8" onclick="_nhlNavGo(toggleNhlHistoricalAnalysis)">📚 Historical Analysis</button>
-        <div class="nhl-menu-head tools" role="presentation">&#127954; Boards</div>
-        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#f59e0b" onclick="_nhlNavGo(function(){_nhlPanOpen('locks');})">🔒 80–100% Locks</button>
-        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(function(){_nhlPanOpen('gp');})">🔮 Game Predictor</button>
-        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#ea580c" onclick="_nhlNavGo(function(){_nhlPanOpen('hc');})">🔥 Hot and Cold Players</button>
-        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(function(){_nhlPanOpen('top30');})">🏒 Top 30 PPG vs Team</button>
-        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#9f1239" onclick="_nhlNavGo(function(){_nhlPanOpen('outside');})">🏒 Outside Top 30 PPG vs Team</button>
-        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#2563eb" onclick="_nhlNavGo(function(){_nhlPanOpen('team');})">📊 Team Rankings</button>
         <div class="nhl-menu-head tools" role="presentation">&#128736;&#65039; Tools</div>
         <button type="button" role="menuitem" class="nhl-menu-item admin-only" style="--c:#d97706" onclick="_nhlNavGo(openNhlParlay)">🎰 Auto Parlay Builder</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openFrankParlay)">🧠 Edge Coach Parlay Builder</button>
