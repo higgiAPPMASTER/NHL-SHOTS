@@ -7470,6 +7470,7 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlSimRecord)">🎲 Sim Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#047857" onclick="_nhlNavGo(openNhlTrackRecord)">📊 Track Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#b45309" onclick="_nhlNavGo(openNhlOverflowRecord)">⭐ NHL Overflow</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlCoachRecord)">🧠 Edge Coach Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlDayReport)">📅 By Day / Category</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(function(){openNhlTop30Record('top30');})">🏒 Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#9f1239" onclick="_nhlNavGo(function(){openNhlTop30Record('outside');})">🏒 Outside Top 30 Record</button>
@@ -7502,7 +7503,7 @@ function _nhlNavGo(fn){
   var m=document.getElementById('nhlNavMenu'),b=document.getElementById('nhlNavMenuBtn');
   if(m)m.classList.remove('open');
   if(b)b.setAttribute('aria-expanded','false');
-  if(typeof fn==='function'){if(typeof _nhlPanClose==='function')_nhlPanClose();fn();}
+  if(typeof fn==='function'){if(typeof _nhlPanClose==='function')_nhlPanClose();if(typeof _nhlRecClose==='function')_nhlRecClose();fn();}
 }
 document.addEventListener('click',function(e){
   var m=document.getElementById('nhlNavMenu');
@@ -7631,6 +7632,10 @@ body[data-nhl-pan="locks"] .nhl-pan[data-pan="locks"],body[data-nhl-pan="gp"] .n
 .nhl-pan-title{color:#f8fafc;font-weight:900;font-size:1rem;letter-spacing:.02em}
 .nhl-pan-close{background:#7f1d1d;border:1px solid #f87171;color:#fff;border-radius:8px;padding:7px 14px;font-weight:900;font-size:.78rem;cursor:pointer}
 .nhl-pan-inner{max-width:1300px;margin:0 auto}
+.nhl-rec-open{position:fixed !important;top:80px;left:0;right:0;bottom:0;z-index:96;overflow-y:auto;background:rgba(5,5,5,.97);max-width:none !important;margin:0 !important;padding:12px 16px 40px !important;box-sizing:border-box}
+.nhl-rec-open>*{max-width:960px;margin-left:auto !important;margin-right:auto !important}
+.nhl-rec-bar{display:none}
+.nhl-rec-open>.nhl-rec-bar{display:flex;justify-content:flex-end;position:sticky;top:0;z-index:5;padding:4px 0 10px;background:rgba(5,5,5,.97)}
 .nhl-jump-chip{cursor:pointer;transition:transform .15s ease,border-color .15s ease,background .15s ease}
 .nhl-jump-chip:hover{transform:translateY(-2px);border-color:#f59e0b;background:#1d1d1d}
 .nhl-game-jump{cursor:pointer;transition:border-color .15s ease,transform .15s ease}
@@ -7822,7 +7827,7 @@ body.is-admin .frank-ai-systems{display:flex!important}
   <div class="card" style="padding:20px 22px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
       <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#128176; My Bets</h2>
-      <button onclick="document.getElementById(&#39;nhl-mybets-card&#39;).style.display=&#39;none&#39;" style="background:#1e293b;border:none;color:#94a3b8;border-radius:8px;padding:8px 11px;font-size:.9rem;cursor:pointer">&#215;</button>
+      <button onclick="_nhlRecClose()" style="background:#1e293b;border:none;color:#94a3b8;border-radius:8px;padding:8px 11px;font-size:.9rem;cursor:pointer">&#215;</button>
     </div>
     <div id="nhl-mybets-body"><p style="color:#94a3b8;font-size:.85rem">Loading&#8230;</p></div>
   </div>
@@ -11487,6 +11492,7 @@ function _nhlPanWrap(key,inner){
 function _nhlPanOpen(key){
   var el=document.querySelector('.nhl-pan[data-pan="'+key+'"]');
   if(!el){_nhlBetToast('Load the NHL picks first, then open this from the menu.');return;}
+  if(typeof _nhlRecClose==='function')_nhlRecClose();
   document.body.setAttribute('data-nhl-pan',key);
   el.scrollTop=0;
 }
@@ -11949,13 +11955,13 @@ async function _nhlSaveBet(){
     document.getElementById('nhl-bet-modal').style.display='none';
     _nhlBetToast('\u2705 Bet logged');
     var mb=document.getElementById('nhl-mybets-card');
-    if(mb&&mb.style.display!=='none') openNhlMyBets(false);
+    if(mb&&mb.classList.contains('nhl-rec-open')) openNhlMyBets(false);
   }catch(e){msg.textContent=(e.message||'Save failed');btn.disabled=false;btn.textContent='Log Bet';}
 }
 async function openNhlMyBets(scroll){
   var card=document.getElementById('nhl-mybets-card');if(!card) return;
-  card.style.display='block';
-  if(scroll!==false) card.scrollIntoView({behavior:'smooth',block:'start'});
+  if(scroll!==false) _nhlRecOpen('nhl-mybets-card');
+  else if(!card.classList.contains('nhl-rec-open')) return;
   document.getElementById('nhl-mybets-body').innerHTML='<p style="color:#94a3b8;font-size:.85rem">Loading\u2026</p>';
   try{
     var res=await fetch('/api/bets'+_nhlBetAuthQS());
@@ -12097,12 +12103,9 @@ function _nhlOvfDayName(){
 function toggleNhlHistoricalAnalysis(){
   var section=document.getElementById('nhl-historical-analysis-section');
   if(!section)return;
-  var opening=section.style.display==='none'||!section.style.display;
-  section.style.display=opening?'block':'none';
-  if(opening){
-    section.scrollIntoView({behavior:'smooth',block:'start'});
-    if(!window._nhlHistoricalAnalysisLoaded)loadNhlHistoricalAnalysis();
-  }
+  if(section.classList.contains('nhl-rec-open')){_nhlRecClose();return;}
+  _nhlRecOpen('nhl-historical-analysis-section');
+  if(!window._nhlHistoricalAnalysisLoaded)loadNhlHistoricalAnalysis();
 }
 function _nhlRecordDateChanged(sourceId){
   var source=document.getElementById(sourceId);
@@ -12113,16 +12116,46 @@ function _nhlRecordDateChanged(sourceId){
   renderNhlTrackDay();renderNhlOverflowDay();
 }
 function openNhlOverflowRecord(){
-  var section=document.getElementById('nhl-overflow-section');
-  if(section)section.scrollIntoView({behavior:'smooth',block:'start'});
+  _nhlRecOpen('nhl-overflow-section');
   if(_nhlTrkData)renderNhlOverflowDay();
   else loadNhlTrackRecord();
 }
 function openNhlTrackRecord(){
-  var section=document.getElementById('nhl-track-section');
-  if(section)section.scrollIntoView({behavior:'smooth',block:'start'});
+  _nhlRecOpen('nhl-track-section');
   if(!_nhlTrkData)loadNhlTrackRecord();
 }
+function openNhlCoachRecord(){
+  _nhlRecOpen('nhl-coach-track-section');
+  var d=document.getElementById('nhlCoachTrkDate');
+  if(!_nhlCoachTrackData&&d&&d.value)loadNhlCoachTrack();
+}
+// Records and tools open as closable overlays from the top-right menu,
+// never inline on the main page. Only one is open at a time.
+var _NHL_REC_IDS=['nhl-track-section','nhl-overflow-section','nhl-coach-track-section','nhl-historical-analysis-section','nhl-gp-record-section','nhl-gsim-section','nhl-gsim-record-section','nhl-day-section','nhl-mybets-card'];
+function _nhlRecOpen(id){
+  var el=document.getElementById(id);if(!el)return null;
+  if(typeof _nhlPanClose==='function')_nhlPanClose();
+  _NHL_REC_IDS.forEach(function(o){if(o!==id){var x=document.getElementById(o);if(x&&x.classList.contains('nhl-rec-open')){x.classList.remove('nhl-rec-open');x.style.display='none';}}});
+  if(!el.querySelector(':scope > .nhl-rec-bar')){
+    var bar=document.createElement('div');bar.className='nhl-rec-bar';
+    bar.innerHTML='<button type="button" class="nhl-pan-close" onclick="_nhlRecClose()" aria-label="Close">&#10005; Close</button>';
+    el.insertBefore(bar,el.firstChild);
+  }
+  el.style.display='block';el.classList.add('nhl-rec-open');el.scrollTop=0;
+  document.body.setAttribute('data-nhl-rec',id);
+  return el;
+}
+function _nhlRecClose(){
+  _NHL_REC_IDS.forEach(function(o){var x=document.getElementById(o);if(x&&x.classList.contains('nhl-rec-open')){x.classList.remove('nhl-rec-open');x.style.display='none';}});
+  document.body.removeAttribute('data-nhl-rec');
+}
+document.addEventListener('keydown',function(e){
+  if(e.key!=='Escape'||!document.body.getAttribute('data-nhl-rec'))return;
+  if(document.getElementById('nhlLadOv')||document.getElementById('nts-ov'))return;
+  var t=document.getElementById('nhlTop30RecModal');if(t&&t.style.display!=='none')return;
+  var bm=document.getElementById('nhl-bet-modal');if(bm&&bm.style.display&&bm.style.display!=='none')return;
+  _nhlRecClose();
+});
 function _nhlTrackSystemLabel(system){
   return system==='B'?'B · OLD':system==='C'?'C · SELECTIVE':system==='D'?'D · TOP PLAYERS':'A · NEW';
 }
@@ -12718,8 +12751,7 @@ async function _nhlGpLoad(manual){
   }catch(e){if(body)body.innerHTML='<p style="color:#f87171;padding:18px">Could not load GP Record: '+(e.message||'request failed')+'</p>';}
 }
 function openNhlGPRecord(){
-  var sec=document.getElementById('nhl-gp-record-section');if(!sec)return;
-  sec.style.display='block';sec.scrollIntoView({behavior:'smooth',block:'start'});
+  var sec=_nhlRecOpen('nhl-gp-record-section');if(!sec)return;
   if(_nhlGpRecordData)_nhlGpRender();else _nhlGpLoad(false);
 }
 // ── Saved NHL Historical Analysis (never official) ───────────────────────────
@@ -13004,15 +13036,15 @@ function renderNhlCoachTrack(){
   <div class="card" style="padding:20px 22px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px;flex-wrap:wrap">
       <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#128302; NHL Game Predictor Record</h2>
-      <button onclick="document.getElementById('nhl-gp-record-section').style.display='none'" style="background:#1e293b;border:none;color:#94a3b8;border-radius:8px;padding:7px 11px;font-size:.9rem;cursor:pointer">&#215;</button>
+      <button onclick="_nhlRecClose()" style="background:#1e293b;border:none;color:#94a3b8;border-radius:8px;padding:7px 11px;font-size:.9rem;cursor:pointer">&#215;</button>
     </div>
     <p style="color:#64748b;font-size:.74rem;margin:0 0 14px">Permanent pre-game model accuracy. Team winner and projected total are tracked separately; no stake or ROI accounting.</p>
     <div id="nhlGpRecordHead"></div>
     <div id="nhlGpRecordBody"><p style="color:#94a3b8;padding:18px">Open GP Record to load results.</p></div>
   </div>
 </div>
-<!-- NHL Track Record — always visible below picks -->
-<div id="nhl-track-section" style="max-width:960px;margin:0 auto 0;padding:0 16px 40px">
+<!-- NHL Track Record — opens from the top-right menu -->
+<div id="nhl-track-section" style="display:none;max-width:960px;margin:0 auto 0;padding:0 16px 40px">
   <div class="card" style="padding:20px 22px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#127942; NHL Track Record</h2>
@@ -13039,7 +13071,7 @@ function renderNhlCoachTrack(){
   </div>
 </div>
 <!-- NHL Edge Coach Track Record -->
-<div id="nhl-coach-track-section" style="max-width:960px;margin:0 auto 0;padding:0 16px 40px">
+<div id="nhl-coach-track-section" style="display:none;max-width:960px;margin:0 auto 0;padding:0 16px 40px">
   <div class="card" style="padding:20px 22px;border-color:rgba(139,92,246,.35)">
     <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;color:#fff;margin:0 0 6px">NHL Edge Coach Track Record</h2>
     <p style="color:#94a3b8;font-size:.74rem;margin:0 0 14px">Detailed Coach results by System A/B/C/D. Historical W/L remains isolated from the official record and does not require odds.</p>
@@ -13101,7 +13133,7 @@ function renderNhlCoachTrack(){
   </div>
 </div>
 <!-- NHL Overflow Track Record — ranks 11-20 only -->
-<div id="nhl-overflow-section" style="max-width:960px;margin:0 auto 0;padding:0 16px 40px">
+<div id="nhl-overflow-section" style="display:none;max-width:960px;margin:0 auto 0;padding:0 16px 40px">
   <div class="card" style="padding:20px 22px;border-color:rgba(245,158,11,.28)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px;flex-wrap:wrap">
       <h2 style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:#fff">&#11088; NHL Overflow Track Record</h2>
@@ -16062,7 +16094,7 @@ _NHL_GSIM_UI = r"""
 <div class="ngs-card">
   <div class="ngs-row" style="justify-content:space-between">
     <h2>&#127922; NHL 10K Game Simulator</h2>
-    <button type="button" class="ngs-btn" onclick="document.getElementById('nhl-gsim-section').style.display='none'">Close</button>
+    <button type="button" class="ngs-btn" onclick="_nhlRecClose()">Close</button>
   </div>
   <p class="ngs-note">Plays every game 10,000 times: goals for each team around opponent-adjusted home/road scoring, last-10 form, back-to-backs and posted starting goalies, with late empty-net goals, 3-on-3 overtime and shootouts. Gives moneyline, puck line and total calls. Separate from the Game Predictor; its pregame calls go to their own Sim Record.</p>
   <div class="ngs-row">
@@ -16077,7 +16109,7 @@ _NHL_GSIM_UI = r"""
 <div class="ngs-card">
   <div class="ngs-row" style="justify-content:space-between">
     <h2>&#127922; NHL Sim Record</h2>
-    <button type="button" class="ngs-btn" onclick="document.getElementById('nhl-gsim-record-section').style.display='none'">Close</button>
+    <button type="button" class="ngs-btn" onclick="_nhlRecClose()">Close</button>
   </div>
   <p class="ngs-note">Pregame simulator calls saved before puck drop and graded after finals. Profit uses only the genuine saved sportsbook price for each call; calls without a price count in W/L only. Preseason games and dates simulated after the fact are never tracked.</p>
   <div class="ngs-row">
@@ -16159,9 +16191,8 @@ window.runNhlGameSim=function(){
    .then(function(){S.busy=false;btn.disabled=false;btn.innerHTML='&#127922; Run Sims';});
 };
 window.openNhlGameSim=function(){
-  var s=$('nhl-gsim-section');if(!s)return;s.style.display='block';
+  var s=_nhlRecOpen('nhl-gsim-section');if(!s)return;
   var dp=$('datePicker'),di=$('nhlGsimDate');if(di&&!di.value)di.value=(dp&&dp.value)||today();
-  s.scrollIntoView({behavior:'smooth',block:'start'});
 };
 function inPeriod(ds,per,anchor){
   if(per==='all')return true;if(per==='today')return ds===anchor;
@@ -16202,9 +16233,9 @@ window.loadNhlSimRecord=function(){
    .catch(function(e){if(b)b.innerHTML='<p class="ngs-note" style="color:#f87171">Could not load Sim Record: '+esc(e.message||'request failed')+'</p>';});
 };
 window.openNhlSimRecord=function(){
-  var s=$('nhl-gsim-record-section');if(!s)return;s.style.display='block';
+  var s=_nhlRecOpen('nhl-gsim-record-section');if(!s)return;
   var di=$('nhlGsimRecDate');if(di&&!di.value)di.value=today();
-  s.scrollIntoView({behavior:'smooth',block:'start'});window.loadNhlSimRecord();
+  window.loadNhlSimRecord();
 };
 })();
 </script>
@@ -17390,7 +17421,7 @@ _NHL_DAY_REPORT_UI = r"""
 <div class="card ndr-card">
   <div class="ndr-row" style="justify-content:space-between">
     <h2>NHL By Day / Category</h2>
-    <button type="button" onclick="document.getElementById('nhl-day-section').style.display='none'" aria-label="Close By Day report">Close</button>
+    <button type="button" onclick="_nhlRecClose()" aria-label="Close By Day report">Close</button>
   </div>
   <p class="ndr-note">Weekday results by category from saved official picks only. This report never determines picks, changes models, rankings or thresholds, or starts grading. P/L is simulated using genuine saved odds, not actual betting payouts.</p>
   <div class="ndr-row" role="group" aria-label="System">
@@ -17560,8 +17591,7 @@ window.loadNhlDayReport=function(force){
     });
 };
 window.openNhlDayReport=function(){
-  var s=$('nhl-day-section');if(!s)return;s.style.display='block';paint();
-  s.scrollIntoView({behavior:'smooth',block:'start'});
+  var s=_nhlRecOpen('nhl-day-section');if(!s)return;paint();
   if(!S.loaded||Date.now()-S.loadedAt>60000)window.loadNhlDayReport(true);
 };
 function csvCell(v){var t=String(v==null?'':v);if(/^[=+@-]/.test(t)&&isNaN(Number(t)))t="'"+t;return '"'+t.split('"').join('""')+'"';}
