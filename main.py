@@ -1394,8 +1394,8 @@ async def _nhl_top30_ppg_build(target_date: str) -> dict:
                 row["last5_form"] = {"available": False, "games": 0, "badge": None}
 
         async def outside_top30():
-            # Display-only: every other rostered skater with a game today and
-            # a career regular-season average of at least 1.00 PPG vs that opponent.
+            # Every other rostered skater with a game today, a career regular-season
+            # average of at least 1.00 PPG vs that opponent, and 2+ career games vs it.
             leader_ids = {int(l.get("id")) for l in leaders if l.get("id")}
 
             async def roster(team):
@@ -1426,7 +1426,8 @@ async def _nhl_top30_ppg_build(target_date: str) -> dict:
                 for i in range(0, len(players), 25):
                     batches.append((opp, players[i:i + 25]))
             results = await asyncio.gather(*(career_group(o, b) for o, b in batches))
-            found = [row for group, _ in results for row in group]
+            found = [row for group, _ in results for row in group
+                     if int(row.get("career_games") or 0) >= _NHL_OUTSIDE_TOP30_MIN_GP]
             missing = sorted({o for _, o in results if o} | {
                 matchups[t]["opponent"] for t in failed})
             if found:
@@ -1462,6 +1463,9 @@ async def _nhl_top30_ppg_build(target_date: str) -> dict:
         }
 
 
+_NHL_OUTSIDE_TOP30_MIN_GP = 2  # Outside Top 30 only; Top 30 keeps any sample.
+
+
 @app.get("/api/nhl/top30-ppg-vs-team")
 async def nhl_top30_ppg_vs_team(
         request: Request, date_str: str = "", token: str = "",
@@ -1472,7 +1476,7 @@ async def nhl_top30_ppg_vs_team(
     ds = date_str or _nhl_record_today()
     if ds != _nhl_record_today():
         raise HTTPException(status_code=400, detail="This daily category is available for today only")
-    key = ("top30-career-ppg-v4", ds, get_season_for_date(date.fromisoformat(ds)))
+    key = ("top30-career-ppg-v5", ds, get_season_for_date(date.fromisoformat(ds)))
     cached = _nhl_display_cached(key)
     if cached is not None and not refresh:
         return JSONResponse(cached, headers={"Cache-Control": "no-store"})
@@ -6865,20 +6869,6 @@ async def run_picks(
         "scheduleContext": schedule_context,
         "unpriced": bool(unpriced_mode and not simulate),
     }
-    if not simulate and any(
-        p.get("realLine") is None
-        for group in (
-            picks, shot_unders, pts_all, pts_unders, pp_all, pp_unders,
-            pm_all, pm_unders,
-            ast_all, ast_unders, goal_all, goal_unders_all,
-            saves_all, saves_unders)
-        for p in group
-    ):
-        _result["data_note"] = (
-            "MODEL-ONLY picks without a US/Canada book line use the shown "
-            "threshold for accuracy, not a sportsbook wager or profit/ROI. "
-            "ROSTER — UNCONFIRMED means the player may not dress today."
-        )
     if d_mode and not simulate:
         _result["data_note"] = (
             "System D pilot: published Daily Faceoff forward lines 1–2 and "
@@ -7484,6 +7474,13 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(function(){openNhlTop30Record('top30');})">🏒 Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#9f1239" onclick="_nhlNavGo(function(){openNhlTop30Record('outside');})">🏒 Outside Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#1d4ed8" onclick="_nhlNavGo(toggleNhlHistoricalAnalysis)">📚 Historical Analysis</button>
+        <div class="nhl-menu-head tools" role="presentation">&#127954; Boards</div>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#f59e0b" onclick="_nhlNavGo(function(){_nhlPanOpen('locks');})">🔒 80–100% Locks</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(function(){_nhlPanOpen('gp');})">🔮 Game Predictor</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#ea580c" onclick="_nhlNavGo(function(){_nhlPanOpen('hc');})">🔥 Hot and Cold Players</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(function(){_nhlPanOpen('top30');})">🏒 Top 30 PPG vs Team</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#9f1239" onclick="_nhlNavGo(function(){_nhlPanOpen('outside');})">🏒 Outside Top 30 PPG vs Team</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#2563eb" onclick="_nhlNavGo(function(){_nhlPanOpen('team');})">📊 Team Rankings</button>
         <div class="nhl-menu-head tools" role="presentation">&#128736;&#65039; Tools</div>
         <button type="button" role="menuitem" class="nhl-menu-item admin-only" style="--c:#d97706" onclick="_nhlNavGo(openNhlParlay)">🎰 Auto Parlay Builder</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openFrankParlay)">🧠 Edge Coach Parlay Builder</button>
@@ -7505,7 +7502,7 @@ function _nhlNavGo(fn){
   var m=document.getElementById('nhlNavMenu'),b=document.getElementById('nhlNavMenuBtn');
   if(m)m.classList.remove('open');
   if(b)b.setAttribute('aria-expanded','false');
-  if(typeof fn==='function')fn();
+  if(typeof fn==='function'){if(typeof _nhlPanClose==='function')_nhlPanClose();fn();}
 }
 document.addEventListener('click',function(e){
   var m=document.getElementById('nhlNavMenu');
@@ -7520,11 +7517,11 @@ function _frankTab(btn){
 function _frankShowEsc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function _frankShowing(what){
   var el=document.getElementById('frankShowing');if(!el)return;
-  var sideBtn=document.querySelector('#frankAiCard .frank-ai-side-btn.active');
+  var sideBtn=document.querySelector('#frankAiCard .frank-ai-side-btn.active:not(.frank-ai-pos-btn)');
   var g=document.getElementById('frankAiGame');
   var side=sideBtn?sideBtn.textContent.trim():'All';
   var game=g&&g.value&&g.selectedIndex>=0?g.options[g.selectedIndex].text:'All games';
-  el.innerHTML='Showing: <b>'+_frankShowEsc(what)+'</b> · Side: '+_frankShowEsc(side)+' · '+_frankShowEsc(game);
+  el.innerHTML='Showing: <b>'+_frankShowEsc(what)+'</b> · Side: '+_frankShowEsc(side)+' · '+_frankShowEsc(_frankPosLabel())+' · '+_frankShowEsc(game);
   el.hidden=false;
 }
 document.addEventListener('click',function(e){
@@ -7621,6 +7618,19 @@ document.addEventListener('keydown',function(e){
 .nhl-trk-result.push{color:#fde68a;background:rgba(234,179,8,.14);border:1px solid rgba(250,204,21,.32)}
 .nhl-trk-result.void,.nhl-trk-result.pending{color:#cbd5e1;background:rgba(100,116,139,.14);border:1px solid rgba(148,163,184,.24)}
  @media(max-width:680px){.nhl-trk-group-head{padding:11px 12px}.nhl-trk-group-name{font-size:.86rem}.nhl-trk-tbl{font-size:.72rem}.nhl-trk-tbl th{font-size:.58rem;padding:8px 6px}.nhl-trk-tbl td{padding:8px 6px}.nhl-trk-note{max-width:150px;font-size:.62rem!important}}
+.nhl-cat-chips{margin-bottom:12px}
+.nhl-cat-chip.nhl-cat-on{border-color:#f59e0b;background:#1f1a10;box-shadow:0 0 0 1px rgba(245,158,11,.45)}
+.nhl-cat-side{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 18px}
+.nhl-cat-side>span{font-size:.62rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.1em;font-weight:800;margin-right:4px}
+.nhl-cat-side button{background:#1e293b;border:1px solid #475569;color:#cbd5e1;border-radius:8px;padding:6px 12px;font-size:.72rem;font-weight:800;cursor:pointer}
+.nhl-cat-side button.on{background:#92400e;border-color:#fbbf24;color:#fff}
+#nhlCatBoard [hidden]{display:none !important}
+.nhl-pan{display:none}
+body[data-nhl-pan="locks"] .nhl-pan[data-pan="locks"],body[data-nhl-pan="gp"] .nhl-pan[data-pan="gp"],body[data-nhl-pan="hc"] .nhl-pan[data-pan="hc"],body[data-nhl-pan="top30"] .nhl-pan[data-pan="top30"],body[data-nhl-pan="outside"] .nhl-pan[data-pan="outside"],body[data-nhl-pan="team"] .nhl-pan[data-pan="team"]{display:block;position:fixed;top:80px;left:0;right:0;bottom:0;z-index:95;overflow-y:auto;background:rgba(5,5,5,.97);padding:12px 16px 40px;box-sizing:border-box}
+.nhl-pan-bar{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:10px;max-width:1300px;margin:0 auto 10px;padding:6px 0 10px;background:rgba(5,5,5,.97);border-bottom:1px solid #262626}
+.nhl-pan-title{color:#f8fafc;font-weight:900;font-size:1rem;letter-spacing:.02em}
+.nhl-pan-close{background:#7f1d1d;border:1px solid #f87171;color:#fff;border-radius:8px;padding:7px 14px;font-weight:900;font-size:.78rem;cursor:pointer}
+.nhl-pan-inner{max-width:1300px;margin:0 auto}
 .nhl-jump-chip{cursor:pointer;transition:transform .15s ease,border-color .15s ease,background .15s ease}
 .nhl-jump-chip:hover{transform:translateY(-2px);border-color:#f59e0b;background:#1d1d1d}
 .nhl-game-jump{cursor:pointer;transition:border-color .15s ease,transform .15s ease}
@@ -7898,6 +7908,9 @@ function _nhlTogglePastDates(force){
 </script>
   </div>
 
+  <div class="status-msg" id="statusMsg"></div>
+  <div id="out"></div>
+
   <div class="card frank-ai-card ncx" id="frankAiCard">
     <div class="frank-ai-head">
       <div class="ncx-badge">&#127954;</div>
@@ -7976,6 +7989,13 @@ function _nhlTogglePastDates(force){
         <button type="button" id="frankSideUnder" class="frank-ai-side-btn" aria-pressed="false" onclick="_frankSetSide('UNDER')">Under</button>
       </div>
       </div>
+      <div class="frank-f"><span>Players</span>
+      <div role="group" aria-label="Edge Coach player position" class="ncx-seg">
+        <button type="button" id="frankPosAll" class="frank-ai-side-btn frank-ai-pos-btn active" aria-pressed="true" onclick="_frankSetPos('')">All</button>
+        <button type="button" id="frankPosF" class="frank-ai-side-btn frank-ai-pos-btn" aria-pressed="false" onclick="_frankSetPos('F')">Forwards</button>
+        <button type="button" id="frankPosD" class="frank-ai-side-btn frank-ai-pos-btn" aria-pressed="false" onclick="_frankSetPos('D')">DEF</button>
+      </div>
+      </div>
       <label class="frank-f"><span>Game</span>
         <select id="frankAiGame" class="ncx-select" onchange="_frankCategoryChanged()">
           <option value="">All games · load a board to choose</option>
@@ -7989,7 +8009,7 @@ function _nhlTogglePastDates(force){
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
     <details class="frank-how"><summary>&#9432; How it works</summary>
-      <div class="frank-ai-note">Choose category, side and game, then Generate Picks. Also applies to presets, Analyze, and Best Alt-Line Hit Rate. Only Coach Edge, Safest Bets, Top 3, Best Overs and Best Unders require positive edge and genuine prices. All other standard categories show the loaded app picks in their original order, including negative-edge and unpriced model picks. Existing category limits and sides stay unchanged.</div>
+      <div class="frank-ai-note">Choose category, side, players (All / Forwards / DEF) and game, then Generate Picks. Also applies to presets, Analyze, and Best Alt-Line Hit Rate. Only Coach Edge, Safest Bets, Top 3, Best Overs and Best Unders require positive edge and genuine prices. All other standard categories show the loaded app picks in their original order, including negative-edge and unpriced model picks. Existing category limits and sides stay unchanged.</div>
     </details>
     <div id="frankShowing" class="frank-showing" hidden></div>
     <div id="frankParlayOv" class="frank-parlay-ov" onclick="if(event.target===this)closeFrankParlay()">
@@ -8145,8 +8165,6 @@ function _nhlTogglePastDates(force){
   </div>
   </div>
 
-  <div class="status-msg" id="statusMsg"></div>
-  <div id="out"></div>
 </div>
 
 <footer>
@@ -8525,6 +8543,29 @@ function _frankSetSide(side){
     btn.setAttribute('aria-pressed',active?'true':'false');
   });
   _frankCategoryChanged();
+}
+// Edge Coach player-position filter (display only): All / Forwards / DEF.
+// Goalies and saved rows without a stored position appear only under All.
+window.NHL_FRANK_POS='';
+function _frankSetPos(pos){
+  window.NHL_FRANK_POS=(pos==='F'||pos==='D')?pos:'';
+  [['frankPosAll',''],['frankPosF','F'],['frankPosD','D']].forEach(function(item){
+    var btn=document.getElementById(item[0]);if(!btn)return;
+    var active=window.NHL_FRANK_POS===item[1];
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  _frankCategoryChanged();
+}
+function _frankPosOk(src){
+  var want=window.NHL_FRANK_POS||'';
+  if(!want)return true;
+  src=src||{};
+  if(String(src.mkt||src.market||'')==='Goalie Saves')return false;
+  return _nhlPositionGroup(src)===want;
+}
+function _frankPosLabel(){
+  return window.NHL_FRANK_POS==='F'?'Forwards':window.NHL_FRANK_POS==='D'?'Defensemen':'All players';
 }
 function _frankSystemLabel(system){
   return system==='B'?'B · OLD':system==='C'?'C · SELECTIVE':system==='D'?'D · TOP PLAYERS':'A · NEW';
@@ -9089,7 +9130,7 @@ function _frankRender(question,rows,totalPriced,mode){
   if(mode==='board')rows=rows.map(function(p){return Object.assign({},p,{isBoardPick:true});});
   var q='<div class="frank-ai-question">'+_frankEsc(question)+'</div>';
   if(!rows.length){
-    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">'+(mode==='board'?'No app-produced picks match the selected category, side and game. No edge or odds-availability filter was applied.':'No loaded NHL prop matched this edge preset with a genuine price and positive Coach Edge.')+'</div></div></div>');
+    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">'+(mode==='board'?'No app-produced picks match the selected category, side, players and game. No edge or odds-availability filter was applied.':'No loaded NHL prop matched this edge preset with a genuine price and positive Coach Edge.')+'</div></div></div>');
     return;
   }
   var table=rows.map(function(p,i){
@@ -9150,7 +9191,7 @@ async function generateFrankSelected(){
 function _frankRenderGameTeam(question,rows,totalPriced,mode,safeRows){
   var q='<div class="frank-ai-question">'+_frankEsc(question)+'</div>';
   if(!rows.length){
-    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">'+(mode==='board'?'No app-produced picks match the selected category, side and game.':'No loaded NHL prop has a genuine price and positive Coach Edge for the selected filters.')+'</div></div></div>');
+    _frankCommit('<div>'+q+'<div class="frank-ai-summary"><div class="frank-ai-empty">'+(mode==='board'?'No app-produced picks match the selected category, side, players and game.':'No loaded NHL prop has a genuine price and positive Coach Edge for the selected filters.')+'</div></div></div>');
     window.__FRANK_LAST_ROWS__=[];
     return;
   }
@@ -9265,6 +9306,7 @@ function _frankPlusMinusModel(question,system,game,selectedSide){
     if(filters.side&&filters.side!==side)return;
     var rows=props.filter(function(p){
       if(p.side!==side)return false;
+      if(!_frankPosOk(p.source))return false;
       if(game&&_nhlParlayGameKey(p.team,p.opponent)!==game)return false;
       if(filters.players.length&&filters.players.indexOf(String(p.player||'').toLowerCase())<0)return false;
       if(filters.teams.length&&filters.teams.indexOf(String(p.team||'').toLowerCase())<0&&filters.teams.indexOf(String(p.opponent||'').toLowerCase())<0)return false;
@@ -9312,29 +9354,68 @@ function _nhlAltImpliedPct(odds){
   return a<0?(-a)/((-a)+100)*100:100/(a+100)*100;
 }
 function _nhlStreakTable(def,rows,startRank){
-  var h='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.74rem"><thead><tr style="color:#94a3b8;text-align:left">'
-    +'<th style="padding:6px">#</th><th style="padding:6px">Player</th><th style="padding:6px">Last 10</th><th style="padding:6px">Last 10 vs team</th><th style="padding:6px">Combined</th><th style="padding:6px">Line / Odds</th></tr></thead><tbody>';
+  // Compact list: hit counts only. Tap a player for the full number box.
+  window.__NHL_STREAK_BOX__=window.__NHL_STREAK_BOX__||{};
+  var th='padding:7px 6px;text-align:center';
+  var h='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.76rem"><thead><tr style="color:#94a3b8;font-size:.66rem;text-transform:uppercase;letter-spacing:.05em">'
+    +'<th style="'+th+'">#</th><th style="padding:7px 6px;text-align:left">Player</th><th style="'+th+'">Last 10</th><th style="'+th+'">Last 10 vs team</th><th style="'+th+'">Combined</th><th style="'+th+'">Line / Odds</th></tr></thead><tbody>';
   rows.forEach(function(p,i){
-    var odds=_nhlStreakOdds(p,def.side),book=odds!==''?_nhlBookName(p,def.side):'';
-    var vals=(p.l10Values||[]).map(function(g){
-      var ok=def.side==='OVER'?Number(g.v)>1.5:Number(g.v)<1.5;
-      return '<span title="'+_frankEsc((g.date||'')+' vs '+(g.opp||'')+' ('+(g.ha||'')+')')+'" style="display:inline-block;min-width:16px;text-align:center;margin:1px;padding:0 3px;border-radius:4px;background:'+(ok?'rgba(34,197,94,.18)':'rgba(248,113,113,.18)')+';color:'+(ok?'#86efac':'#fca5a5')+'">'+_frankEsc(g.v)+'</span>';
-    }).join('');
-    var vsVals=(p.vsValues||[]).map(function(g){return _frankEsc(g.v);}).join(', ');
-    var vsSum=(p.vsValues||[]).reduce(function(t,g){return t+(Number(g.v)||0);},0);
-    var vsLine=def.side==='UNDER'
-      ?('0&ndash;1 pts in '+_frankEsc(p.vsHits)+' of '+_frankEsc(p.vsTotal)+' vs '+_frankEsc(p.opponent)+' &middot; '+_frankEsc(vsSum)+' total pts')
-      :(_frankEsc(p.vsHits)+'/'+_frankEsc(p.vsTotal)+' &middot; '+_frankEsc(p.vsRate)+'%');
-    var priceTxt=odds!==''?(def.side+' 1.5 · '+_frankEsc(odds)+(book?' · '+_frankEsc(book):''))
-      :('<span style="color:#fbbf24">Model only · line 1.5</span>'+(p.bookLine!=null?'<br><small style="color:#94a3b8">Book line '+_frankEsc(p.bookLine)+' (not used)</small>':''));
-    h+='<tr style="border-top:1px solid rgba(148,163,184,.15)"><td style="padding:6px;color:#94a3b8">'+(startRank+i)+'</td>'
-      +'<td style="padding:6px"><b style="color:#e2e8f0">'+_frankEsc(p.name)+'</b>'+(_nhlInjuryBadge(p)||'')+(p.topUnit?' <small style="color:#60a5fa;border:1px solid rgba(96,165,250,.4);border-radius:4px;padding:0 4px">'+_frankEsc(p.topUnit)+'</small>':'')+'<br><small style="color:#94a3b8">'+_frankEsc(p.team)+' '+(p.homeRoad==='H'?'vs':'@')+' '+_frankEsc(p.opponent)+'</small></td>'
-      +'<td style="padding:6px"><b>'+_frankEsc(p.l10Hits)+'/'+_frankEsc(p.l10Total)+' · '+_frankEsc(p.l10Rate)+'%</b> <small style="color:#94a3b8">avg '+_frankEsc(p.l10Avg)+'</small><br>'+vals+'</td>'
-      +'<td style="padding:6px"><b>'+vsLine+'</b> <small style="color:#94a3b8">('+_frankEsc(p.vsRate)+'%, avg '+_frankEsc(p.vsAvg)+')</small><br><small style="color:#94a3b8">'+vsVals+'</small></td>'
-      +'<td style="padding:6px;color:'+def.color+'"><b>'+_frankEsc(p.streakScore)+'%</b></td>'
-      +'<td style="padding:6px">'+priceTxt+'</td></tr>';
+    var key=def.key+'|'+(startRank+i);
+    window.__NHL_STREAK_BOX__[key]={def:def,p:p};
+    var odds=_nhlStreakOdds(p,def.side);
+    var priceTxt=odds!==''?('<b>'+_frankEsc(odds)+'</b>'):'<span style="color:#fbbf24">Model only</span>';
+    var rc=function(r){r=Number(r);return r>=90?'#4ade80':r>=80?'#86efac':'#fbbf24';};
+    h+='<tr style="border-top:1px solid rgba(148,163,184,.15)"><td style="'+th+';color:#94a3b8">'+(startRank+i)+'</td>'
+      +'<td style="padding:7px 6px"><button type="button" class="frank-ai-player-link" onclick="_nhlStreakOpen(&#39;'+_frankEsc(key)+'&#39;)" title="Open player box">'+_frankEsc(p.name)+'</button>'+(_nhlInjuryBadge(p)||'')+(p.topUnit?' <small style="color:#60a5fa;border:1px solid rgba(96,165,250,.4);border-radius:4px;padding:0 4px">'+_frankEsc(p.topUnit)+'</small>':'')+'<br><small style="color:#94a3b8">'+_frankEsc(p.team)+' '+(p.homeRoad==='H'?'vs':'@')+' '+_frankEsc(p.opponent)+'</small></td>'
+      +'<td style="'+th+'"><b style="color:'+rc(p.l10Rate)+'">'+_frankEsc(p.l10Hits)+'/'+_frankEsc(p.l10Total)+'</b></td>'
+      +'<td style="'+th+'"><b style="color:'+rc(p.vsRate)+'">'+_frankEsc(p.vsHits)+'/'+_frankEsc(p.vsTotal)+'</b></td>'
+      +'<td style="'+th+';color:'+def.color+'"><b>'+_frankEsc(p.streakScore)+'%</b></td>'
+      +'<td style="'+th+'">'+priceTxt+'</td></tr>';
   });
-  return h+'</tbody></table></div>';
+  return h+'</tbody></table></div><div style="color:#94a3b8;font-size:.68rem;margin-top:6px">Tap a player name to see every game number in their player box.</div>';
+}
+function _nhlStreakOpen(key){
+  var item=(window.__NHL_STREAK_BOX__||{})[key];if(!item)return;
+  var def=item.def,p=item.p;
+  closeNhlLadder();
+  var hitOf=function(v){v=Number(v);return def.side==='OVER'?v>1.5:v<1.5;};
+  var odds=_nhlStreakOdds(p,def.side),book=odds!==''?_nhlBookName(p,def.side):'';
+  var vsSum=(p.vsValues||[]).reduce(function(t,g){return t+(Number(g.v)||0);},0);
+  var tile=function(k,v,sub){return '<div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:9px 10px;text-align:center"><div style="color:#94a3b8;font-size:.62rem;text-transform:uppercase;letter-spacing:.06em;font-weight:800">'+k+'</div><div style="color:#e2e8f0;font-size:1rem;font-weight:900;margin-top:2px">'+v+'</div>'+(sub?'<div style="color:#94a3b8;font-size:.66rem;margin-top:2px">'+sub+'</div>':'')+'</div>';};
+  var gameRows=function(list,showOpp){
+    if(!list||!list.length)return '<div class="lad-unavailable">No games on file.</div>';
+    return '<table style="width:100%;border-collapse:collapse;font-size:.74rem"><thead><tr style="color:#94a3b8;font-size:.64rem;text-transform:uppercase"><th style="padding:5px;text-align:left">Date</th>'+(showOpp?'<th style="padding:5px">Opp</th>':'')+'<th style="padding:5px">H/A</th><th style="padding:5px">'+_frankEsc(def.market)+'</th><th style="padding:5px">'+def.side+' 1.5</th></tr></thead><tbody>'
+      +list.map(function(g){var ok=hitOf(g.v);
+        return '<tr style="border-top:1px solid rgba(148,163,184,.12)"><td style="padding:5px">'+_frankEsc(g.date||'')+'</td>'+(showOpp?'<td style="padding:5px;text-align:center">'+_frankEsc(g.opp||'')+'</td>':'')
+          +'<td style="padding:5px;text-align:center">'+_frankEsc(g.ha==='H'?'Home':g.ha==='R'?'Away':(g.ha||''))+'</td>'
+          +'<td style="padding:5px;text-align:center;font-weight:900;color:'+(ok?'#86efac':'#fca5a5')+'">'+_frankEsc(g.v)+'</td>'
+          +'<td style="padding:5px;text-align:center;font-weight:900;color:'+(ok?'#4ade80':'#f87171')+'">'+(ok?'HIT':'MISS')+'</td></tr>';
+      }).join('')+'</tbody></table>';
+  };
+  var head='https://assets.nhle.com/mugs/nhl/'+(window.__NHL_SEASON__||'20252026')+'/'+(p.team||'')+'/'+(p.pid||'')+'.png';
+  var html='<div class="lad-modal" onclick="event.stopPropagation()">'
+    +'<button class="lad-close" onclick="closeNhlLadder()">&#10005;</button>'
+    +'<div class="lad-profile"><div class="hs-wrap"><span class="hs-ini">'+_frankEsc(_initials(p.name))+'</span><img class="hs-img" src="'+_frankEsc(head)+'" onerror="this.style.display=&#39;none&#39;"/></div><div><h3>'+_frankEsc(p.name)+(p.topUnit?' <small style="color:#60a5fa;border:1px solid rgba(96,165,250,.4);border-radius:4px;padding:0 5px;font-size:.62rem">'+_frankEsc(p.topUnit)+'</small>':'')+'</h3><div class="lad-profile-team">'+_frankEsc(p.team||'')+' '+(p.homeRoad==='H'?'vs':'@')+' '+_frankEsc(p.opponent||'')+' &middot; '+_frankEsc(def.title)+' ('+_frankEsc(def.hit)+')</div></div></div>'
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin:12px 0">'
+      +tile('Last 10',_frankEsc(p.l10Hits)+'/'+_frankEsc(p.l10Total),_frankEsc(p.l10Rate)+'% &middot; avg '+_frankEsc(p.l10Avg))
+      +tile('Last 10 vs '+_frankEsc(p.opponent||'team'),_frankEsc(p.vsHits)+'/'+_frankEsc(p.vsTotal),_frankEsc(p.vsRate)+'% &middot; avg '+_frankEsc(p.vsAvg)+' &middot; '+_frankEsc(vsSum)+' total')
+      +tile('Combined','<span style="color:'+def.color+'">'+_frankEsc(p.streakScore)+'%</span>','')
+      +tile('Line / Odds',def.side+' 1.5',odds!==''?(_frankEsc(odds)+(book?' &middot; '+_frankEsc(book):'')):('Model only'+(p.bookLine!=null?' &middot; book line '+_frankEsc(p.bookLine)+' (not used)':'')))
+    +'</div>'
+    +'<div style="font-size:.68rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin:6px 0">Last 10 games</div>'+gameRows(p.l10Values,true)
+    +'<div style="font-size:.68rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;margin:14px 0 6px">Last 10 vs '+_frankEsc(p.opponent||'team')+'</div>'+gameRows(p.vsValues,false)
+    +'<div style="text-align:center;margin-top:14px"><button type="button" class="frank-ai-player-link" onclick="_nhlStreakFull(&#39;'+_frankEsc(key)+'&#39;)">Open full player card</button></div>'
+    +'</div>';
+  var ov=document.createElement('div');
+  ov.className='lad-ov';ov.id='nhlLadOv';ov.onclick=closeNhlLadder;
+  ov.innerHTML=html;
+  document.body.appendChild(ov);
+}
+function _nhlStreakFull(key){
+  var item=(window.__NHL_STREAK_BOX__||{})[key];if(!item)return;
+  var def=item.def,p=item.p;
+  var label=def.market==='Points'?'Points (1+)':def.market;
+  openNhlPlayerSummary(Object.assign({},p,{_coachFocus:{label:label,market:p.mkt||def.market,side:def.side,line:1.5}}));
 }
 async function askNhlStreakCoach(kind){
   window.__NHL_ALT_COACH_ACTIVE__=false;
@@ -9345,13 +9426,14 @@ async function askNhlStreakCoach(kind){
   try{
     if(!_frankRawForSystem(system))await _frankEnsureSystemBoard(system);
     var rows=_nhlStreakRows(kind,game);
+    if(rows)rows=rows.filter(function(p){return _frankPosOk(p);});
     var html='<div class="frank-ai-question">'+_frankEsc(question)+'</div><div class="frank-ai-summary">'+_frankEsc(def.market)+' '+def.side+' 1.5 ('+_frankEsc(def.hit)+') · '+_frankEsc(_frankSystemLabel(system))
       +(def.topOnly?'. Top-line players only (F1/F2 forwards, D1/D2 defence) in every system':'')+'. Qualifies at 70%+ in the last 10 games (any venue) AND 70%+ in the last 10 games vs today&#39;s opponent (any venue, minimum 3 meetings). Ranked by the average of the two rates; one play per player. Odds appear only when the sportsbook&#39;s own line is exactly 1.5 (odds shorter than -1000 hidden); otherwise the play is model-only and tracked W/L only.</div>';
     if(rows===null){
       html+='<div class="frank-ai-empty">This saved board predates the '+_frankEsc(def.title)+' preset. A new category cannot be recreated from an older board; the next pregame analysis captures it.</div>';
     }else if(!rows.length){
       var rawB=_frankRawForSystem(system)||window.__NHL_RAW__||{};
-      html+='<div class="frank-ai-empty">'+(def.topOnly&&rawB.streakPtsU15Note?_frankEsc(rawB.streakPtsU15Note):('No player clears both 70% gates'+(game?' for this game':'')+'.'))+'</div>';
+      html+='<div class="frank-ai-empty">'+(def.topOnly&&rawB.streakPtsU15Note&&!window.NHL_FRANK_POS?_frankEsc(rawB.streakPtsU15Note):('No '+(window.NHL_FRANK_POS==='F'?'forward':window.NHL_FRANK_POS==='D'?'defenseman':'player')+' clears both 70% gates'+(game?' for this game':'')+'.'))+'</div>';
     }else{
       html+='<div class="sec">'+_frankEsc(def.title)+' · Top '+Math.min(10,rows.length)+' of '+rows.length+' qualified</div>'+_nhlStreakTable(def,rows.slice(0,10),1);
       if(rows.length>10)html+='<details style="margin-top:8px"><summary style="cursor:pointer;color:#94a3b8;font-size:.75rem">Show the other '+(rows.length-10)+' qualified players (not tracked)</summary>'+_nhlStreakTable(def,rows.slice(10),11)+'</details>';
@@ -9509,6 +9591,7 @@ async function askFrank(){
     if(category&&p.marketKey!==category)return false;
     if(game&&_nhlParlayGameKey(p.team,p.opponent)!==game)return false;
     if(selectedSide&&p.side!==selectedSide)return false;
+    if(!_frankPosOk(Object.assign({market:p.market},p.source||{})))return false;
     if(window.__NHL_ALT_COACH_ACTIVE__&&(p.appProb<85||p.implied<70))return false;
     if(f.side&&p.side!==f.side)return false;
     if(f.market&&p.marketKey!==f.market)return false;
@@ -10204,7 +10287,7 @@ function _nhlTop30OthersSection(raw){
   }else if(!Array.isArray(s.data.outside_top30)){
     body='<div class="hc-note">This list was loaded before the outside-Top-30 update. Click Refresh list in the Top 30 section.</div>';
   }else{
-    var all=s.data.outside_top30,rows=all.filter(function(p){
+    var all=s.data.outside_top30.filter(function(p){return (+p.career_games||0)>=2;}),rows=all.filter(function(p){
       var b=(p.last5_form||{}).badge;
       return _nhlTop30OthersBadge==='ALL'||(_nhlTop30OthersBadge==='HOT'&&b==='HOT')||(_nhlTop30OthersBadge==='COLD'&&b==='COLD');
     });
@@ -10215,10 +10298,10 @@ function _nhlTop30OthersSection(raw){
     if(s.data.outside_top30_unavailable)body+='<div class="hc-note" style="color:#fbbf24">This list could not be completed in time. Click Refresh list in the Top 30 section to retry.</div>';
     else if((s.data.outside_top30_unavailable_opponents||[]).length)body+='<div class="hc-note" style="color:#fbbf24">Partial list: history unavailable vs '+_nhlSafe(s.data.outside_top30_unavailable_opponents.join(', '))+'. Refresh to retry.</div>';
     body+=rows.length?'<div class="hc-grid">'+rows.map(_nhlTop30Card).join('')+'</div>'
-      :'<div class="hc-note">'+(all.length?'No players with this badge.':'No other skater with a team game today averages at least 1.00 career PPG against that opponent.')+'</div>';
+      :'<div class="hc-note">'+(all.length?'No players with this badge.':'No other skater with a team game today averages at least 1.00 career PPG against that opponent over 2+ games.')+'</div>';
   }
   return '<section id="nhl-section-top30-others" class="hc-section"><h2 style="font-size:1rem;color:#f8fafc;margin:0 0 8px">Point Per Game vrs Team · Outside Top 30</h2>'
-    +'<div class="hc-note">Every other rostered skater whose team plays today (not in this season’s NHL Top 30) with a career regular-season average of at least 1.00 PPG vs today’s opponent. Home and away combined; any number of games, so check the GP column. Sorted by career points vs the opponent. Hot / Cold badges use the same Last 5 point rule as the Top 30 list. Every player is tracked as Points 1+ in its own Outside Top 30 record (separate from Top 30), with Home/Away and Hot/Cold results. <button type="button" class="hc-btn" onclick="openNhlTop30Record(&quot;outside&quot;)">Outside Top 30 Record</button></div>'
+    +'<div class="hc-note">Every other rostered skater whose team plays today (not in this season’s NHL Top 30) with a career regular-season average of at least 1.00 PPG vs today’s opponent in at least 2 career games against them. Home and away combined. Sorted by career points vs the opponent. Hot / Cold badges use the same Last 5 point rule as the Top 30 list. Every player is tracked as Points 1+ in its own Outside Top 30 record (separate from Top 30), with Home/Away and Hot/Cold results. <button type="button" class="hc-btn" onclick="openNhlTop30Record(&quot;outside&quot;)">Outside Top 30 Record</button></div>'
     +body+'</section>';
 }
 function _nhlTop30Badge(p){
@@ -11259,14 +11342,12 @@ function renderResults(d){
   var _preseason=!!d.preseason;
   var _liveSystem=String(d.system||'A').toUpperCase();
   var _liveLabel={A:'A · NEW',B:'B · OLD',C:'C · SELECTIVE',D:'D · TOP PLAYERS'}[_liveSystem]||'A · NEW';
-  document.getElementById('out').innerHTML = (_preseason?'<div style="margin:0 0 12px;padding:11px 14px;border:1px solid rgba(251,191,36,.55);background:rgba(120,53,15,.22);border-radius:10px;color:#fde68a;font-size:.75rem;font-weight:900;letter-spacing:.04em">PRESEASON · TUNING / VIEW-ONLY · OFFICIAL RECORDS NOT WRITTEN</div>':'')+(window.IS_ADMIN&&String(d.date||'')>=_nhlLocalDate()?'<div style="margin:0 0 12px;color:#93c5fd;font-size:.76rem;font-weight:900">VIEWING LIVE SYSTEM '+_liveLabel+' · switching boards does not change official records</div>':'')+'<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
+  document.getElementById('out').innerHTML = (_preseason?'<div style="margin:0 0 12px;padding:11px 14px;border:1px solid rgba(251,191,36,.55);background:rgba(120,53,15,.22);border-radius:10px;color:#fde68a;font-size:.75rem;font-weight:900;letter-spacing:.04em">PRESEASON · TUNING / VIEW-ONLY · OFFICIAL RECORDS NOT WRITTEN</div>':'')+'<div class="nhl-toolbar"><div class="nhl-lookup"><div class="nhl-lookup-label">Player lookup</div><div class="nhl-lookup-row"><input id="nhlSearch" type="search" autocomplete="off" placeholder="Search a player…" aria-label="Search NHL player" oninput="_nhlPaint(this.value)" onkeydown="if(event.key===\\'Enter\\'){nhlLookupPlayer();}"/><button type="button" class="nhl-lookup-btn" onclick="nhlLookupPlayer()">View stats</button></div><div id="nhlLookupHint" class="nhl-lookup-hint">Search the loaded slate, then view all available category history.</div></div></div><div id="nhlBody"></div>';
   if(window.IS_ADMIN){
     var loadedSystem=String(d.system||window.NHL_HIST_SYSTEM||'A').toUpperCase();
     if(['A','B','C','D'].indexOf(loadedSystem)>=0)window.NHL_FRANK_SYSTEM=loadedSystem;
     _frankPaintSystemButtons();
   }
-  var injuryNote=_nhlInjuryNotice(d);
-  if(injuryNote)document.getElementById('out').insertAdjacentHTML('afterbegin',injuryNote);
   _nhlLiveSystemVisibility();
   _nhlPaint('');
   if(_nhlLiveRefreshTimer)clearInterval(_nhlLiveRefreshTimer);
@@ -11362,6 +11443,59 @@ function nhlLookupPlayer(){
 // Re-paints the NHL body filtered by player name. The search box lives outside
 // #nhlBody so it keeps focus across keystrokes. `d` is aliased to a shallow copy
 // whose pick lists are name-filtered, leaving the original render code untouched.
+// ── Category board + menu panels ─────────────────────────────────────────
+window.__NHL_CAT__=window.__NHL_CAT__||{cat:'shots',side:'ALL'};
+var _NHL_CATS=[['shots','Shots'],['points','Points'],['pp','PP Points'],['pm','Plus/Minus'],['assists','Assists'],['goals','Goals'],['saves','Saves'],['games','By Game']];
+function _nhlCatBoard(d,html,hcCount){
+  var counts={shots:(d.picks||[]).length+(d.shotUnders||[]).length,points:(d.ptsPicks||[]).length+(d.ptsUnders||[]).length,
+    pp:(d.ppPicks||[]).length+(d.ppUnders||[]).length,pm:(d.pmPicks||[]).length+(d.pmUnders||[]).length,
+    assists:(d.astPicks||[]).length+(d.astUnders||[]).length,goals:(d.goalPicks||[]).length+(d.goalUnders||[]).length,
+    saves:(d.savesPicks||[]).length+(d.savesUnders||[]).length,games:(d.savedPickRecovery&&!(d.games||[]).length)?'-':(d.games||[]).length};
+  var h='<div id="nhlCatBoard"><div class="chips nhl-cat-chips">';
+  _NHL_CATS.forEach(function(c){
+    h+='<div class="chip nhl-jump-chip nhl-cat-chip" data-cat="'+c[0]+'" onclick="_nhlCatPick(&#39;'+c[0]+'&#39;)" role="button" tabindex="0"><div class="val">'+counts[c[0]]+'</div><div class="lbl">'+c[1]+'</div></div>';
+  });
+  h+='<div class="chip nhl-jump-chip" onclick="_nhlPanOpen(&#39;hc&#39;)" role="button" tabindex="0" title="Open Hot and Cold Players"><div class="val">'+hcCount+'</div><div class="lbl">Hot/Cold</div></div>';
+  h+='</div><div class="nhl-cat-side" id="nhlCatSide"><span>Show</span>'
+    +'<button type="button" data-side="ALL" onclick="_nhlCatSide(&#39;ALL&#39;)">Over + Under</button>'
+    +'<button type="button" data-side="OVER" onclick="_nhlCatSide(&#39;OVER&#39;)">Over Top 10</button>'
+    +'<button type="button" data-side="UNDER" onclick="_nhlCatSide(&#39;UNDER&#39;)">Under Top 10</button></div>';
+  _NHL_CATS.forEach(function(c){
+    var inner=html[c[0]]||'';
+    if(inner.indexOf('class="sec"')<0&&inner.indexOf('no-picks')<0)inner+='<div class="no-picks">No qualifying '+c[1]+' plays on this board.</div>';
+    h+='<div class="nhl-cat-blk" data-cat="'+c[0]+'">'+inner+'</div>';
+  });
+  return h+'</div>';
+}
+function _nhlCatApply(){
+  var st=window.__NHL_CAT__,b=document.getElementById('nhlCatBoard');if(!b)return;
+  b.querySelectorAll('.nhl-cat-chip').forEach(function(c){c.classList.toggle('nhl-cat-on',c.getAttribute('data-cat')===st.cat);});
+  b.querySelectorAll('.nhl-cat-blk').forEach(function(el){el.hidden=el.getAttribute('data-cat')!==st.cat;});
+  b.querySelectorAll('.nhl-cs').forEach(function(el){var sd=el.getAttribute('data-side');el.hidden=st.side!=='ALL'&&sd!=='ALL'&&sd!==st.side;});
+  var side=document.getElementById('nhlCatSide');
+  if(side){
+    side.hidden=st.cat==='games';
+    side.querySelectorAll('button').forEach(function(btn){btn.classList.toggle('on',btn.getAttribute('data-side')===st.side);});
+  }
+}
+function _nhlCatPick(cat){window.__NHL_CAT__.cat=cat;_nhlCatApply();}
+function _nhlCatSide(side){window.__NHL_CAT__.side=side;_nhlCatApply();}
+var _NHL_PANS={locks:'&#128274; 80&#8211;100% Locks',gp:'&#128302; Game Predictor',hc:'&#128293; Hot and Cold Players',top30:'&#127954; Top 30 Point Per Game vs Team',outside:'&#127954; Point Per Game vs Team &#183; Outside Top 30',team:'&#128202; Team Rankings'};
+function _nhlPanWrap(key,inner){
+  return '<div class="nhl-pan" data-pan="'+key+'" onclick="if(event.target===this)_nhlPanClose()"><div class="nhl-pan-bar"><span class="nhl-pan-title">'+_NHL_PANS[key]+'</span><button type="button" class="nhl-pan-close" onclick="_nhlPanClose()" aria-label="Close">&#10005; Close</button></div><div class="nhl-pan-inner">'+(inner||'')+'</div></div>';
+}
+function _nhlPanOpen(key){
+  var el=document.querySelector('.nhl-pan[data-pan="'+key+'"]');
+  if(!el){_nhlBetToast('Load the NHL picks first, then open this from the menu.');return;}
+  document.body.setAttribute('data-nhl-pan',key);
+  el.scrollTop=0;
+}
+function _nhlPanClose(){document.body.removeAttribute('data-nhl-pan');}
+document.addEventListener('keydown',function(e){
+  if(e.key!=='Escape'||!document.body.getAttribute('data-nhl-pan'))return;
+  if(document.getElementById('nhlLadOv')||document.getElementById('nts-ov'))return;
+  _nhlPanClose();
+});
 function _nhlPaint(q){
   var original=window.__NHL_RAW__; if(!original) return;
   var raw=_nhlUpcomingBoard(original);
@@ -11393,44 +11527,29 @@ function _nhlPaint(q){
   var h = '';
 
   if(d.simulation && d.simulationStats) h += renderNhlSimulationStats(d.simulationStats);
-  if(d.data_note) h += '<div style="padding:10px 14px;border:1px solid #475569;border-radius:9px;color:#cbd5e1;font-size:.76rem;margin-bottom:12px">'+_nhlSafe(d.data_note)+'</div>';
+  if(d.data_note&&String(d.data_note).indexOf('MODEL-ONLY picks without')!==0) h += '<div style="padding:10px 14px;border:1px solid #475569;border-radius:9px;color:#cbd5e1;font-size:.76rem;margin-bottom:12px">'+_nhlSafe(d.data_note)+'</div>';
 
-  // Chips
-  h += '<div class="chips">' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToGames()" role="button" tabindex="0"><div class="val">' + (d.savedPickRecovery&&!d.games.length?'Not saved':d.games.length) + '</div><div class="lbl">Games</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToShots()" role="button" tabindex="0"><div class="val">' + ((d.picks||[]).length) + '</div><div class="lbl">Shots</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToPoints()" role="button" tabindex="0"><div class="val">' + ((d.ptsPicks||[]).length) + '</div><div class="lbl">Points</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToPpPoints()" role="button" tabindex="0"><div class="val">' + ((d.ppPicks||[]).length) + '</div><div class="lbl">PP Points</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="document.getElementById(&quot;nhl-section-plus-minus&quot;).scrollIntoView({behavior:&quot;smooth&quot;})" role="button" tabindex="0"><div class="val">'+((d.pmPicks||[]).length+(d.pmUnders||[]).length)+'</div><div class="lbl">Plus/Minus</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToAssists()" role="button" tabindex="0"><div class="val">' + ((d.astPicks||[]).length) + '</div><div class="lbl">Assists</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToGoals()" role="button" tabindex="0"><div class="val">' + ((d.goalPicks||[]).length) + '</div><div class="lbl">Goals</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToSaves()" role="button" tabindex="0"><div class="val">' + ((d.savesPicks||[]).length) + '</div><div class="lbl">Saves</div></div>' +
-    '<div class="chip nhl-jump-chip" onclick="nhlJumpToHotCold()" onkeydown="if(event.key===&quot;Enter&quot;||event.key===&quot; &quot;){event.preventDefault();nhlJumpToHotCold();}" role="button" tabindex="0" aria-label="Jump to Hot and Cold Players"><div class="val">' + _nhlFormVisibleRows(d,false).length + '</div><div class="lbl">Hot/Cold</div></div>' +
-    '</div>';
+  // Category board (NBA layout): chips pick one category; Top 10 + Overflow only.
+  var _top=h;h='';
+  var _catHtml={},_catCut=function(cat,side){
+    if(h)_catHtml[cat]=(_catHtml[cat]||'')+'<div class="nhl-cs" data-side="'+side+'">'+h+'</div>';
+    h='';
+  };
+  var _hcCount=_nhlFormVisibleRows(d,false).length;
   _nhlHcRegistry={};
-  h += _nhlTop30Section(original);
-  h += _nhlTop30OthersSection(original);
+  h += _nhlTop30Section(original);var _panTop30=h;h='';
+  h += _nhlTop30OthersSection(original);var _panOutside=h;h='';
   h += _nhlHotColdSection(d,(d.hotColdPlayers||[]).filter(_nhlPositionMatches).filter(function(p){return !q||(p.name||'').toLowerCase().indexOf(q)>=0;}),q);
 
-  // Games
-  h += '<div id="nhl-section-games" class="sec">- Games -- ' + (d.targetDate || '') + (_preseason?' <span style="color:#fbbf24;font-size:.7em">PRESEASON</span>':'') + '</div><div class="games">';
-  d.games.forEach(function(g){
-    var t = g.startTime ? new Date(g.startTime).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'}) : '';
-    var lu=g.lineupByTeam||{},a=lu[g.awayTeam]||g.lineupSource||'UNAVAILABLE',hm=lu[g.homeTeam]||g.lineupSource||'UNAVAILABLE';
-    function _luText(v){return v==='CONFIRMED'?'confirmed':v==='BOOK_LISTED'?'book-listed':v==='ROSTER_UNCONFIRMED'?'roster unconfirmed':'unavailable';}
-    h += '<div class="gcard nhl-game-jump" data-game-id="' + _nhlGameId(g.awayTeam,g.homeTeam) + '"><div class="mu">' + g.awayTeam + ' @ ' + g.homeTeam + (g.gameTypeLabel==='PRESEASON'?' <span style="color:#fbbf24;font-size:.65em">PRESEASON</span>':'') + '</div><div class="gt">' + t + '</div>'
-      + '<div style="margin-top:4px;color:#94a3b8;font-size:.6rem;font-weight:800;text-transform:uppercase;letter-spacing:.04em">Lineups: '
-      + g.awayTeam + ' ' + _luText(a) + ' · ' + g.homeTeam + ' ' + _luText(hm) + '</div></div>';
-  });
-  h += '</div>';
+  var _panHc=h;h='';
 
   // Display-only current-season team stats, independent of model SA factors.
-  h += '<div id="nhl-team-stats"></div>';
+  h += '<div id="nhl-team-stats"></div>';var _panTeam=h;h='';
 
   // ── Game Predictor ────────────────────────────────────────────────────────
   var _gpPreds = d.game_predictions || [];
   h += '<div class="sec">\\uD83D\\uDD2E Game Predictor \u2014 Win Probability & Projected Totals</div>';
-  h += '<div style="margin:-4px 0 10px"><button type="button" onclick="if(window.openNhlGameSim)openNhlGameSim()" style="background:#0e7490;border:none;color:#fff;border-radius:8px;padding:7px 12px;font-size:.76rem;font-weight:800;cursor:pointer">&#127922; Run 10K Game Simulator</button></div>';
+  h += '<div style="margin:-4px 0 10px"><button type="button" onclick="_nhlPanClose();if(window.openNhlGameSim)openNhlGameSim()" style="background:#0e7490;border:none;color:#fff;border-radius:8px;padding:7px 12px;font-size:.76rem;font-weight:800;cursor:pointer">&#127922; Run 10K Game Simulator</button></div>';
   if(d.savedGamePredictorNote)
     h += '<div class="gp-history-note">'+_nhlEsc(d.savedGamePredictorNote)+'</div>';
   if(_gpPreds.length){
@@ -11439,6 +11558,7 @@ function _nhlPaint(q){
     h += '<div class="no-picks">No saved game predictions are available for this board.</div>';
   }
 
+  var _panGp=h;h='';
   // ── 🔒 80–100% Locks — cross-market picks hitting 80%+ ────────────────
   var _lockAll=[];
   ['picks','ptsPicks','ppPicks','pmPicks','astPicks','goalPicks','savesPicks',
@@ -11482,12 +11602,16 @@ function _nhlPaint(q){
         +'</details>';
     }
     h+='</div>';
+  }else{
+    h+='<div class="no-picks">No 80%+ locks on this board.</div>';
   }
+  var _panLocks=h;h='';
 
   // SHOTS cards (OVER)
   h += '<div id="nhl-section-shots" class="nhl-scroll-anchor"></div><div class="sec">🏒 Top ' + ((d.picks||[]).length) + ' Shots on Goal — OVER</div>';
   h += nhlCardGrid(d.picks);
   h += nhlRestBlock(d.rest, 'shots', '#4ade80');
+  _catCut('shots','OVER');
 
   // Shots UNDER cards
   if((d.shotUnders||[]).length){
@@ -11496,6 +11620,7 @@ function _nhlPaint(q){
     h += nhlUnderRestBlock(d.shotUndersRest, 'shots under', '#f87171');
   }
 
+  _catCut('shots','UNDER');
   // POINTS cards
   h += '<div id="nhl-section-points" class="nhl-scroll-anchor"></div>';
   if((d.ptsPicks||[]).length){
@@ -11503,11 +11628,13 @@ function _nhlPaint(q){
     h += nhlCardGrid(d.ptsPicks);
     h += nhlRestBlock(d.ptsRest, 'points', '#a78bfa');
   }
+  _catCut('points','OVER');
   if((d.ptsUnders||[]).length){
     h += '<div class="sec">⬇ Top ' + d.ptsUnders.length + ' Points (1+) — UNDER</div>';
     h += nhlUnderGrid(d.ptsUnders);
     h += nhlUnderRestBlock(d.ptsUndersRest, 'points under', '#f87171');
   }
+  _catCut('points','UNDER');
   // POWER PLAY POINTS cards — model 0.5 line
   h += '<div id="nhl-section-pp-points" class="nhl-scroll-anchor"></div>';
   if(d.ppUnitsVersion===1){
@@ -11517,6 +11644,7 @@ function _nhlPaint(q){
   }else if(!d.simulation&&!d.historical){
     h+='<div class="gp-history-note">PP1/PP2 assignments were not stored in this older board. The next normal analysis uses published units; existing saved plays are unchanged.</div>';
   }
+  _catCut('pp','ALL');
   if((d.ppPicks||[]).length){
     h += '<div class="sec">⚡ Top ' + d.ppPicks.length + ' Power Play Points (1+) — OVER</div>';
     h += nhlCardGrid(d.ppPicks);
@@ -11524,6 +11652,7 @@ function _nhlPaint(q){
   }else{
     h+='<div class="sec">⚡ Power Play Points (1+) — OVER · MODEL</div><div class="no-picks">No qualifying visible PP Over plays in this saved board.</div>';
   }
+  _catCut('pp','OVER');
   if((d.ppUnders||[]).length){
     h += '<div class="sec">⬇ Top ' + d.ppUnders.length + ' Power Play Points (1+) — UNDER</div>';
     h += nhlUnderGrid(d.ppUnders);
@@ -11531,25 +11660,31 @@ function _nhlPaint(q){
   }else{
     h+='<div class="sec">⬇ Power Play Points (1+) — UNDER · MODEL</div><div class="no-picks">No qualifying visible PP Under plays in this saved board.</div>';
   }
-  // ASSISTS cards
-  h += '<div id="nhl-section-plus-minus" class="nhl-scroll-anchor"></div><div class="sec">Plus/Minus — OVER 0.5 · Top 10 · MODEL / UNPRICED</div>';
+  _catCut('pp','UNDER');
+  h += '<div id="nhl-section-plus-minus" class="nhl-scroll-anchor"></div>';
   h += '<div style="color:#94a3b8;font-size:.74rem;margin-bottom:12px">Over: +1 or better. Under: zero or negative. Picks use opponent history at the applicable home/away venue and last-10 home/away form. Missing prices never hide qualifying picks.</div>';
+  _catCut('pm','ALL');
+  h += '<div class="sec">Plus/Minus — OVER 0.5 · Top 10 · MODEL / UNPRICED</div>';
   h += (d.pmPicks||[]).length?nhlCardGrid(d.pmPicks):'<div class="no-picks">No qualifying Plus/Minus Over picks in this board.</div>';
   h += nhlRestBlock(d.pmRest,'plus/minus','#38bdf8');
+  _catCut('pm','OVER');
   h += '<div class="sec">Plus/Minus — UNDER 0.5 · Top 10 · MODEL / UNPRICED</div>';
   h += (d.pmUnders||[]).length?nhlUnderGrid(d.pmUnders):'<div class="no-picks">No qualifying Plus/Minus Under picks in this board.</div>';
   h += nhlUnderRestBlock(d.pmUndersRest,'plus/minus under','#f87171');
+  _catCut('pm','UNDER');
   h += '<div id="nhl-section-assists" class="nhl-scroll-anchor"></div>';
   if((d.astPicks||[]).length){
     h += '<div class="sec">🅰️ Top ' + d.astPicks.length + ' Assists (1+)</div>';
     h += nhlCardGrid(d.astPicks);
     h += nhlRestBlock(d.astRest, 'assists', '#f59e0b');
   }
+  _catCut('assists','OVER');
   if((d.astUnders||[]).length){
     h += '<div class="sec">⬇ Top ' + d.astUnders.length + ' Assists (1+) — UNDER</div>';
     h += nhlUnderGrid(d.astUnders);
     h += nhlUnderRestBlock(d.astUndersRest, 'assists under', '#f87171');
   }
+  _catCut('assists','UNDER');
   // GOALS cards
   h += '<div id="nhl-section-goals" class="nhl-scroll-anchor"></div>';
   if((d.goalPicks||[]).length){
@@ -11557,11 +11692,13 @@ function _nhlPaint(q){
     h += nhlCardGrid(d.goalPicks);
     h += nhlRestBlock(d.goalRest, 'goals', '#34d399');
   }
+  _catCut('goals','OVER');
   if((d.goalUnders||[]).length){
     h += '<div class="sec">⬇ Top ' + d.goalUnders.length + ' Goals (1+) — UNDER</div>';
     h += nhlUnderGrid(d.goalUnders);
     h += nhlUnderRestBlock(d.goalUndersRest, 'goals under', '#f87171');
   }
+  _catCut('goals','UNDER');
   // SAVES cards
   h += '<div id="nhl-section-saves" class="nhl-scroll-anchor"></div>';
   if(!d.simulation){
@@ -11576,17 +11713,20 @@ function _nhlPaint(q){
       h+='</details>';
     }
   }
+  _catCut('saves','ALL');
   if((d.savesPicks||[]).length){
     h += '<div class="sec">🧤 Top ' + d.savesPicks.length + ' Goalie Saves</div>';
     h += nhlCardGrid(d.savesPicks);
     h += nhlRestBlock(d.savesRest, 'saves', '#60a5fa');
   }
+  _catCut('saves','OVER');
   if((d.savesUnders||[]).length){
     h += '<div class="sec">⬇ Top ' + d.savesUnders.length + ' Goalie Saves — UNDER</div>';
     h += nhlUnderGrid(d.savesUnders);
     h += nhlUnderRestBlock(d.savesUndersRest, 'saves under', '#f87171');
   }
 
+  _catCut('saves','UNDER');
   // All Plays by Game - collapsible (shots + points detail tables)
   var formGroups=_nhlFormGroups(raw);
   var formPlays=[];
@@ -11665,13 +11805,15 @@ function _nhlPaint(q){
       h += '</div></div>';
     });
   }
+  _catCut('games','ALL');
+  h=_top+_nhlCatBoard(d,_catHtml,_hcCount)
+    +_nhlPanWrap('locks',_panLocks)+_nhlPanWrap('gp',_panGp)+_nhlPanWrap('hc',_panHc)
+    +_nhlPanWrap('top30',_panTop30)+_nhlPanWrap('outside',_panOutside)+_nhlPanWrap('team',_panTeam);
 
   document.getElementById('nhlBody').innerHTML = h;
   nhlTeamStatsMount(raw);
   _nhlHcBind();
-  document.querySelectorAll('#nhlBody .nhl-game-jump').forEach(function(card){
-    card.onclick=function(){nhlScrollToGameId(card.getAttribute('data-game-id'));};
-  });
+  _nhlCatApply();
   // Parlay pool always reflects the full (unfiltered) slate regardless of search.
   function _nhlParlaySide(arr, side){return (arr||[]).map(function(p){return Object.assign({},p,{_parlaySide:side});});}
   window.__NHL_PLAYS__ = _nhlParlaySide(raw.picks,'OVER').concat(_nhlParlaySide(raw.rest,'OVER'))
