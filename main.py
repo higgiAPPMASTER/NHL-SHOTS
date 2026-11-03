@@ -7388,7 +7388,7 @@ nav{position:fixed;top:0;width:100%;background:rgba(10,10,10,.95);backdrop-filte
 .nhl-nav-btn.trk{background:#7c3aed}.nhl-nav-btn.top30{background:#be123c}.nhl-nav-btn.gp{background:#0e7490}.nhl-nav-btn.track{background:#047857}.nhl-nav-btn.overflow{background:#b45309}.nhl-nav-btn.history{background:#1d4ed8}.nhl-nav-btn.bets{background:#0e7490}
 .nhl-menu{position:relative}
 .nhl-nav-btn.menu{background:#1d4ed8;font-size:.82rem;padding:9px 16px}
-.nhl-menu-list{display:none;position:absolute;right:0;top:calc(100% + 6px);min-width:230px;background:#0b1222;border:1px solid #334155;border-radius:10px;padding:6px;box-shadow:0 12px 30px rgba(0,0,0,.55);z-index:10000}
+.nhl-menu-list{display:none;position:absolute;right:0;top:calc(100% + 6px);min-width:230px;background:#0b1222;border:1px solid #334155;border-radius:10px;padding:6px;box-shadow:0 12px 30px rgba(0,0,0,.55);z-index:10000;max-height:calc(100vh - 96px);max-height:calc(100dvh - 96px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 .nhl-menu-list.open{display:block}
 .nhl-menu-item{display:flex;align-items:center;gap:10px;width:100%;background:transparent;border:0;border-left:4px solid var(--c);border-radius:6px;color:#f1f5f9;font-size:.86rem;font-weight:800;text-align:left;padding:10px 12px;margin:2px 0;cursor:pointer}
 .nhl-menu-item:hover,.nhl-menu-item:focus{background:#1e293b;outline:none}
