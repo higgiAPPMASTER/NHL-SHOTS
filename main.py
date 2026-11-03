@@ -8120,9 +8120,6 @@ function _nhlTogglePastDates(force){
 </script>
   </div>
 
-  <div class="status-msg" id="statusMsg"></div>
-  <div id="out"></div>
-
   <div class="card frank-ai-card ncx" id="frankAiCard">
     <div class="frank-ai-head">
       <div class="ncx-badge">&#127954;</div>
@@ -8297,6 +8294,9 @@ function _nhlTogglePastDates(force){
     </div>
     <div id="frankAiAnswer" class="frank-ai-answer"></div>
   </div>
+
+  <div class="status-msg" id="statusMsg"></div>
+  <div id="out"></div>
 
   <div class="nhl-parlay-ov" id="nhlParlayOv" onclick="if(event.target===this)closeNhlParlay()">
   <div class="card" id="parlayCard" style="text-align:center;max-width:600px;margin:20px auto 0">
