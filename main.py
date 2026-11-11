@@ -1696,6 +1696,132 @@ async def nhl_team_display_context(date_str: str, game_type: int = 2, refresh: b
     return JSONResponse(_nhl_display_store(key, payload))
 
 
+_NHL_PP_HOT_TEAM_IDS = {
+    "NJD": 1, "NYI": 2, "NYR": 3, "PHI": 4, "PIT": 5, "BOS": 6, "BUF": 7, "MTL": 8,
+    "OTT": 9, "TOR": 10, "CAR": 12, "FLA": 13, "TBL": 14, "WSH": 15, "CHI": 16,
+    "DET": 17, "NSH": 18, "STL": 19, "CGY": 20, "COL": 21, "EDM": 22, "VAN": 23,
+    "ANA": 24, "DAL": 25, "LAK": 26, "SJS": 28, "CBJ": 29, "MIN": 30, "WPG": 52,
+    "VGK": 54, "SEA": 55, "UTA": 59,
+}
+_NHL_PP_HOT_NEED = 3   # games with a power-play goal...
+_NHL_PP_HOT_SPAN = 5   # ...out of the last five
+
+
+@app.get("/api/nhl/pp-hot-teams")
+async def nhl_pp_hot_teams(date_str: str, refresh: bool = False):
+    """Hot Power Play Teams board (display only; never touches any pick model).
+
+    A team qualifies when it scored a power-play goal in 3+ of its last 5 games
+    AND in 3+ of its last 5 games vs tonight's opponent at tonight's venue
+    (home games if home tonight, road games if away), any season.
+    """
+    import urllib.parse
+    try:
+        target = date.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Date must use YYYY-MM-DD")
+    key = ("pp-hot-teams-v1", date_str)
+    cached = _nhl_display_cached(key)
+    if cached is not None and not refresh:
+        return JSONResponse(cached)
+    async with httpx.AsyncClient(
+            follow_redirects=True, timeout=15,
+            limits=httpx.Limits(max_connections=8, max_keepalive_connections=8)) as client:
+        try:
+            response = await client.get(f"{NHL_API}/schedule/{date_str}")
+            response.raise_for_status()
+            schedule = response.json()
+            if not isinstance(schedule, dict) or not isinstance(schedule.get("gameWeek"), list):
+                raise ValueError("schedule missing gameWeek")
+        except (httpx.HTTPError, ValueError, TypeError):
+            raise HTTPException(status_code=502, detail="NHL schedule unavailable; retry.")
+        matchups = []
+        for day in schedule["gameWeek"]:
+            if day.get("date") != date_str:
+                continue
+            for game in day.get("games") or []:
+                game_type = game.get("gameType")
+                if game_type not in (1, 2, 3):
+                    continue
+                for own, other in (("homeTeam", "awayTeam"), ("awayTeam", "homeTeam")):
+                    team = str((game.get(own) or {}).get("abbrev") or "").upper()
+                    opp = str((game.get(other) or {}).get("abbrev") or "").upper()
+                    if team not in _NHL_PP_HOT_TEAM_IDS or opp not in _NHL_PP_HOT_TEAM_IDS:
+                        continue
+                    matchups.append({
+                        "team": team, "opponent": opp,
+                        "venue": "HOME" if own == "homeTeam" else "AWAY",
+                        "game_id": game.get("id"), "game_type": game_type,
+                        "start_time": game.get("startTimeUTC", ""),
+                    })
+        sem = asyncio.Semaphore(6)
+        sort = '[{"property":"gameDate","direction":"DESC"}]'
+
+        async def rows_for(expression):
+            query = urllib.parse.urlencode({
+                "isAggregate": "false", "isGame": "true", "start": 0,
+                "limit": _NHL_PP_HOT_SPAN, "sort": sort, "cayenneExp": expression})
+            async with sem:
+                response = await client.get(f"{NHL_STATS}/team/powerplay?{query}")
+                response.raise_for_status()
+                data = response.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                raise ValueError("NHL power-play game report missing data")
+            games = []
+            for row in data["data"][:_NHL_PP_HOT_SPAN]:
+                goals = _nhl_display_number(row.get("powerPlayGoalsFor"))
+                if goals is None:
+                    raise ValueError("NHL power-play game row missing PP goals")
+                chances = _nhl_display_number(row.get("ppOpportunities"))
+                games.append({
+                    "date": str(row.get("gameDate") or "")[:10],
+                    "venue": "HOME" if row.get("homeRoad") == "H" else "AWAY",
+                    "opponent": str(row.get("opponentTeamAbbrev") or ""),
+                    "ppg": int(goals),
+                    "ppo": int(chances) if chances is not None else None,
+                })
+            return games
+
+        async def team_entry(m):
+            # Regular season history; playoff games also count during the playoffs.
+            types = "gameTypeId>=2" if m["game_type"] == 3 else "gameTypeId=2"
+            base = (f"teamId={_NHL_PP_HOT_TEAM_IDS[m['team']]} and {types} "
+                    f'and gameDate<"{date_str}"')
+            venue_code = "H" if m["venue"] == "HOME" else "R"
+            try:
+                last5, vs_opp = await asyncio.gather(
+                    rows_for(base),
+                    rows_for(base + f" and opponentTeamId={_NHL_PP_HOT_TEAM_IDS[m['opponent']]}"
+                             f' and homeRoad="{venue_code}"'))
+            except (httpx.HTTPError, ValueError, TypeError):
+                logger.warning("NHL PP hot teams: history unavailable for %s", m["team"])
+                return {**m, "unavailable": True}
+            l5_hits = sum(1 for g in last5 if g["ppg"] > 0)
+            vs_hits = sum(1 for g in vs_opp if g["ppg"] > 0)
+            return {
+                **m, "unavailable": False,
+                "last5": last5, "last5_hits": l5_hits, "last5_games": len(last5),
+                "last5_ppg": sum(g["ppg"] for g in last5),
+                "last5_ppo": sum(g["ppo"] or 0 for g in last5),
+                "vs_opp": vs_opp, "vs_hits": vs_hits, "vs_games": len(vs_opp),
+                "vs_ppg": sum(g["ppg"] for g in vs_opp),
+                "vs_ppo": sum(g["ppo"] or 0 for g in vs_opp),
+                "qualified": l5_hits >= _NHL_PP_HOT_NEED and vs_hits >= _NHL_PP_HOT_NEED,
+            }
+
+        teams = await asyncio.gather(*(team_entry(m) for m in matchups))
+    teams = sorted(teams, key=lambda t: (
+        not t.get("qualified"), -(t.get("last5_hits") or 0) - (t.get("vs_hits") or 0),
+        -(t.get("last5_ppg") or 0) - (t.get("vs_ppg") or 0), t["team"]))
+    unavailable = [t["team"] for t in teams if t.get("unavailable")]
+    payload = {
+        "date": date_str, "need": _NHL_PP_HOT_NEED, "span": _NHL_PP_HOT_SPAN,
+        "teams": teams, "qualified_count": sum(1 for t in teams if t.get("qualified")),
+        "unavailable": unavailable, "source": "NHL.com",
+    }
+    return JSONResponse(_nhl_display_store(key, payload))
+
+
 @app.get("/api/nhl/player-season-context")
 async def nhl_player_display_context(pid: int, date_str: str, position: str = "F",
                                     game_type: int = 2, refresh: bool = False):
@@ -4229,7 +4355,7 @@ def _nhl_hot_cold_players(pool, logs_map, target_date, points_lines, profiles,
     return output
 
 
-_NHL_SHOT_FUNNEL_TIER = 5   # opponent must be a bottom-5 (Over) / top-5 (Under) shots-against team
+_NHL_SHOT_FUNNEL_TIER = 10  # opponent must be a bottom-10 (Over) / top-10 (Under) shots-against team
 _NHL_SHOT_FUNNEL_TOP = 10   # Top 10 Over and Top 10 Under
 _NHL_SHOT_FUNNEL_VS_HITS = 3  # at least 3 hits in the last 5 meetings with the opponent
 
@@ -4237,10 +4363,10 @@ _NHL_SHOT_FUNNEL_VS_HITS = 3  # at least 3 hits in the last 5 meetings with the 
 def _nhl_shot_funnel_players(pool, logs_map, target_date, sa_map, games):
     """Shots Funnel: genuine Shots line + opponent shots-against tier + form.
 
-    OVER: opponent is one of the 5 teams allowing the MOST shots per game,
+    OVER: opponent is one of the 10 teams allowing the MOST shots per game,
     the player went Over his line in 4 of his last 5 current-season games
     (October: 80% of 2-5 games) and Over in at least 3 of his last 5
-    meetings with that opponent.  UNDER is the mirror: one of the 5 teams
+    meetings with that opponent.  UNDER is the mirror: one of the 10 teams
     allowing the FEWEST shots, Under 4/5 recent and Under 3+ of 5 vs them.
     Separate board/record; never changes models or ordinary boards."""
     ranked = sorted(((t, float(v)) for t, v in (sa_map or {}).items() if v and float(v) > 0),
@@ -7036,7 +7162,7 @@ async def run_picks(
         "hotColdPlayers": hot_cold_players,
         "hotColdSeason": season,
         "hotColdSourceUnavailable": form_unavailable,
-        "shotFunnelVersion": 1,
+        "shotFunnelVersion": 2,
         "shotFunnelPlayers": shot_funnel_players,
         "games":         games,
         "gameTypes":     slate_meta["gameTypes"],
@@ -7678,6 +7804,7 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(function(){_nhlPanOpen('top30');})">🏒 Top 30 PPG vs Team</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#9f1239" onclick="_nhlNavGo(function(){_nhlPanOpen('outside');})">🏒 Outside Top 30 PPG vs Team</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#2563eb" onclick="_nhlNavGo(function(){_nhlPanOpen('team');})">📊 Team Rankings</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#dc2626" onclick="_nhlNavGo(function(){_nhlPanOpen('pphot');nhlPpHotMount();})">⚡ Hot Power Play Teams</button>
         <div class="nhl-menu-head tools" role="presentation" style="color:#fbbf24">&#128202; Records</div>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlGPRecord)">🔮 GP Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0e7490" onclick="_nhlNavGo(openNhlSimRecord)">🎲 Sim Record</button>
@@ -7840,7 +7967,7 @@ document.addEventListener('keydown',function(e){
 .nhl-cat-side button.on{background:#92400e;border-color:#fbbf24;color:#fff}
 #nhlCatBoard [hidden]{display:none !important}
 .nhl-pan{display:none}
-body[data-nhl-pan="locks"] .nhl-pan[data-pan="locks"],body[data-nhl-pan="gp"] .nhl-pan[data-pan="gp"],body[data-nhl-pan="hc"] .nhl-pan[data-pan="hc"],body[data-nhl-pan="top30"] .nhl-pan[data-pan="top30"],body[data-nhl-pan="outside"] .nhl-pan[data-pan="outside"],body[data-nhl-pan="team"] .nhl-pan[data-pan="team"],body[data-nhl-pan="funnel"] .nhl-pan[data-pan="funnel"]{display:block;position:fixed;top:80px;left:0;right:0;bottom:0;z-index:95;overflow-y:auto;background:rgba(5,5,5,.97);padding:12px 16px 40px;box-sizing:border-box}
+body[data-nhl-pan="locks"] .nhl-pan[data-pan="locks"],body[data-nhl-pan="gp"] .nhl-pan[data-pan="gp"],body[data-nhl-pan="hc"] .nhl-pan[data-pan="hc"],body[data-nhl-pan="top30"] .nhl-pan[data-pan="top30"],body[data-nhl-pan="outside"] .nhl-pan[data-pan="outside"],body[data-nhl-pan="team"] .nhl-pan[data-pan="team"],body[data-nhl-pan="funnel"] .nhl-pan[data-pan="funnel"],body[data-nhl-pan="pphot"] .nhl-pan[data-pan="pphot"]{display:block;position:fixed;top:80px;left:0;right:0;bottom:0;z-index:95;overflow-y:auto;background:rgba(5,5,5,.97);padding:12px 16px 40px;box-sizing:border-box}
 .nhl-pan-bar{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:10px;max-width:1300px;margin:0 auto 10px;padding:6px 0 10px;background:rgba(5,5,5,.97);border-bottom:1px solid #262626}
 .nhl-pan-title{color:#f8fafc;font-weight:900;font-size:1rem;letter-spacing:.02em}
 .nhl-pan-close{background:#7f1d1d;border:1px solid #f87171;color:#fff;border-radius:8px;padding:7px 14px;font-weight:900;font-size:.78rem;cursor:pointer}
@@ -8163,7 +8290,7 @@ function _nhlTogglePastDates(force){
       <div class="frank-pane" data-pane="hot" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot shots over props')" data-label="Hot Shots · Top 10" style="--c:#f97316"><b class="ncx-t">Shots · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot points over props')" data-label="Hot Points · Top 10" style="--c:#f97316"><b class="ncx-t">Points · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot goals over props')" data-label="Hot Goals · Top 10" style="--c:#f97316"><b class="ncx-t">Goals · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot assists over props')" data-label="Hot Assists · Top 10" style="--c:#f97316"><b class="ncx-t">Assists · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot pp points over props')" data-label="Hot PP Points · Top 10" style="--c:#f97316"><b class="ncx-t">PP Points · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot plus/minus over props')" data-label="Hot Plus/Minus · Top 10" style="--c:#f97316"><b class="ncx-t">Plus/Minus · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot saves over props')" data-label="Hot Saves · Top 10" style="--c:#f97316"><b class="ncx-t">Saves · Top 10</b><small>Overs from players on a heater</small></button></div></div>
       <div class="frank-pane" data-pane="cold" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold shots under props')" data-label="Cold Shots · Top 10" style="--c:#3b82f6"><b class="ncx-t">Shots · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold points under props')" data-label="Cold Points · Top 10" style="--c:#3b82f6"><b class="ncx-t">Points · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold goals under props')" data-label="Cold Goals · Top 10" style="--c:#3b82f6"><b class="ncx-t">Goals · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold assists under props')" data-label="Cold Assists · Top 10" style="--c:#3b82f6"><b class="ncx-t">Assists · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold pp points under props')" data-label="Cold PP Points · Top 10" style="--c:#3b82f6"><b class="ncx-t">PP Points · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold plus/minus under props')" data-label="Cold Plus/Minus · Top 10" style="--c:#3b82f6"><b class="ncx-t">Plus/Minus · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold saves under props')" data-label="Cold Saves · Top 10" style="--c:#3b82f6"><b class="ncx-t">Saves · Top 10</b><small>Unders from players in a slump</small></button></div></div>
       <div class="frank-pane" data-pane="dcold" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold shots under props')" data-label="Double Cold Shots · Top 10" style="--c:#06b6d4"><b class="ncx-t">Shots · Top 10</b><small>Unders from the deepest slumps</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold points under props')" data-label="Double Cold Points · Top 10" style="--c:#06b6d4"><b class="ncx-t">Points · Top 10</b><small>Unders from the deepest slumps</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold goals under props')" data-label="Double Cold Goals · Top 10" style="--c:#06b6d4"><b class="ncx-t">Goals · Top 10</b><small>Unders from the deepest slumps</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold assists under props')" data-label="Double Cold Assists · Top 10" style="--c:#06b6d4"><b class="ncx-t">Assists · Top 10</b><small>Unders from the deepest slumps</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold pp points under props')" data-label="Double Cold PP Points · Top 10" style="--c:#06b6d4"><b class="ncx-t">PP Points · Top 10</b><small>Unders from the deepest slumps</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold plus/minus under props')" data-label="Double Cold Plus/Minus · Top 10" style="--c:#06b6d4"><b class="ncx-t">Plus/Minus · Top 10</b><small>Unders from the deepest slumps</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge double cold saves under props')" data-label="Double Cold Saves · Top 10" style="--c:#06b6d4"><b class="ncx-t">Saves · Top 10</b><small>Unders from the deepest slumps</small></button></div></div>
-      <div class="frank-pane" data-pane="funnel" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge shots funnel over props')" data-label="Shots Funnel Over · Top 10" style="--c:#0d9488"><b class="ncx-t">Shots Funnel Over · Top 10</b><small>Bottom-5 shots-against opponent, 4/5 last 5, 3+ of 5 vs team</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge shots funnel under props')" data-label="Shots Funnel Under · Top 10" style="--c:#0d9488"><b class="ncx-t">Shots Funnel Under · Top 10</b><small>Top-5 shots-against opponent, 4/5 last 5, 3+ of 5 vs team</small></button></div></div>
+      <div class="frank-pane" data-pane="funnel" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge shots funnel over props')" data-label="Shots Funnel Over · Top 10" style="--c:#0d9488"><b class="ncx-t">Shots Funnel Over · Top 10</b><small>Bottom-10 shots-against opponent, 4/5 last 5, 3+ of 5 vs team</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge shots funnel under props')" data-label="Shots Funnel Under · Top 10" style="--c:#0d9488"><b class="ncx-t">Shots Funnel Under · Top 10</b><small>Top-10 shots-against opponent, 4/5 last 5, 3+ of 5 vs team</small></button></div></div>
     </div>
     <div class="frank-filter">
       <label class="frank-f"><span>Category</span>
@@ -10504,7 +10631,7 @@ function _sfCard(raw,r){
     +_nhlBetBtn(Object.assign({},r,{mkt:'Shots on Goal',formCategory:'Shots Funnel'}),r.side)+'</article>';
 }
 function _nhlShotFunnelSection(d,q){
-  var note='<div class="hc-note">Shots on Goal only, genuine sportsbook line required. <b>Over:</b> opponent is one of the 5 teams allowing the most shots per game, the player went Over his line in 4 of his last 5 games this season and Over in at least 3 of his last 5 games vs that team. <b>Under:</b> the mirror &#8212; one of the 5 teams allowing the fewest shots, Under in 4 of his last 5 and Under in at least 3 of his last 5 vs them. Top 10 each side, saved before puck drop to its own Shots Funnel Record.</div>';
+  var note='<div class="hc-note">Shots on Goal only, genuine sportsbook line required. <b>Over:</b> opponent is one of the 10 teams allowing the most shots per game, the player went Over his line in 4 of his last 5 games this season and Over in at least 3 of his last 5 games vs that team. <b>Under:</b> the mirror &#8212; one of the 10 teams allowing the fewest shots, Under in 4 of his last 5 and Under in at least 3 of his last 5 vs them. Top 10 each side, saved before puck drop to its own Shots Funnel Record.</div>';
   if(!Array.isArray(d.shotFunnelPlayers)&&!Array.isArray(d.shotFunnelOver)&&!Array.isArray(d.shotFunnelUnder))
     return '<section id="nhl-section-funnel" class="hc-section">'+note+'<div class="hc-note" style="color:#fbbf24">This board was saved before the Shots Funnel was added. Run the picks again to build it.</div></section>';
   var fg=_nhlFormGroups(d);
@@ -11866,7 +11993,7 @@ function _nhlCatApply(){
 }
 function _nhlCatPick(cat){window.__NHL_CAT__.cat=cat;_nhlCatApply();}
 function _nhlCatSide(side){window.__NHL_CAT__.side=side;_nhlCatApply();}
-var _NHL_PANS={funnel:'&#127919; Shots Funnel',locks:'&#128274; 80&#8211;100% Locks',gp:'&#128302; Game Predictor',hc:'&#128293; Hot and Cold Players',top30:'&#127954; Top 30 Point Per Game vs Team',outside:'&#127954; Point Per Game vs Team &#183; Outside Top 30',team:'&#128202; Team Rankings'};
+var _NHL_PANS={funnel:'&#127919; Shots Funnel',locks:'&#128274; 80&#8211;100% Locks',gp:'&#128302; Game Predictor',hc:'&#128293; Hot and Cold Players',top30:'&#127954; Top 30 Point Per Game vs Team',outside:'&#127954; Point Per Game vs Team &#183; Outside Top 30',team:'&#128202; Team Rankings',pphot:'&#9889; Hot Power Play Teams'};
 function _nhlPanWrap(key,inner){
   return '<div class="nhl-pan" data-pan="'+key+'" onclick="if(event.target===this)_nhlPanClose()"><div class="nhl-pan-bar"><span class="nhl-pan-title">'+_NHL_PANS[key]+'</span><button type="button" class="nhl-pan-close" onclick="_nhlPanClose()" aria-label="Close">&#10005; Close</button></div><div class="nhl-pan-inner">'+(inner||'')+'</div></div>';
 }
@@ -12197,7 +12324,7 @@ function _nhlPaint(q){
   h=_top+_nhlCatBoard(d,_catHtml,_hcCount)
     +_nhlPanWrap('locks',_panLocks)+_nhlPanWrap('gp',_panGp)+_nhlPanWrap('hc',_panHc)
     +_nhlPanWrap('top30',_panTop30)+_nhlPanWrap('outside',_panOutside)+_nhlPanWrap('team',_panTeam)
-    +_nhlPanWrap('funnel',_panFunnel);
+    +_nhlPanWrap('funnel',_panFunnel)+_nhlPanWrap('pphot','<div id="nhl-pp-hot"></div>');
 
   // Player lookup lives outside #nhlBody (keeps typing focus) and is docked under the category chips.
   var _tb=document.getElementById('nhlToolbar'),_tbIn=document.getElementById('nhlSearch');
@@ -17742,6 +17869,64 @@ function _ntsOpp(raw,ab){
     if(g[i].awayTeam===ab)return g[i].homeTeam;
   }
   return null;
+}
+// Hot Power Play Teams (display only): PP goal in 3+ of last 5 games AND in 3+ of
+// the last 5 games vs tonight's opponent at tonight's venue (any season).
+var _nhlPpHotCache={};
+function _nhlPpHotEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function _nhlPpHotDots(games){
+  return (games||[]).map(function(g){
+    var hit=g.ppg>0;
+    return '<span title="'+_nhlPpHotEsc(g.date+' '+(g.venue==='HOME'?'vs ':'@ ')+g.opponent+': '+g.ppg+' PPG'+(g.ppo!=null?' on '+g.ppo+' PP':''))+'" style="display:inline-block;min-width:22px;padding:2px 4px;margin:0 2px 2px 0;border-radius:5px;font-size:.68rem;font-weight:800;text-align:center;background:'+(hit?'#14532d':'#3f1d1d')+';color:'+(hit?'#86efac':'#fca5a5')+'">'+g.ppg+'</span>';
+  }).join('');
+}
+function _nhlPpHotCard(t,need){
+  var venueTxt=t.venue==='HOME'?'Home':'Away';
+  var vsLbl=(t.venue==='HOME'?'vs ':'@ ')+t.opponent;
+  if(t.unavailable)return '<div style="border:1px solid #334155;border-radius:10px;padding:10px 12px;margin-bottom:8px;color:#94a3b8;font-size:.78rem"><b style="color:#f8fafc">'+_nhlPpHotEsc(t.team)+'</b> '+_nhlPpHotEsc(vsLbl)+' &#183; history unavailable, press Refresh.</div>';
+  var ok1=t.last5_hits>=need,ok2=t.vs_hits>=need;
+  function pill(ok,txt){return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:800;background:'+(ok?'#14532d':'#334155')+';color:'+(ok?'#86efac':'#cbd5e1')+'">'+txt+'</span>';}
+  return '<div style="border:1px solid '+(t.qualified?'#dc2626':'#334155')+';border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#0b1220">'
+    +'<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px"><b style="color:#f8fafc;font-size:.95rem">'+_nhlPpHotEsc(t.team)+'</b><span style="color:#94a3b8;font-size:.78rem">'+_nhlPpHotEsc(vsLbl)+' &#183; '+venueTxt+' tonight</span>'
+    +(t.qualified?'<span style="margin-left:auto;background:#dc2626;color:#fff;border-radius:999px;padding:2px 8px;font-size:.7rem;font-weight:800">&#9889; HOT PP</span>':'')+'</div>'
+    +'<div style="font-size:.74rem;color:#cbd5e1;margin-bottom:4px">'+pill(ok1,t.last5_hits+'/'+t.last5_games+' last '+t.last5_games)+' <span style="color:#94a3b8">'+t.last5_ppg+' PPG on '+t.last5_ppo+' PP</span></div>'
+    +'<div style="margin-bottom:6px">'+_nhlPpHotDots(t.last5)+'</div>'
+    +'<div style="font-size:.74rem;color:#cbd5e1;margin-bottom:4px">'+pill(ok2,t.vs_hits+'/'+t.vs_games+' last '+t.vs_games+' '+_nhlPpHotEsc(vsLbl)+' ('+venueTxt+')')+' <span style="color:#94a3b8">'+t.vs_ppg+' PPG on '+t.vs_ppo+' PP</span></div>'
+    +'<div>'+(t.vs_games?_nhlPpHotDots(t.vs_opp):'<span style="color:#94a3b8;font-size:.72rem">No previous '+venueTxt.toLowerCase()+' meetings found.</span>')+'</div></div>';
+}
+function nhlPpHotMount(force){
+  var el=document.getElementById('nhl-pp-hot');
+  if(!el)return;
+  var raw=window.__NHL_RAW__||{};
+  var date=raw.targetDate||raw.date||window.__NHL_DATE__||'';
+  if(!date){el.innerHTML='<div class="no-picks">Load the NHL picks first.</div>';return;}
+  function draw(d){
+    var need=d.need||3,span=d.span||5;
+    var hot=d.teams.filter(function(t){return t.qualified;}),rest=d.teams.filter(function(t){return !t.qualified;});
+    var h='<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px"><span style="color:#cbd5e1;font-size:.78rem">'+_nhlPpHotEsc(d.date)+' &#183; Power-play goal in '+need+'+ of last '+span+' games <b>and</b> '+need+'+ of last '+span+' vs tonight&#39;s opponent at the same venue (any season).</span>'
+      +'<button type="button" class="hc-btn" style="margin-left:auto" onclick="nhlPpHotMount(true)">&#8635; Refresh</button></div>';
+    h+='<div style="font-size:.8rem;font-weight:800;color:#f87171;margin:6px 0">&#9889; Hot Power Play Teams ('+hot.length+')</div>';
+    h+=hot.length?hot.map(function(t){return _nhlPpHotCard(t,need);}).join(''):'<div class="no-picks">No team meets both rules tonight.</div>';
+    if(rest.length)h+='<details style="margin-top:12px"><summary style="cursor:pointer;color:#94a3b8;font-size:.78rem;font-weight:700">All other teams tonight ('+rest.length+')</summary><div style="margin-top:8px">'+rest.map(function(t){return _nhlPpHotCard(t,need);}).join('')+'</div></details>';
+    if(d.unavailable&&d.unavailable.length)h+='<div class="hc-note" style="color:#fbbf24;margin-top:8px">History unavailable for '+_nhlPpHotEsc(d.unavailable.join(', '))+'. Press Refresh to retry.</div>';
+    h+='<div class="hc-note" style="margin-top:8px;color:#94a3b8;font-size:.7rem">Green = scored a PP goal that game. Regular-season games (playoff games also count in the playoffs). Display only; not tracked. Source: NHL.com.</div>';
+    el.innerHTML=h;
+  }
+  if(!force&&_nhlPpHotCache[date]){draw(_nhlPpHotCache[date]);return;}
+  el.innerHTML='<div class="no-picks">Loading power-play history&#8230;</div>';
+  el.__ppKey=date;
+  fetch('/api/nhl/pp-hot-teams?date_str='+encodeURIComponent(date)+(force?'&refresh=true':''),{credentials:'include'})
+    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+    .then(function(d){
+      if(el.__ppKey!==date)return;
+      if(!d||!Array.isArray(d.teams))throw new Error('bad payload');
+      if(!d.unavailable||!d.unavailable.length)_nhlPpHotCache[date]=d;
+      if(!d.teams.length){el.innerHTML='<div class="no-picks">No NHL games on '+_nhlPpHotEsc(date)+'.</div>';return;}
+      draw(d);
+    }).catch(function(e){
+      if(el.__ppKey!==date)return;
+      el.innerHTML='<div class="no-picks">Power-play history unavailable ('+_nhlPpHotEsc(e.message)+'). <button type="button" class="hc-btn" onclick="nhlPpHotMount(true)">Retry</button></div>';
+    });
 }
 function nhlTeamStatsMount(raw){
   var el=document.getElementById('nhl-team-stats');
