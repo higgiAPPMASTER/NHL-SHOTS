@@ -117,6 +117,17 @@ _NHL_FUNNEL_SPECS = [
     ("shotFunnelUnder", "Shots Funnel", "shots", "SHOTS", "UNDER", "funnel_shots"),
 ]
 _NHL_FUNNEL_LABELS = {spec[1] for spec in _NHL_FUNNEL_SPECS}
+_NHL_FORM_LABELS = {spec[1] for spec in _NHL_FORM_SPECS}
+
+
+def _nhl_is_hotcold_row(row: dict) -> bool:
+    """Hot/Cold/Double Cold plays, including legacy Locks rows copied from them."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("category") in _NHL_FORM_LABELS:
+        return True
+    return (row.get("category") == "80-100% Locks"
+            and row.get("formCategory") in _NHL_FORM_LABELS)
 _NHL_FUNNEL_META = _NHL_FORM_META + (
     "funnel", "oppSA", "oppSARank", "oppSATeams", "oppSATier")
 _NHL_STANDARD_PP_LINES: Dict[str, Dict] = {}
@@ -7274,7 +7285,7 @@ async def run_picks(
         import json as _json
         try:
             _track_record = (
-                _nhl_track_record_payload() if capture_official else None)
+                _nhl_track_record_payload(scope="main") if capture_official else None)
         except Exception:
             # A picks snapshot is still useful if historical data is
             # temporarily unavailable.  The exception is retained in Render
@@ -7812,6 +7823,7 @@ body.is-admin .nhl-menu-item.admin-only{display:flex !important}
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#b45309" onclick="_nhlNavGo(openNhlOverflowRecord)">⭐ NHL Overflow</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlCoachRecord)">🧠 Edge Coach Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#7c3aed" onclick="_nhlNavGo(openNhlDayReport)">📅 By Day / Category</button>
+        <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#ea580c" onclick="_nhlNavGo(openNhlHotColdRecord)">🔥 Hot / Cold Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#0d9488" onclick="_nhlNavGo(openNhlShotFunnelRecord)">🎯 Shots Funnel Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#be123c" onclick="_nhlNavGo(function(){openNhlTop30Record('top30');})">🏒 Top 30 Record</button>
         <button type="button" role="menuitem" class="nhl-menu-item" style="--c:#9f1239" onclick="_nhlNavGo(function(){openNhlTop30Record('outside');})">🏒 Outside Top 30 Record</button>
@@ -10836,6 +10848,13 @@ function _nhlTop30Form(p){
     +'<div style="display:flex;gap:4px;flex-wrap:nowrap">'+log+'</div></div>';
 }
 var _nhlTop30Rec=null,_nhlTop30Period='day',_nhlTop30Anchor='',_nhlTop30RecList='top30',_nhlTop30Recs={};
+function _nhlTop30Stake(){var n=parseFloat(localStorage.getItem('nhl_top30_stake')||'100');return isFinite(n)&&n>0?n:100;}
+function _nhlTop30SetStake(input){
+  var n=parseFloat(input&&input.value||'');
+  if(!isFinite(n)||n<=0){input.value=_nhlTop30Stake().toFixed(2);return;}
+  localStorage.setItem('nhl_top30_stake',String(Math.round(n*100)/100));
+  _nhlTop30RecRender();
+}
 function _nhlTop30RecName(){return _nhlTop30RecList==='outside'?'Outside Top 30':'Top 30';}
 function _nhlTop30SetList(v){
   _nhlTop30RecList=v==='outside'?'outside':'top30';
@@ -10870,12 +10889,13 @@ function openNhlTop30Record(list){
     +'<div><button type="button" class="hc-btn" onclick="_nhlTop30RecLoad(true)">Get Results</button> <button type="button" class="hc-btn" onclick="document.getElementById(&quot;nhlTop30RecModal&quot;).style.display=&quot;none&quot;">Close</button></div></div>'
     +'<div class="hc-ctl" style="margin-bottom:8px"><div class="hc-grp" role="group" aria-label="List"><span>List</span>'
     +[['top30','Top 30'],['outside','Outside Top 30']].map(function(o){return '<button type="button" class="hc-btn" aria-pressed="'+(_nhlTop30RecList===o[0])+'" onclick="_nhlTop30SetList(&quot;'+o[0]+'&quot;)">'+o[1]+'</button>';}).join('')+'</div></div>'
-    +'<div class="hc-note" style="margin-bottom:10px">Separate record'+(_nhlTop30RecList==='outside'?' for every Outside Top 30 qualifier (never combined with Top 30)':'')+'. Each qualifier is tracked as Points 1+ (Over 0.5), saved before puck drop. Win/loss only — no sportsbook price is attached. Not counted in any other record.</div>'
+    +'<div class="hc-note" style="margin-bottom:10px">Separate record'+(_nhlTop30RecList==='outside'?' for every Outside Top 30 qualifier (never combined with Top 30)':'')+'. Each qualifier is tracked as Points 1+ (Over 0.5), saved before puck drop. Profit and ROI use only the genuine Points Over 0.5 price the app saved before puck drop (odds no shorter than -1000); plays without a saved price count W/L only. Not counted in any other record.</div>'
     +'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">'
     +'<label style="color:#94a3b8;font-size:.72rem;font-weight:800">PERIOD <select id="nhlTop30Period" onchange="_nhlTop30SetPeriod()" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px;color:#fff">'
     +[['day','Day'],['week','Week · last 7 days'],['month','Month'],['season','Season'],['all','All Time']].map(function(o){return '<option value="'+o[0]+'"'+(o[0]===_nhlTop30Period?' selected':'')+'>'+o[1]+'</option>';}).join('')
     +'</select></label>'
     +'<label style="color:#94a3b8;font-size:.72rem;font-weight:800">DATE <input type="date" id="nhlTop30Date" value="'+(_nhlTop30Anchor||_nhlGpToday())+'" onchange="_nhlTop30SetPeriod()" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px;color:#fff;color-scheme:dark;'+(_nhlTop30Period==='all'?'display:none':'')+'"></label>'
+    +'<label style="color:#94a3b8;font-size:.72rem;font-weight:800">BET $ <input type="number" id="nhlTop30Stake" min="0.01" step="5" value="'+_nhlTop30Stake().toFixed(2)+'" onchange="_nhlTop30SetStake(this)" style="width:92px;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px;color:#fff"></label>'
     +'<span id="nhlTop30Caption" style="color:#fde68a;font-size:.8rem;font-weight:800"></span></div>'
     +'<div id="nhlTop30RecBody"><div class="hc-note">Loading…</div></div></div>';
   if(_nhlTop30Rec)_nhlTop30RecRender();
@@ -10899,23 +10919,35 @@ function _nhlTop30RecRender(){
   if(cap)cap.textContent=bounds.label;
   var days=(_nhlTop30Rec.daily||[]).filter(function(d){var dt=String(d.date||'').slice(0,10);return dt>=bounds.start&&dt<=bounds.end;}),all=[];
   days.forEach(function(d){(d.picks||[]).forEach(function(p){all.push(p);});});
+  var stake=_nhlTop30Stake();
+  function priced(p){return (p.result==='WIN'||p.result==='LOSS')&&p.odds!=null&&String(p.odds).trim()!==''&&isFinite(Number(p.odds))&&Number(p.odds)!==0;}
+  function pl(p){return priced(p)?_nhlTrkProfit(p,stake):null;}
+  function money(v){return (v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(2);}
   function tally(list){
     var w=list.filter(function(p){return p.result==='WIN';}).length,l=list.filter(function(p){return p.result==='LOSS';}).length;
-    return {w:w,l:l,v:list.filter(function(p){return p.result==='VOID';}).length,pend:list.filter(function(p){return p.result==='PENDING'||!p.result;}).length,rate:(w+l)?w/(w+l)*100:null};
+    var pr=list.filter(priced),profit=pr.reduce(function(x,p){return x+(pl(p)||0);},0),staked=pr.length*stake;
+    return {w:w,l:l,v:list.filter(function(p){return p.result==='VOID';}).length,pend:list.filter(function(p){return p.result==='PENDING'||!p.result;}).length,rate:(w+l)?w/(w+l)*100:null,
+      priced:pr.length,profit:profit,staked:staked,roi:staked?profit/staked*100:null};
+  }
+  function moneyTxt(t){
+    if(!t.priced)return ' <span style="color:#64748b;font-size:.78rem">· no priced plays</span>';
+    var c=t.profit>=0?'#4ade80':'#f87171';
+    return ' <span style="font-family:monospace;color:'+c+';font-weight:800">'+money(t.profit)+' · ROI '+(t.roi>=0?'+':'')+t.roi.toFixed(1)+'%</span>';
   }
   function rateTxt(t){return t.rate==null?'—':t.rate.toFixed(1)+'%';}
   function rateColor(t){return t.rate==null?'#94a3b8':t.rate>=70?'#4ade80':t.rate>=55?'#facc15':'#f87171';}
   if(!all.length&&(_nhlTop30Rec.daily||[]).length){body.innerHTML='<div class="hc-note">No '+_nhlTop30RecName()+' picks saved for '+_nhlSafe(bounds.label)+'. Pick another date or period.</div>';return;}
   if(!all.length){body.innerHTML='<div class="hc-note">No '+_nhlTop30RecName()+' picks saved yet. They save automatically on each Run A+B+C+D and whenever the Top 30 list is loaded before puck drop.</div>';return;}
   var t=tally(all),html='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px">';
-  [['Record',t.w+'-'+t.l,'#f8fafc'],['Hit rate',rateTxt(t),rateColor(t)],['Pending',String(t.pend),'#93c5fd'],['Void (DNP)',String(t.v),'#94a3b8']].forEach(function(c){
+  var plc=t.profit>=0?'#4ade80':'#f87171';
+  [['Record',t.w+'-'+t.l,'#f8fafc'],['Hit rate',rateTxt(t),rateColor(t)],['Profit',t.priced?money(t.profit):'—',plc],['ROI',t.roi!=null?(t.roi>=0?'+':'')+t.roi.toFixed(1)+'%':'—',plc],['Staked','$'+t.staked.toFixed(2),'#e2e8f0'],['Priced plays',t.priced+' of '+(t.w+t.l),'#fde68a'],['Pending',String(t.pend),'#93c5fd'],['Void (DNP)',String(t.v),'#94a3b8']].forEach(function(c){
     html+='<div style="border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center;background:#0f172a"><div class="hc-note">'+c[0]+'</div><div style="font-size:1.2rem;font-weight:900;color:'+c[2]+'">'+c[1]+'</div></div>';
   });
   html+='</div>';
   function venueTxt(list){
     return [['HOME','🏠 Home'],['AWAY','✈️ Away']].map(function(v){
       var vt=tally(list.filter(function(p){return p.venue===v[0];}));
-      return v[1]+' <b style="color:'+rateColor(vt)+'">'+vt.w+'-'+vt.l+' ('+rateTxt(vt)+')</b>'+(vt.pend?' <span style="color:#93c5fd">'+vt.pend+' pending</span>':'');
+      return v[1]+' <b style="color:'+rateColor(vt)+'">'+vt.w+'-'+vt.l+' ('+rateTxt(vt)+')</b>'+moneyTxt(vt)+(vt.pend?' <span style="color:#93c5fd">'+vt.pend+' pending</span>':'');
     });
   }
   html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:12px">'+venueTxt(all).map(function(v){
@@ -10923,21 +10955,23 @@ function _nhlTop30RecRender(){
   }).join('')+'</div>';
   html+='<div class="hc-note" style="margin-bottom:4px">By Last 5 badge at save time</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:12px">'+[['HOT','🔥 Hot'],['COLD','❄️ Cold'],['','No badge']].map(function(f){
     var ft=tally(all.filter(function(p){return (p.form||'')===f[0];}));
-    return '<div style="border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center;background:#0f172a;color:#e2e8f0;font-size:.95rem">'+f[1]+' <b style="color:'+rateColor(ft)+'">'+ft.w+'-'+ft.l+' ('+rateTxt(ft)+')</b>'+(ft.pend?' <span style="color:#93c5fd">'+ft.pend+' pending</span>':'')+'</div>';
+    return '<div style="border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center;background:#0f172a;color:#e2e8f0;font-size:.95rem">'+f[1]+' <b style="color:'+rateColor(ft)+'">'+ft.w+'-'+ft.l+' ('+rateTxt(ft)+')</b>'+moneyTxt(ft)+(ft.pend?' <span style="color:#93c5fd">'+ft.pend+' pending</span>':'')+'</div>';
   }).join('')+'</div>';
   var th='padding:6px 8px;color:#94a3b8;font-size:.68rem;text-align:left;border-bottom:1px solid #334155';
   days.forEach(function(d,i){
     var dt=tally(d.picks||[]);
     html+='<details'+(i===0||_nhlTop30Period==='day'?' open':'')+' style="border:1px solid #1e293b;border-radius:9px;margin-bottom:8px;background:#0f172a">'
-      +'<summary style="cursor:pointer;padding:9px 12px;font-weight:900;color:#f8fafc">'+_nhlSafe(d.date)+' · <span style="color:'+rateColor(dt)+'">'+dt.w+'-'+dt.l+' ('+rateTxt(dt)+')</span>'+(dt.pend?' <span style="color:#93c5fd;font-weight:600">· '+dt.pend+' pending</span>':'')+'<div style="font-size:.75rem;font-weight:600;color:#cbd5e1;margin-top:3px">'+venueTxt(d.picks||[]).join(' · ')+'</div></summary>'
-      +'<div style="overflow-x:auto;padding:0 8px 8px"><table style="width:100%;border-collapse:collapse;font-size:.8rem"><thead><tr><th style="'+th+'">Player</th><th style="'+th+'">Matchup</th><th style="'+th+'">Career PPG</th><th style="'+th+'">Form</th><th style="'+th+'">Pick</th><th style="'+th+'">PTS</th><th style="'+th+'">Result</th></tr></thead><tbody>'
+      +'<summary style="cursor:pointer;padding:9px 12px;font-weight:900;color:#f8fafc">'+_nhlSafe(d.date)+' · <span style="color:'+rateColor(dt)+'">'+dt.w+'-'+dt.l+' ('+rateTxt(dt)+')</span>'+moneyTxt(dt)+(dt.pend?' <span style="color:#93c5fd;font-weight:600">· '+dt.pend+' pending</span>':'')+'<div style="font-size:.75rem;font-weight:600;color:#cbd5e1;margin-top:3px">'+venueTxt(d.picks||[]).join(' · ')+'</div></summary>'
+      +'<div style="overflow-x:auto;padding:0 8px 8px"><table style="width:100%;border-collapse:collapse;font-size:.8rem"><thead><tr><th style="'+th+'">Player</th><th style="'+th+'">Matchup</th><th style="'+th+'">Career PPG</th><th style="'+th+'">Form</th><th style="'+th+'">Pick</th><th style="'+th+'">Odds</th><th style="'+th+'">PTS</th><th style="'+th+'">Result</th><th style="'+th+'">P/L</th></tr></thead><tbody>'
       +(d.picks||[]).map(function(p){
         var res=p.result||'PENDING',rc=res==='WIN'?'#4ade80':res==='LOSS'?'#f87171':res==='VOID'?'#94a3b8':'#93c5fd';
         var form=p.form==='HOT'?'🔥 HOT':p.form==='COLD'?'❄️ COLD':'—';
         var td='padding:6px 8px;border-bottom:1px solid #1f2937;';
         return '<tr><td style="'+td+'font-weight:800;color:#f8fafc">'+_nhlSafe(p.name)+'</td><td style="'+td+'">'+_nhlSafe(p.team)+' '+(p.venue==='AWAY'?'@':'vs')+' '+_nhlSafe(p.opponent)+'</td>'
           +'<td style="'+td+'">'+(p.careerPpg!=null?Number(p.careerPpg).toFixed(2):'—')+'</td><td style="'+td+'">'+form+'</td><td style="'+td+'">1+ Point</td>'
-          +'<td style="'+td+'">'+(p.actual!=null?p.actual:'—')+'</td><td style="'+td+'font-weight:900;color:'+rc+'">'+res+'</td></tr>';
+          +'<td style="'+td+'font-family:monospace">'+(p.odds!=null&&String(p.odds).trim()!==''?(Number(p.odds)>0?'+':'')+_nhlSafe(p.odds)+'<span style="display:block;font-size:.62rem;color:#93c5fd;font-family:inherit">'+_nhlSafe(p.book||'Sportsbook not saved')+'</span>':'<span style="color:#64748b">Unpriced</span>')+'</td>'
+          +'<td style="'+td+'">'+(p.actual!=null?p.actual:'—')+'</td><td style="'+td+'font-weight:900;color:'+rc+'">'+res+'</td>'
+          +'<td style="'+td+'font-family:monospace;font-weight:900;color:'+(pl(p)==null?'#64748b':pl(p)>=0?'#4ade80':'#f87171')+'">'+(pl(p)==null?'—':money(pl(p)))+'</td></tr>';
       }).join('')+'</tbody></table></div></details>';
   });
   body.innerHTML=html;
@@ -12673,6 +12707,7 @@ document.addEventListener('keydown',function(e){
   if(e.key!=='Escape'||!document.body.getAttribute('data-nhl-rec'))return;
   if(document.getElementById('nhlLadOv')||document.getElementById('nts-ov'))return;
   var t=document.getElementById('nhlTop30RecModal');if(t&&t.style.display!=='none')return;
+  var hcm=document.getElementById('nhlHcRecModal');if(hcm&&hcm.style.display!=='none')return;
   var bm=document.getElementById('nhl-bet-modal');if(bm&&bm.style.display&&bm.style.display!=='none')return;
   _nhlRecClose();
 });
@@ -12785,6 +12820,7 @@ function _nhlTrkSetStake(input){
   localStorage.setItem('nhl_track_stake',String(Math.round(n*100)/100));
   renderNhlTrackDay();
   renderNhlOverflowDay();
+  renderNhlHotColdRecord();
   renderNhlHistoricalAnalysis();
 }
 function _nhlTrkProfit(row,stake){
@@ -12794,16 +12830,156 @@ function _nhlTrkProfit(row,stake){
   if(!isFinite(odds)||odds===0) return null;
   return row.result==='LOSS'?-stake:(odds>0?stake*odds/100:stake*100/Math.abs(odds));
 }
+// Hot/Cold/Double Cold plays live only in the separate Hot/Cold Record,
+// including legacy 80-100% Locks rows that were copied from them.
+function _nhlHcLabels(){return _NHL_FORM_TYPES.map(function(f){return f.label;});}
+function _nhlIsHcRow(r){
+  if(!r)return false;var labels=_nhlHcLabels();
+  if(labels.indexOf(r.category)>=0)return true;
+  return r.category==='80-100% Locks'&&labels.indexOf(r.formCategory)>=0;
+}
 function _nhlMainRows(dayData){
   return ((dayData&&dayData.detail)||[]).filter(function(r){
-    return !r.is_overflow&&r.category!=='NHL Overflow';
+    return !r.is_overflow&&r.category!=='NHL Overflow'&&!_nhlIsHcRow(r);
   });
 }
 function _nhlOverflowRows(dayData){
-  if(dayData&&Array.isArray(dayData.overflow_detail))return dayData.overflow_detail;
+  if(dayData&&Array.isArray(dayData.overflow_detail))return dayData.overflow_detail.filter(function(r){return !_nhlIsHcRow(r);});
   return ((dayData&&dayData.detail)||[]).filter(function(r){
-    return !!r.is_overflow||r.category==='NHL Overflow';
+    return (!!r.is_overflow||r.category==='NHL Overflow')&&!_nhlIsHcRow(r);
   });
+}
+var _nhlHcRec=null,_nhlHcRecSystem='A',_nhlHcRecPeriod='all',_nhlHcRecAnchor='',_nhlHcRecForm='ALL',_nhlHcRecTier='MAIN',_nhlHcRecTab='cat';
+function openNhlHotColdRecord(){
+  var m=document.getElementById('nhlHcRecModal');
+  if(!m){
+    m=document.createElement('div');m.id='nhlHcRecModal';
+    m.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(2,6,23,.82);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:24px 10px';
+    m.onclick=function(e){if(e.target===m)m.style.display='none';};
+    document.body.appendChild(m);
+  }
+  m.style.display='flex';
+  if(!_nhlHcRecAnchor)_nhlHcRecAnchor=_nhlGpToday();
+  var sel='background:#0f172a;border:1px solid #334155;border-radius:8px;padding:7px;color:#fff;color-scheme:dark';
+  function grp(label,kind,cur,opts){
+    return '<div class="hc-grp" role="group" aria-label="'+label+'"><span>'+label+'</span>'+opts.map(function(o){
+      return '<button type="button" class="hc-btn" data-hcrec="'+kind+'" data-v="'+o[0]+'" aria-pressed="'+(cur===o[0])+'" onclick="_nhlHcRecSet(&quot;'+kind+'&quot;,&quot;'+o[0]+'&quot;)">'+o[1]+'</button>';
+    }).join('')+'</div>';
+  }
+  var systems=[['A','A · NEW']];
+  if(window.IS_ADMIN)systems=systems.concat([['B','B · OLD'],['C','C · SELECTIVE'],['D','D · TOP PLAYERS']]);
+  m.innerHTML='<div style="background:#0b1222;border:1px solid #9a3412;border-radius:14px;max-width:960px;width:100%;padding:18px;color:#e2e8f0">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap"><h2 style="font-size:1.1rem;margin:0;color:#f8fafc">&#128293; Hot / Cold Record</h2>'
+    +'<div><button type="button" class="hc-btn" onclick="_nhlHcRecLoad(true)">Grade &amp; Get Results</button> <button type="button" class="hc-btn" style="background:#7f1d1d;border-color:#f87171;color:#fff" onclick="document.getElementById(&quot;nhlHcRecModal&quot;).style.display=&quot;none&quot;">&#10005; Close</button></div></div>'
+    +'<div class="hc-note" style="margin-bottom:10px">Separate record for every Hot, Cold and Double Cold category (Shots, Points, Goals, Assists, PP Points, Plus/Minus, Saves). Top 10 and Overflow (ranks 11–20) are saved before puck drop on each official run. These plays are not counted in the Track Record, NHL Overflow or 80–100% Locks records. Profit and ROI use only the saved sportsbook price; unpriced plays count W/L only.</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">'
+    +grp('Form','form',_nhlHcRecForm,[['ALL','All'],['HOT','Hot'],['COLD','Cold'],['DOUBLE','Double Cold']])
+    +grp('Tier','tier',_nhlHcRecTier,[['MAIN','Top 10'],['OVF','Overflow 11–20'],['ALL','Both']])
+    +grp('View','tab',_nhlHcRecTab,[['cat','By Category'],['list','Full List']])
+    +grp('System','sys',_nhlHcRecSystem,systems)+'</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px">'
+    +'<label style="color:#94a3b8;font-size:.72rem;font-weight:800">PERIOD <select id="nhlHcRecPeriod" onchange="_nhlHcRecSet(&quot;period&quot;)" style="'+sel+'">'
+    +[['day','Day'],['week','Week &#183; last 7 days'],['month','Month'],['all','All Time']].map(function(o){return '<option value="'+o[0]+'"'+(o[0]===_nhlHcRecPeriod?' selected':'')+'>'+o[1]+'</option>';}).join('')
+    +'</select></label>'
+    +'<label style="color:#94a3b8;font-size:.72rem;font-weight:800">DATE <input type="date" id="nhlHcRecDate" value="'+_nhlHcRecAnchor+'" onchange="_nhlHcRecSet(&quot;period&quot;)" style="'+sel+';padding:6px;'+(_nhlHcRecPeriod==='all'?'display:none':'')+'"></label>'
+    +'<span id="nhlHcRecCaption" style="color:#fdba74;font-size:.8rem;font-weight:800"></span></div>'
+    +'<div id="nhlHcRecSummary"></div><div id="nhlHcRecBody"><div class="hc-note">Loading&#8230;</div></div></div>';
+  if(_nhlHcRec&&_nhlHcRec.system===_nhlHcRecSystem)renderNhlHotColdRecord();
+  _nhlHcRecLoad(false);
+}
+function _nhlHcRecSet(kind,v){
+  if(kind==='form')_nhlHcRecForm=v;
+  else if(kind==='tier')_nhlHcRecTier=v;
+  else if(kind==='tab')_nhlHcRecTab=v;
+  else if(kind==='sys'){
+    if(v!=='A'&&!window.IS_ADMIN){alert('Admin only');return;}
+    _nhlHcRecSystem=v;_nhlHcRec=null;
+  }else{
+    var p=document.getElementById('nhlHcRecPeriod'),d=document.getElementById('nhlHcRecDate');
+    if(p)_nhlHcRecPeriod=p.value;if(d&&d.value)_nhlHcRecAnchor=d.value;
+    if(d)d.style.display=_nhlHcRecPeriod==='all'?'none':'inline-block';
+  }
+  document.querySelectorAll('#nhlHcRecModal [data-hcrec]').forEach(function(b){
+    var k=b.getAttribute('data-hcrec'),cur=k==='form'?_nhlHcRecForm:k==='tier'?_nhlHcRecTier:k==='tab'?_nhlHcRecTab:_nhlHcRecSystem;
+    b.setAttribute('aria-pressed',String(b.getAttribute('data-v')===cur));
+  });
+  if(kind==='sys'){_nhlHcRecLoad(false);return;}
+  renderNhlHotColdRecord();
+}
+async function _nhlHcRecLoad(grade){
+  var body=document.getElementById('nhlHcRecBody');
+  if(body)body.innerHTML='<div class="hc-note">'+(grade?'Grading and getting results':'Loading')+'&#8230;</div>';
+  try{
+    var system=_nhlHcRecSystem;
+    var qs=_nhlTrackRecordQuery(grade,system,grade?(_nhlHcRecAnchor||''):'');
+    qs+=(qs?'&':'?')+'scope=hotcold';
+    var r=await fetch('/api/track-record'+qs,{credentials:'include'});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    var data=await r.json();
+    if(system!==_nhlHcRecSystem)return;
+    data.system=system;_nhlHcRec=data;renderNhlHotColdRecord();
+  }catch(e){if(body)body.innerHTML='<div class="hc-note" style="color:#f87171">Could not load the Hot / Cold record: '+_nhlSafe(e.message||'request failed')+'. Please retry.</div>';}
+}
+function _nhlHcFormOf(r){
+  var c=String(r.category||'');
+  return c.indexOf('Double Cold ')===0?'DOUBLE':c.indexOf('Cold ')===0?'COLD':c.indexOf('Hot ')===0?'HOT':'';
+}
+function renderNhlHotColdRecord(){
+  var sumEl=document.getElementById('nhlHcRecSummary'),body=document.getElementById('nhlHcRecBody');
+  if(!body||!_nhlHcRec)return;
+  var cap=document.getElementById('nhlHcRecCaption');
+  if(cap)cap.textContent=_nhlPeriodCaption(_nhlHcRecPeriod,_nhlHcRecAnchor);
+  var days=_nhlPeriodDays(_nhlHcRec.dates||[],_nhlHcRecPeriod,_nhlHcRecAnchor),all=[];
+  days.forEach(function(d){
+    (d.detail||[]).forEach(function(r){all.push(Object.assign({},r,{date:d.date,is_overflow:false}));});
+    (d.overflow_detail||[]).forEach(function(r){all.push(Object.assign({},r,{date:d.date,is_overflow:true}));});
+  });
+  all=all.filter(function(r){return _nhlHcLabels().indexOf(r.category)>=0&&(_nhlHcRecForm==='ALL'||_nhlHcFormOf(r)===_nhlHcRecForm);});
+  var stake=_nhlTrkStake();
+  function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
+  function money(v){return (v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(2);}
+  function tally(list){
+    var w=list.filter(function(r){return r.result==='WIN';}).length,l=list.filter(function(r){return r.result==='LOSS';}).length;
+    var push=list.filter(function(r){return r.result==='PUSH';}).length,v=list.filter(function(r){return r.result==='VOID';}).length;
+    var unpriced=list.filter(function(r){return r.result==='UNPRICED';}).length;
+    var priced=list.filter(function(r){return (r.result==='WIN'||r.result==='LOSS')&&hasOdds(r);});
+    var pl=priced.reduce(function(x,r){return x+(_nhlTrkProfit(r,stake)||0);},0),staked=priced.length*stake;
+    return {w:w,l:l,push:push,v:v,pend:list.length-w-l-push-v-unpriced,priced:priced.length,pl:pl,staked:staked,
+      roi:staked?pl/staked*100:null,rate:(w+l)?w/(w+l)*100:null};
+  }
+  function card(label,t,accent){
+    var plc=t.pl>=0?'#4ade80':'#f87171';
+    return '<div style="border:1px solid #1e293b;border-left:3px solid '+accent+';border-radius:10px;padding:10px 12px;background:#0f172a">'
+      +'<div style="color:#94a3b8;font-size:.68rem;font-weight:900;letter-spacing:.06em;text-transform:uppercase">'+label+'</div>'
+      +'<div style="font-size:1.1rem;font-weight:900;color:#fff;margin-top:3px"><span style="color:#4ade80">'+t.w+'</span>-<span style="color:#f87171">'+t.l+'</span>'+(t.rate!=null?' <span style="color:#94a3b8;font-size:.8rem">('+t.rate.toFixed(1)+'%)</span>':'')+'</div>'
+      +'<div style="font-family:monospace;font-size:.78rem;color:'+plc+';font-weight:800">'+(t.priced?money(t.pl)+' · ROI '+(t.roi>=0?'+':'')+t.roi.toFixed(1)+'%':'No priced plays')+'</div>'
+      +'<div style="color:#64748b;font-size:.68rem">'+t.priced+' priced · $'+t.staked.toFixed(2)+' staked'+(t.push?' · '+t.push+' push':'')+(t.v?' · '+t.v+' void':'')+(t.pend?' · <span style="color:#93c5fd">'+t.pend+' pending</span>':'')+'</div></div>';
+  }
+  if(!all.length){
+    if(sumEl)sumEl.innerHTML='';
+    body.innerHTML='<div class="hc-note">No Hot / Cold plays saved for '+_nhlSafe(_nhlPeriodCaption(_nhlHcRecPeriod,_nhlHcRecAnchor))+'. They save automatically before puck drop on each official run.</div>';
+    return;
+  }
+  var mainRows=all.filter(function(r){return !r.is_overflow;}),ovfRows=all.filter(function(r){return r.is_overflow;});
+  var shown=_nhlHcRecTier==='MAIN'?mainRows:_nhlHcRecTier==='OVF'?ovfRows:all;
+  var t=tally(shown),plc=t.pl>=0?'#4ade80':'#f87171';
+  var html='<div style="background:#1a0f08;border:1px solid #7c2d12;border-radius:12px;padding:12px 16px;display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-bottom:12px">'
+    +'<span style="color:#fdba74;font-weight:900">'+_nhlTrackSystemLabel(_nhlHcRecSystem)+' · '+(_nhlHcRecTier==='MAIN'?'Top 10':_nhlHcRecTier==='OVF'?'Overflow 11–20':'Top 10 + Overflow')+'</span>'
+    +'<span style="font-size:1.05rem;font-weight:900;color:#fff"><span style="color:#4ade80">'+t.w+'</span>/<span style="color:#f87171">'+(t.w+t.l)+'</span>'+(t.rate!=null?' <span style="color:#94a3b8;font-size:.85rem;font-weight:600">('+t.rate.toFixed(1)+'%)</span>':'')+'</span>'
+    +'<label style="display:flex;align-items:center;gap:6px;color:#cbd5e1;font-size:.76rem;font-weight:700">Bet size ($)<input type="number" min="0.01" step="0.01" value="'+stake.toFixed(2)+'" onchange="_nhlTrkSetStake(this)" style="width:82px;background:#0b1120;border:1px solid #7c2d12;border-radius:7px;padding:6px 8px;color:#fff;font-weight:800"></label>'
+    +'<span style="font-family:monospace;font-weight:800;color:'+plc+'">Net '+money(t.pl)+'</span>'
+    +(t.roi!=null?'<span style="font-family:monospace;font-weight:700;color:'+plc+'">ROI '+(t.roi>=0?'+':'')+t.roi.toFixed(1)+'%</span>':'')
+    +(t.pend?'<span style="color:#facc15;font-size:.8rem;font-weight:800">'+t.pend+' pending</span>':'')
+    +'<span style="color:#64748b;font-size:.8rem">$'+stake.toFixed(2)+'/play · '+t.priced+' priced plays</span></div>';
+  html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-bottom:12px">'
+    +card('Top 10',tally(mainRows),'#f97316')+card('Overflow 11–20',tally(ovfRows),'#f59e0b')
+    +[['HOT','🔥 Hot','#ef4444'],['COLD','❄️ Cold','#38bdf8'],['DOUBLE','❄️❄️ Double Cold','#818cf8']].map(function(f){
+      return card(f[1]+' · '+(_nhlHcRecTier==='MAIN'?'Top 10':_nhlHcRecTier==='OVF'?'Overflow':'All'),tally(shown.filter(function(r){return _nhlHcFormOf(r)===f[0];})),f[2]);
+    }).join('')+'</div>';
+  if(sumEl)sumEl.innerHTML=html;
+  body.innerHTML=shown.length
+    ?(_nhlHcRecTab==='cat'?_nhlTrkCatHtml(shown,stake):_nhlTrkListHtml(shown,true))
+    :'<div class="hc-note">No plays in this tier for the selected period.</div>';
 }
 function renderNhlTrackDay(){
   if(!_nhlTrkData) return;
@@ -15145,7 +15321,7 @@ def _nhl_update_gp_ledger(include_date: str = ""):
         except Exception as e:
             print(f"[nhl_track] GP grade failed {d}: {e}")
 
-# ── Top 30 PPG vs Team record (separate; Points 1+ OVER, W/L only) ──────────
+# ── Top 30 PPG vs Team record (separate; Points 1+ OVER, W/L + saved-price ROI) ──────────
 _NHL_TOP30_CAT = "__top30_ppg__"
 # Outside Top 30 PPG vs Team: its own separate record, same Points 1+ rules.
 _NHL_TOP30_OUT_CAT = "__top30_outside_ppg__"
@@ -15232,6 +15408,9 @@ def _nhl_top30_capture_list(date_str: str, players: list, unavailable_opps: list
                     "capturedAt": captured_at,
                     "result": "PENDING", "actual": None,
                 })
+            if fresh:
+                fresh = _nhl_top30_attach_odds(date_str, fresh, include_storage=False,
+                                               final_check=False)
             detail = sorted(keep + fresh, key=lambda r: (
                 r.get("rank") or 999, -(r.get("careerPoints") or 0), r.get("name") or ""))
             if not detail or detail == old:
@@ -15316,10 +15495,19 @@ def _nhl_update_top30_ledger_cat(category: str):
         for saved in rows or []:
             d = saved.get("date")
             detail = saved.get("detail") or []
-            if not d or d > today or saved.get("locked") or not isinstance(detail, list) or not detail:
+            if not d or d > today or not isinstance(detail, list) or not detail:
                 continue
             try:
-                graded, all_final = _nhl_top30_grade_date(d, detail)
+                priced = _nhl_top30_attach_odds(d, detail)
+                if saved.get("locked"):
+                    # Settled results never change; only a missing saved price is filled once.
+                    if priced != detail:
+                        _nhl_sb_upsert("mpa_track_ledger", [{
+                            "app": _NHL_TRK_APP, "date": d, "category": category,
+                            "side": "ALL", "locked": True, "detail": priced,
+                        }], "app,date,category,side")
+                    continue
+                graded, all_final = _nhl_top30_grade_date(d, priced)
                 if graded == detail and not all_final:
                     continue
                 _nhl_sb_upsert("mpa_track_ledger", [{
@@ -15333,6 +15521,233 @@ def _nhl_update_top30_ledger_cat(category: str):
                 }], "app,date,category,side")
             except Exception as exc:
                 print(f"[nhl_top30] grade failed {category} {d}: {exc}")
+
+
+# ── Top 30 / Outside Top 30 ROI: genuine saved Points Over 0.5 prices only ──
+# Prices come from data the app already saved before puck drop (frozen pick
+# snapshots, saved live boards, the paid historical archive, the local odds
+# cache). No Odds API request is ever made here; unpriced plays stay W/L only.
+_NHL_TOP30_STAKE = 100.0
+
+
+def _nhl_top30_valid_odds(value):
+    try:
+        odds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(odds) or not odds.is_integer():
+        return None
+    return int(odds) if (odds >= 100 or -1000 <= odds <= -100) else None
+
+
+def _nhl_top30_ts(value):
+    try:
+        from datetime import timezone as _tz
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=_tz.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nhl_top30_line_is_half(value) -> bool:
+    try:
+        return abs(float(value) - 0.5) < 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def _nhl_top30_strict_rows(params: dict):
+    """None on failure, so a transient read never marks a play permanently unpriced."""
+    if not _NHL_SB_URL or not _NHL_SB_KEY:
+        return None
+    try:
+        r = httpx.get(f"{_NHL_SB_URL}/rest/v1/mpa_track_ledger",
+                      headers={"apikey": _NHL_SB_KEY,
+                               "Authorization": f"Bearer {_NHL_SB_KEY}"},
+                      params=params, timeout=30)
+        if r.status_code == 200 and isinstance(r.json(), list):
+            return r.json()
+    except Exception as exc:
+        print(f"[nhl_top30] odds source read failed: {exc}")
+    return None
+
+
+class _NhlTop30Quotes:
+    """Lazy per-date lookup of genuine Points Over 0.5 prices saved pregame."""
+
+    def __init__(self, date_str: str, include_storage: bool = True):
+        self.date = date_str
+        self.include_storage = include_storage
+        self.failed = False
+        self._snap = None
+        self._boards = None
+        self._archive = None
+        self._cache = None
+
+    @staticmethod
+    def _quote(odds, book, source, saved_at=None):
+        valid = _nhl_top30_valid_odds(odds)
+        if valid is None:
+            return None
+        return {"odds": valid, "book": str(book or "").strip(), "source": source,
+                "saved_at": saved_at}
+
+    def _snapshots(self):
+        if self._snap is None:
+            self._snap = {}
+            for system in ("A", "D", "B", "C"):
+                rows = _nhl_top30_strict_rows({
+                    "app": f"eq.{_NHL_TRK_APP}",
+                    "category": f"eq.{_NHL_SYSTEM_SNAP_CATS[system]}",
+                    "side": "eq.ALL", "date": f"eq.{self.date}",
+                    "select": "detail", "limit": "1"})
+                if rows is None:
+                    self.failed = True
+                    continue
+                detail = (rows[0].get("detail") if rows else None) or []
+                for p in detail if isinstance(detail, list) else []:
+                    if (not isinstance(p, dict) or p.get("stat_key") != "POINTS"
+                            or str(p.get("side") or "OVER").upper() != "OVER"
+                            or not _nhl_top30_line_is_half(p.get("line"))
+                            or p.get("pid") in (None, "")):
+                        continue
+                    q = self._quote(p.get("odds"), p.get("book"),
+                                    f"Saved pregame pick (System {system})")
+                    if q:
+                        self._snap.setdefault(str(p.get("pid")), q)
+        return self._snap
+
+    def _saved_boards(self):
+        if self._boards is None:
+            self._boards = {}
+            for system in ("A", "D"):
+                rows = _nhl_top30_strict_rows({
+                    "app": f"eq.{_NHL_TRK_APP}_live_boards",
+                    "category": f"eq.__board_{system}__",
+                    "side": "eq.ALL", "date": f"eq.{self.date}",
+                    "select": "detail", "limit": "1"})
+                if rows is None:
+                    self.failed = True
+                    continue
+                if not rows or not isinstance(rows[0].get("detail"), dict):
+                    continue
+                detail = rows[0]["detail"]
+                try:
+                    board = _nhl_saved_board_from_detail(detail)
+                except Exception:
+                    board = None
+                if (not isinstance(board, dict) or board.get("simulation")
+                        or board.get("_nhlQuoteTupleVersion") != 2):
+                    continue
+                saved_at = _nhl_top30_ts(detail.get("saved_at"))
+                for value in board.values():
+                    if not isinstance(value, list):
+                        continue
+                    for p in value:
+                        if (not isinstance(p, dict) or p.get("pid") in (None, "")
+                                or not (p.get("mkt") == "Points (1+)"
+                                        or p.get("marketKey") == "points")
+                                or str(p.get("side") or "OVER").upper() != "OVER"
+                                or not _nhl_top30_line_is_half(p.get("realLine"))):
+                            continue
+                        q = self._quote(p.get("realOdds"), _nhl_side_book(p, "OVER"),
+                                        f"Saved board (System {system})", saved_at)
+                        if q:
+                            self._boards.setdefault(str(p.get("pid")), q)
+                del board
+        return self._boards
+
+    def _archived(self):
+        if self._archive is None:
+            self._archive = {}
+            rows = _nhl_top30_strict_rows({
+                "app": f"eq.{_NHL_TRK_APP}",
+                "category": f"eq.{_NHL_HIST_ODDS_CAT}",
+                "side": "eq.ALL", "date": f"eq.{self.date}",
+                "select": "detail", "limit": "1"})
+            if rows is None:
+                self.failed = True
+            elif rows and isinstance(rows[0].get("detail"), dict):
+                self._archive = rows[0]["detail"].get("pts") or {}
+        return self._archive
+
+    def _local_cache(self):
+        if self._cache is None:
+            self._cache = ({}, None)
+            path = _CACHE_DIR / f"nhl_lineup_v5_us_ca_odds_{self.date}.json"
+            try:
+                if path.exists():
+                    from datetime import timezone as _tz
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    mtime = datetime.fromtimestamp(path.stat().st_mtime, _tz.utc)
+                    self._cache = (data.get("pts") or {}, mtime)
+            except Exception as exc:
+                print(f"[nhl_top30] local odds cache unreadable {self.date}: {exc}")
+        return self._cache
+
+    @staticmethod
+    def _by_name(name_map, name, source, saved_at=None):
+        for odds_name, info in (name_map or {}).items():
+            if not isinstance(info, dict) or not _match_odds_name(odds_name, [{"name": name}]):
+                continue
+            line = info.get("odds_line", info.get("line"))
+            if not _nhl_top30_line_is_half(line):
+                return None
+            return _NhlTop30Quotes._quote(info.get("odds"), info.get("odds_book"),
+                                          source, saved_at)
+        return None
+
+    def find(self, row: dict):
+        """Price saved no later than this game's scheduled puck drop."""
+        pid, name = str(row.get("pid") or ""), row.get("name") or ""
+        start = _nhl_top30_ts(row.get("startTime"))
+
+        def pregame(q):
+            if not q:
+                return None
+            saved = q.get("saved_at")
+            if saved is not None and (start is None or saved > start):
+                return None
+            return q
+
+        if self.include_storage:
+            q = pregame(self._snapshots().get(pid))
+            if q:
+                return q
+            q = pregame(self._saved_boards().get(pid))
+            if q:
+                return q
+            q = pregame(self._by_name(self._archived(), name, "Historical archive"))
+            if q:
+                return q
+        name_map, mtime = self._local_cache()
+        return pregame(self._by_name(name_map, name, "Pregame odds cache", mtime)
+                       if mtime is not None else None)
+
+
+def _nhl_top30_attach_odds(date_str: str, detail: list, include_storage: bool = True,
+                           final_check: bool = True) -> list:
+    """Attach saved prices once; plays without a genuine price stay W/L only."""
+    quotes = None
+    out = []
+    for pick in detail:
+        row = dict(pick) if isinstance(pick, dict) else pick
+        if (not isinstance(row, dict) or row.get("oddsChecked")
+                or _nhl_top30_valid_odds(row.get("odds")) is not None):
+            out.append(row)
+            continue
+        started = not _nhl_gp_is_pre_game({"startTime": row.get("startTime")})
+        if final_check and not started:
+            out.append(row)
+            continue
+        quotes = quotes or _NhlTop30Quotes(date_str, include_storage)
+        q = quotes.find(row)
+        if q:
+            row.update(odds=q["odds"], book=q["book"], oddsSource=q["source"])
+        if final_check and started and not quotes.failed:
+            row["oddsChecked"] = True
+        out.append(row)
+    return out
 
 
 # ── Shots Funnel record (separate; Top 10 Over + Top 10 Under, Shots on Goal) ──
@@ -15636,7 +16051,8 @@ def _nhl_grade_date(date_str: str, snap: list) -> dict:
                 ovf_rows.append(row)
             # Cross-market 80-100% Locks category
             lock_score = float(p.get("dispScore") or p.get("ptsScore") or p.get("score") or 0)
-            if lock_score >= 80:
+            # Hot/Cold plays have their own record; they never feed Locks.
+            if lock_score >= 80 and cat not in _NHL_FORM_LABELS:
                 duplicate_form_lock = (
                     (cat in {spec[1] for spec in _NHL_FORM_SPECS} or cat in _NHL_FUNNEL_LABELS)
                     and any((old.get("name"), old.get("stat_key"), old.get("side"), old.get("line"))
@@ -16947,7 +17363,7 @@ async def nhl_gp_record(grade: bool = False, date_str: str = ""):
 
 @app.get("/api/nhl/top30-record")
 async def nhl_top30_record(grade: bool = False, list_name: str = "top30"):
-    """Separate Top 30 / Outside Top 30 PPG vs Team records (Points 1+ OVER, W/L only)."""
+    """Separate Top 30 / Outside Top 30 PPG vs Team records (Points 1+ OVER, W/L + saved-price ROI)."""
     category = _NHL_TOP30_OUT_CAT if list_name == "outside" else _NHL_TOP30_CAT
     if grade:
         await asyncio.to_thread(_nhl_update_top30_ledger_cat, category)
@@ -16959,7 +17375,8 @@ async def nhl_top30_record(grade: bool = False, list_name: str = "top30"):
     daily = sorted(({"date": r.get("date"), "locked": bool(r.get("locked")),
                      "picks": [p for p in (r.get("detail") or []) if isinstance(p, dict)]}
                     for r in rows if r.get("date")), key=lambda d: d["date"], reverse=True)
-    return JSONResponse({"daily": daily}, headers={"Cache-Control": "no-store"})
+    return JSONResponse({"daily": daily, "stake": _NHL_TOP30_STAKE},
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/nhl/shot-funnel-record")
@@ -17144,8 +17561,11 @@ async def nhl_day_category_record(request: Request, system: str = "A",
 @app.get("/api/track-record")
 async def nhl_track_record(
         request: Request, grade: bool = False, date_str: str = "",
-        system: str = "A", token: str = "", admin: str = ""):
-    """NHL player-pick and read-only Game Predictor records by date."""
+        system: str = "A", token: str = "", admin: str = "", scope: str = "main"):
+    """NHL player-pick and read-only Game Predictor records by date.
+
+    scope=main (default) is the Track Record/Overflow without Hot/Cold;
+    scope=hotcold is the separate Hot/Cold record."""
     record_system = str(system or "A").strip().upper()
     if record_system not in ("A", "B", "C", "D"):
         raise HTTPException(
@@ -17163,7 +17583,8 @@ async def nhl_track_record(
         await loop.run_in_executor(None, _nhl_update_track_ledger, date_str)
     else:
         _bt_th.Thread(target=_nhl_trk_bg, daemon=True).start()
-    return JSONResponse(_nhl_track_record_payload(record_system))
+    record_scope = "hotcold" if str(scope).lower() == "hotcold" else "main"
+    return JSONResponse(_nhl_track_record_payload(record_system, scope=record_scope))
 
 @app.get("/api/nhl/coach-track")
 async def nhl_coach_track(
@@ -17618,8 +18039,14 @@ def _nhl_historical_analysis_payload(system: str = "A") -> dict:
     }
 
 
-def _nhl_track_record_payload(system: str = "A", analytics: bool = False) -> dict:
-    """Build the read-only payload used by both the API and hub snapshots."""
+def _nhl_track_record_payload(system: str = "A", analytics: bool = False,
+                              scope: str = "all") -> dict:
+    """Build the read-only payload used by both the API and hub snapshots.
+
+    scope="main" excludes Hot/Cold plays (and Locks copied from them);
+    scope="hotcold" returns only Hot/Cold/Double Cold plays; "all" is unchanged.
+    """
+    scope = scope if scope in ("main", "hotcold") else "all"
     record_system = str(system or "A").strip().upper()
     if record_system not in _NHL_SYSTEM_SNAP_CATS:
         record_system = "A"
@@ -17730,6 +18157,9 @@ def _nhl_track_record_payload(system: str = "A", analytics: bool = False) -> dic
                     "category": p.get("category", "?"), "side": p.get("side", "OVER"),
                     "stat_key": p.get("stat_key"), "line": p.get("line"),
                     "odds": p.get("odds"), "rank": p.get("rank"),
+                    "book": p.get("book"),
+                    "formCategory": p.get("formCategory") or (
+                        p.get("category") if p.get("category") in _NHL_FORM_LABELS else None),
                     "is_overflow": bool(p.get("is_overflow")),
                     "result": None, "actual": None, "profit": None,
                 }
@@ -17740,15 +18170,20 @@ def _nhl_track_record_payload(system: str = "A", analytics: bool = False) -> dic
                     lock_score = float(p.get("score") or 0)
                 except (TypeError, ValueError):
                     lock_score = 0.0
-                if lock_score >= 80:
+                if lock_score >= 80 and p.get("category") not in _NHL_FORM_LABELS:
                     lock_row = {**pending_row, "category": "80-100% Locks"}
                     if _key(lock_row) not in existing:
                         det.append(lock_row)
                         existing.add(_key(lock_row))
+        if scope == "main":
+            det = [row for row in det if not _nhl_is_hotcold_row(row)]
+        elif scope == "hotcold":
+            det = [row for row in det if row.get("category") in _NHL_FORM_LABELS]
         det = _nhl_cap_record_rows(det)
         main_det = [row for row in det if not row.get("is_overflow")]
         overflow_det = [row for row in det if row.get("is_overflow")]
-        gp = _nhl_gp_summary(gp_by_date[d]) if d in gp_by_date else None
+        gp = (_nhl_gp_summary(gp_by_date[d])
+              if d in gp_by_date and scope != "hotcold" else None)
         decided = [r for r in main_det if r.get("result") in ("WIN","LOSS")]
         wins = sum(1 for r in decided if r["result"] == "WIN")
         losses = len(decided) - wins
@@ -17785,8 +18220,11 @@ def _nhl_track_record_payload(system: str = "A", analytics: bool = False) -> dic
                        "overflow_wins":overflow_wins,
                        "overflow_losses":overflow_losses,
                        "gp":gp})
+    if scope != "all":
+        result = [day for day in result
+                  if day["detail"] or day["overflow_detail"] or day.get("gp")]
     return {"dates": result, "stake": _NHL_TRK_STAKE,
-            "system": record_system}
+            "system": record_system, "scope": scope}
 
 
 _NHL_TEAM_STATS_UI = r"""<style>
