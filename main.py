@@ -10733,7 +10733,7 @@ function _nhlSfRecRender(){
     html+='<div style="border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center;background:#0f172a"><div class="hc-note">'+c[0]+'</div><div style="font-size:1.15rem;font-weight:900;color:'+c[2]+'">'+c[1]+'</div></div>';
   });
   html+='</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;margin-bottom:12px">'
-    +[['OVER','&#128200; Over Funnel'],['UNDER','&#128201; Under Funnel']].map(function(sd){
+    +_nhlWinOrder([['OVER','&#128200; Over Funnel'],['UNDER','&#128201; Under Funnel']],function(sd){return tally(all.filter(function(p){return p.side===sd[0];}));}).map(function(sd){
       var st=tally(all.filter(function(p){return p.side===sd[0];}));
       return '<div style="border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center;background:#0f172a;color:#e2e8f0">'+sd[1]+' <b style="color:'+rateColor(st)+'">'+st.w+'-'+st.l+' ('+rateTxt(st)+')</b>'+(st.priced?' &#183; '+money(st.profit):'')+(st.pend?' <span style="color:#93c5fd">'+st.pend+' pending</span>':'')+'</div>';
     }).join('')+'</div>';
@@ -10945,7 +10945,7 @@ function _nhlTop30RecRender(){
   });
   html+='</div>';
   function venueTxt(list){
-    return [['HOME','🏠 Home'],['AWAY','✈️ Away']].map(function(v){
+    return _nhlWinOrder([['HOME','🏠 Home'],['AWAY','✈️ Away']],function(v){return tally(list.filter(function(p){return p.venue===v[0];}));}).map(function(v){
       var vt=tally(list.filter(function(p){return p.venue===v[0];}));
       return v[1]+' <b style="color:'+rateColor(vt)+'">'+vt.w+'-'+vt.l+' ('+rateTxt(vt)+')</b>'+moneyTxt(vt)+(vt.pend?' <span style="color:#93c5fd">'+vt.pend+' pending</span>':'');
     });
@@ -10953,7 +10953,7 @@ function _nhlTop30RecRender(){
   html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:12px">'+venueTxt(all).map(function(v){
     return '<div style="border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center;background:#0f172a;color:#e2e8f0;font-size:.95rem">'+v+'</div>';
   }).join('')+'</div>';
-  html+='<div class="hc-note" style="margin-bottom:4px">By Last 5 badge at save time</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:12px">'+[['HOT','🔥 Hot'],['COLD','❄️ Cold'],['','No badge']].map(function(f){
+  html+='<div class="hc-note" style="margin-bottom:4px">By Last 5 badge at save time</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:12px">'+_nhlWinOrder([['HOT','🔥 Hot'],['COLD','❄️ Cold'],['','No badge']],function(f){return tally(all.filter(function(p){return (p.form||'')===f[0];}));}).map(function(f){
     var ft=tally(all.filter(function(p){return (p.form||'')===f[0];}));
     return '<div style="border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center;background:#0f172a;color:#e2e8f0;font-size:.95rem">'+f[1]+' <b style="color:'+rateColor(ft)+'">'+ft.w+'-'+ft.l+' ('+rateTxt(ft)+')</b>'+moneyTxt(ft)+(ft.pend?' <span style="color:#93c5fd">'+ft.pend+' pending</span>':'')+'</div>';
   }).join('')+'</div>';
@@ -11699,9 +11699,9 @@ function _nhlSimPct(counts){
 function renderNhlSimulationStats(stats){
   if(!stats) return '';
   var team=stats.team||{}, props=stats.player_props||{};
-  var rows=(props.by_market||[]).filter(function(m){
+  var rows=_nhlWinOrder((props.by_market||[]).filter(function(m){
     return (m.decided||0)+(m.pushes||0)+(m.voids||0)+(m.pending||0)>0;
-  }).map(function(m){
+  }),function(m){return {w:m.wins,l:m.losses,rate:m.percentage};}).map(function(m){
     return '<tr><td style="color:#cbd5e1">'+m.market+'</td>'
       +'<td style="font-weight:800">'+_nhlSimRecord(m)+'</td>'
       +'<td style="font-weight:900;color:#fbbf24">'+_nhlSimPct(m)+'</td></tr>';
@@ -12552,7 +12552,7 @@ function renderNhlMyBets(d){
     +_nhlStatBox('ROI',roiTxt,roiClr)
     +'<div style="margin-left:auto"><button onclick="downloadNhlMyBetsCSV()" style="background:#0e7490;color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:.78rem;font-weight:700;cursor:pointer">&#11015; CSV</button></div>'
     +'</div>';
-  var bc=(s.by_category||[]).map(function(c){
+  var bc=_nhlWinOrder(s.by_category||[],function(c){return {w:c.wins,l:c.losses};}).map(function(c){
     var croi=c.roi!=null?((c.roi>0?'+':'')+c.roi+'%'):'\u2014';
     var cclr=c.roi==null?'#94a3b8':(c.roi>0?'#4ade80':(c.roi<0?'#f87171':'#facc15'));
     return '<tr><td style="font-weight:600">'+_nhlEsc(c.category)+'</td>'
@@ -12823,6 +12823,23 @@ function _nhlTrkSetStake(input){
   renderNhlHotColdRecord();
   renderNhlHistoricalAnalysis();
 }
+// Every NHL record lists its groups from highest win % to lowest; groups with
+// no decided plays go last. Ties: more decided plays first, then original order.
+function _nhlWinOrder(items,wl){
+  return items.map(function(it,i){
+    var x=wl(it)||{},w=Number(x.w)||0,l=Number(x.l)||0;
+    var rate=x.rate!=null&&isFinite(Number(x.rate))?Number(x.rate):((w+l)?w/(w+l)*100:null);
+    return {it:it,i:i,rate:rate,n:w+l};
+  }).sort(function(a,b){
+    if(a.rate==null&&b.rate!=null)return 1;
+    if(b.rate==null&&a.rate!=null)return -1;
+    return ((b.rate||0)-(a.rate||0))||(b.n-a.n)||(a.i-b.i);
+  }).map(function(o){return o.it;});
+}
+function _nhlWlOf(list){
+  var w=0,l=0;(list||[]).forEach(function(r){var res=String(r&&r.result||'').toUpperCase();if(res==='WIN'||res==='W')w++;else if(res==='LOSS'||res==='L')l++;});
+  return {w:w,l:l};
+}
 function _nhlTrkProfit(row,stake){
   if(!row||row.result!=='WIN'&&row.result!=='LOSS') return null;
   if(row.odds==null||String(row.odds).trim()===''||String(row.odds)==='0') return null;
@@ -12972,10 +12989,10 @@ function renderNhlHotColdRecord(){
     +(t.pend?'<span style="color:#facc15;font-size:.8rem;font-weight:800">'+t.pend+' pending</span>':'')
     +'<span style="color:#64748b;font-size:.8rem">$'+stake.toFixed(2)+'/play · '+t.priced+' priced plays</span></div>';
   html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-bottom:12px">'
-    +card('Top 10',tally(mainRows),'#f97316')+card('Overflow 11–20',tally(ovfRows),'#f59e0b')
-    +[['HOT','🔥 Hot','#ef4444'],['COLD','❄️ Cold','#38bdf8'],['DOUBLE','❄️❄️ Double Cold','#818cf8']].map(function(f){
-      return card(f[1]+' · '+(_nhlHcRecTier==='MAIN'?'Top 10':_nhlHcRecTier==='OVF'?'Overflow':'All'),tally(shown.filter(function(r){return _nhlHcFormOf(r)===f[0];})),f[2]);
-    }).join('')+'</div>';
+    +_nhlWinOrder([['Top 10',tally(mainRows),'#f97316'],['Overflow 11–20',tally(ovfRows),'#f59e0b']],function(c){return c[1];}).map(function(c){return card(c[0],c[1],c[2]);}).join('')
+    +_nhlWinOrder([['HOT','🔥 Hot','#ef4444'],['COLD','❄️ Cold','#38bdf8'],['DOUBLE','❄️❄️ Double Cold','#818cf8']].map(function(f){
+      return [f[1]+' · '+(_nhlHcRecTier==='MAIN'?'Top 10':_nhlHcRecTier==='OVF'?'Overflow':'All'),tally(shown.filter(function(r){return _nhlHcFormOf(r)===f[0];})),f[2]];
+    }),function(c){return c[1];}).map(function(c){return card(c[0],c[1],c[2]);}).join('')+'</div>';
   if(sumEl)sumEl.innerHTML=html;
   body.innerHTML=shown.length
     ?(_nhlHcRecTab==='cat'?_nhlTrkCatHtml(shown,stake):_nhlTrkListHtml(shown,true))
@@ -13170,9 +13187,15 @@ function renderNhlOverflowDay(){
       +'</tr>';
   }
   var html='<div style="overflow-x:auto"><table class="nhl-trk-tbl"><thead><tr><th>Category</th><th>Record</th><th>Hit Rate</th><th>Net P/L</th><th>ROI</th></tr></thead><tbody>';
+  var groups=[];
   catOrder.forEach(function(cat){
-    html+=row(cat,'OVER',cats[cat+'|OVER']||[])+row(cat,'UNDER',cats[cat+'|UNDER']||[]);
+    ['OVER','UNDER'].forEach(function(side){groups.push({cat:cat,side:side,list:cats[cat+'|'+side]||[]});});
   });
+  _nhlWinOrder(groups,function(g){
+    if(!g.list.length)return {};
+    var s=stats(g.list);
+    return {rate:s.rate!=null?s.rate:s.modelRate,w:s.rate!=null?s.w:s.modelW,l:s.rate!=null?s.l:s.modelL};
+  }).forEach(function(g){html+=row(g.cat,g.side,g.list);});
   return html+'</tbody></table></div>';
 }
  function _nhlTrkListHtml(allRows,showRank,showRankStats){
@@ -13192,6 +13215,7 @@ function renderNhlOverflowDay(){
      return (idx<0?catOrder.length:idx)*2+(bits[1]==='UNDER'?1:0);
    }
    order.sort(function(a,b){return orderKey(a)-orderKey(b);});
+   order=_nhlWinOrder(order,function(key){return _nhlWlOf(groups[key]);});
    function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
    function money(v){return v==null?'—':(v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(2);}
    function groupBlock(key){
@@ -13369,21 +13393,22 @@ function _nhlGpAggregate(days){
   return a;
 }
 function _nhlGpSummary(a){
-  return '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">'
-    +'<div style="flex:1;min-width:220px;background:#071f17;border:1px solid rgba(52,211,153,.28);border-radius:12px;padding:14px;text-align:center">'
+  var cards=_nhlWinOrder([
+    {w:a.tw,l:a.tl,html:'<div style="flex:1;min-width:220px;background:#071f17;border:1px solid rgba(52,211,153,.28);border-radius:12px;padding:14px;text-align:center">'
     +'<div style="color:#6ee7b7;font-size:.66rem;font-weight:900;letter-spacing:.08em">TEAM WIN / LOSS</div>'
     +'<div style="font-size:1.15rem;margin-top:5px">'+_nhlGpWlp(a.tw,a.tl,a.tp)+'</div>'
-    +'<div style="color:#94a3b8;font-size:.74rem;margin-top:4px">'+_nhlGpPct(a.tw,a.tl)+' hit rate</div></div>'
-    +'<div style="flex:1;min-width:220px;background:#07192b;border:1px solid rgba(56,189,248,.28);border-radius:12px;padding:14px;text-align:center">'
+    +'<div style="color:#94a3b8;font-size:.74rem;margin-top:4px">'+_nhlGpPct(a.tw,a.tl)+' hit rate</div></div>'},
+    {w:a.ow,l:a.ol,html:'<div style="flex:1;min-width:220px;background:#07192b;border:1px solid rgba(56,189,248,.28);border-radius:12px;padding:14px;text-align:center">'
     +'<div style="color:#7dd3fc;font-size:.66rem;font-weight:900;letter-spacing:.08em">PROJECTED TOTAL O/U</div>'
     +'<div style="font-size:1.15rem;margin-top:5px">'+_nhlGpWlp(a.ow,a.ol,a.op)+'</div>'
-    +'<div style="color:#94a3b8;font-size:.74rem;margin-top:4px">'+_nhlGpPct(a.ow,a.ol)+' hit rate</div></div></div>'
+    +'<div style="color:#94a3b8;font-size:.74rem;margin-top:4px">'+_nhlGpPct(a.ow,a.ol)+' hit rate</div></div>'}],function(c){return c;});
+  return '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">'+cards.map(function(c){return c.html;}).join('')+'</div>'
     +'<div style="font-size:.64rem;color:#64748b;margin:-5px 0 12px">Accuracy only · no stake or ROI accounting · pushes excluded from hit rates</div>';
 }
 function _nhlGpSplits(a){
   function tile(label,w,l){return '<div style="flex:1;min-width:125px;background:#0a1120;border:1px solid #1e293b;border-radius:9px;padding:9px;text-align:center"><div style="color:#94a3b8;font-size:.58rem;font-weight:800">'+label+'</div><div style="margin-top:4px">'+_nhlGpWlp(w,l,0)+'</div><div style="color:#64748b;font-size:.64rem;margin-top:2px">'+_nhlGpPct(w,l)+'</div></div>';}
   return '<div style="font-size:.64rem;color:#a78bfa;font-weight:900;letter-spacing:.08em;margin:10px 0 6px">PREDICTOR SPLITS</div>'
-    +'<div style="display:flex;gap:8px;flex-wrap:wrap">'+tile('HOME TEAM PICKS',a.homeW,a.homeL)+tile('AWAY TEAM PICKS',a.awayW,a.awayL)+tile('OVER CALLS',a.overW,a.overL)+tile('UNDER CALLS',a.underW,a.underL)+'</div>';
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap">'+_nhlWinOrder([['HOME TEAM PICKS',a.homeW,a.homeL],['AWAY TEAM PICKS',a.awayW,a.awayL],['OVER CALLS',a.overW,a.overL],['UNDER CALLS',a.underW,a.underL]],function(t){return {w:t[1],l:t[2]};}).map(function(t){return tile(t[0],t[1],t[2]);}).join('')+'</div>';
 }
 function _nhlGpGamesHtml(games){
   if(!games||!games.length) return '<p style="color:#64748b;padding:18px;text-align:center">No saved games for this date.</p>';
@@ -13502,7 +13527,11 @@ function _nhlRankStatsHtml(list,stake){
   function hasOdds(r){return r.odds!=null&&String(r.odds).trim()!==''&&String(r.odds)!=='0';}
   function money(v){return (v>=0?'+$':'-$')+Math.abs(Number(v)).toFixed(2);}
   var cells=[];
-  for(var rank=1;rank<=10;rank++){
+  var rankOrder=_nhlWinOrder([1,2,3,4,5,6,7,8,9,10],function(rk){
+    return _nhlWlOf(list.filter(function(r){return Number(r.rank)===rk&&hasOdds(r);}));
+  });
+  for(var ri=0;ri<rankOrder.length;ri++){
+    var rank=rankOrder[ri];
     var priced=list.filter(function(r){
       return Number(r.rank)===rank&&hasOdds(r)&&(r.result==='WIN'||r.result==='LOSS');
     });
@@ -13713,7 +13742,7 @@ function renderNhlCoachTrack(){
   (_nhlCoachTrackData.presetLabels||[]).concat(['Plus/Minus OVER · Model-only','Plus/Minus UNDER · Model-only']).forEach(function(k){if(!groups[k])groups[k]=[];});
  var tw=0,tl=0,tp=0,tv=0,tnet=0,tpriced=0,html='';
   var canonical=_nhlCoachTrackData.source==='official'&&(_nhlCoachTrackData.automaticPresetCapture||!!groups['All Coach Edge Plays · uncapped']);
- Object.keys(groups).forEach(function(k){var rows=groups[k],w=0,l=0,p=0,v=0,pend=0,net=0,priced=0;
+ _nhlWinOrder(Object.keys(groups),function(k){return _nhlWlOf(groups[k]);}).forEach(function(k){var rows=groups[k],w=0,l=0,p=0,v=0,pend=0,net=0,priced=0;
   rows.forEach(function(x){var r=String(x.result||'PENDING').toUpperCase(),hasPrice=x.odds!=null&&String(x.odds).trim()!==''&&String(x.odds)!=='0';if(r==='WIN'){w++;if(hasPrice){priced++;net+=_nhlCalcProfit(x.odds,stake,r)}}else if(r==='LOSS'){l++;if(hasPrice){priced++;net-=stake}}else if(r==='PUSH')p++;else if(r==='VOID')v++;else pend++;});
   if(!canonical||k==='All Coach Edge Plays · uncapped'||k==='Alternate-Line Coach'||k==='Plus/Minus OVER · Model-only'||k==='Plus/Minus UNDER · Model-only'){tw+=w;tl+=l;tp+=p;tv+=v;tnet+=net;tpriced+=priced;}
   var rate=w+l?100*w/(w+l):null,roi=priced?100*net/(priced*stake):null;
@@ -17312,6 +17341,7 @@ function inPeriod(ds,per,anchor){
   return d>=st&&d<=en;
 }
 function stake(){var v=Number(($('nhlGsimStake')||{}).value);return v>0?v:100;}
+function winSort(list,wl){return list.map(function(x,i){var o=wl(x),n=o.w+o.l;return {x:x,i:i,n:n,r:n?o.w/n:null};}).sort(function(a,b){if(a.r==null&&b.r!=null)return 1;if(b.r==null&&a.r!=null)return -1;return ((b.r||0)-(a.r||0))||(b.n-a.n)||(a.i-b.i);}).map(function(o){return o.x;});}
 window._nhlGsimRecRender=function(){
   var b=$('nhlGsimRecBody'),R=S.rec;if(!b||!R)return;
   var per=$('nhlGsimPeriod').value,anchor=$('nhlGsimRecDate').value||today(),k=stake()/100;
@@ -17322,8 +17352,8 @@ window._nhlGsimRecRender=function(){
     if(x.result==='WIN')a.w++;else if(x.result==='LOSS')a.l++;else a.p++;
     if(x.profit!=null){a.pr++;a.profit+=x.profit*k;}
     var key=m+'|'+(x.bucket||'');bk[key]=bk[key]||{m:m,b:x.bucket||'-',w:0,l:0};if(x.result==='WIN')bk[key].w++;else if(x.result==='LOSS')bk[key].l++;});});});
-  var h='<div class="ngs-tiles">'+Object.keys(M).map(function(m){var a=agg[m],n=a.w+a.l;return '<div class="ngs-tile"><div class="t">'+M[m]+'</div><div class="n">'+a.w+'-'+a.l+(a.p?'-'+a.p:'')+'</div><div style="font-size:.74rem;color:#cbd5e1">Hit rate '+(n?(a.w/n*100).toFixed(1)+'%':'-')+'</div><div style="font-size:.74rem;color:#cbd5e1">Profit <b class="'+(a.profit>=0?'ngs-pos':'ngs-neg')+'">'+(a.profit>=0?'+':'-')+'$'+Math.abs(a.profit).toFixed(2)+'</b> <span class="ngs-mut">('+a.pr+' priced)</span></div></div>';}).join('')+'</div>';
-  var bl=Object.keys(bk).sort().map(function(x){return bk[x];});
+  var h='<div class="ngs-tiles">'+winSort(Object.keys(M),function(m){return agg[m];}).map(function(m){var a=agg[m],n=a.w+a.l;return '<div class="ngs-tile"><div class="t">'+M[m]+'</div><div class="n">'+a.w+'-'+a.l+(a.p?'-'+a.p:'')+'</div><div style="font-size:.74rem;color:#cbd5e1">Hit rate '+(n?(a.w/n*100).toFixed(1)+'%':'-')+'</div><div style="font-size:.74rem;color:#cbd5e1">Profit <b class="'+(a.profit>=0?'ngs-pos':'ngs-neg')+'">'+(a.profit>=0?'+':'-')+'$'+Math.abs(a.profit).toFixed(2)+'</b> <span class="ngs-mut">('+a.pr+' priced)</span></div></div>';}).join('')+'</div>';
+  var bl=winSort(Object.keys(bk).sort().map(function(x){return bk[x];}),function(r){return r;});
   if(bl.length)h+='<div class="ngs-h">By sim confidence</div><table class="ngs-tbl"><tr><th>Market</th><th>Sim %</th><th>W-L</th><th>Hit %</th></tr>'+bl.map(function(r){var n=r.w+r.l;return '<tr><td>'+M[r.m]+'</td><td>'+esc(r.b)+'</td><td>'+r.w+'-'+r.l+'</td><td>'+(n?(r.w/n*100).toFixed(1)+'%':'-')+'</td></tr>';}).join('')+'</table>';
   if(!days.length)h+='<p class="ngs-note">No saved sims in this period yet. Run Sims before puck drop to save calls.</p>';
   days.forEach(function(d){
@@ -18736,6 +18766,7 @@ function paint(){
   $('nhlDayLaneOv').setAttribute('aria-pressed',S.lane==='overflow'?'true':'false');
 }
 function groupBy(rows,fn){var g={};rows.forEach(function(r){var k=fn(r);(g[k]||(g[k]=[])).push(r);});return g;}
+function byWin(items){return items.map(function(x,i){x._i=i;return x;}).sort(function(a,b){var ar=a.a.rate,br=b.a.rate;if(ar==null&&br!=null)return 1;if(br==null&&ar!=null)return -1;return ((br||0)-(ar||0))||((b.a.w+b.a.l)-(a.a.w+a.a.l))||(a._i-b._i);}).map(function(x){return aggRow(x.label,x.a);}).join('');}
 function stakeValue(){var n=Number($('nhlDayStake').value);return isFinite(n)&&n>0?n:100;}
 window._nhlDayRender=function(){
   var body=$('nhlDayBody');if(!body||!S.data)return;
@@ -18746,16 +18777,16 @@ window._nhlDayRender=function(){
   var h='<div class="ndr-cov"><div class="ndr-note" style="margin-bottom:0">W/L counts decided picks only; pending, push and void are separate. P/L and ROI simulate the selected stake using only genuine saved odds (-1000 or better). Unpriced picks count W/L but have no payout. All categories excludes Locks duplicates; form categories may overlap ordinary markets. Same-day and same-team picks are correlated: read Dates and Team-games, not just Picks. This is a results report, not a pick-selection rule.</div></div>';
   h+='<h3>Overall</h3>'+table('Scope',aggRow('Filtered picks',tot));
   var wg=groupBy(rows,function(r){return wdIdx(r._date);}),wh='';
-  WD.forEach(function(n,i){wh+=aggRow(n,agg(wg[i]||[],stake));});
+  wh=byWin(WD.map(function(n,i){return {label:n,a:agg(wg[i]||[],stake)};}));
   h+='<h3>By weekday</h3>'+table('Weekday',wh);
   var cg=groupBy(rows,function(r){return r.category||'Unknown';}),ch='';
-  Object.keys(cg).sort().forEach(function(k){ch+=aggRow(k,agg(cg[k],stake));});
+  ch=byWin(Object.keys(cg).sort().map(function(k){return {label:k,a:agg(cg[k],stake)};}));
   h+='<details open><summary>Category and side breakdowns</summary><h3>By category</h3>'+table('Category',ch);
   var sg=groupBy(rows,function(r){return String(r.side||'Unknown').toUpperCase();}),sh='';
-  Object.keys(sg).sort().forEach(function(k){sh+=aggRow(k,agg(sg[k],stake));});
+  sh=byWin(Object.keys(sg).sort().map(function(k){return {label:k,a:agg(sg[k],stake)};}));
   h+='<h3>By side</h3>'+table('Side',sh);
   var cs=groupBy(rows,function(r){return (r.category||'Unknown')+' / '+String(r.side||'Unknown').toUpperCase();}),csh='';
-  Object.keys(cs).sort().forEach(function(k){csh+=aggRow(k,agg(cs[k],stake));});
+  csh=byWin(Object.keys(cs).sort().map(function(k){return {label:k,a:agg(cs[k],stake)};}));
   h+='<h3>Category and side</h3>'+table('Category / side',csh)+'</details>';
   body.innerHTML=h;
 };
