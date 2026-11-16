@@ -1115,7 +1115,7 @@ def _nhl_apply_injury_report(board, report):
     out = dict(board)
     keys = ({spec[0] for spec in _NHL_TRK_LISTS}
             | {"hotColdPlayers", "candidates", "streakShotsO15", "streakPtsU15",
-               "shotFunnelPlayers"})
+               "shotFunnelPlayers", "bestAltOverCandidates"})
     # "picks" also covers alternate Coach, whose full candidates are separate.
     for key in keys:
         if not isinstance(board.get(key), list):
@@ -5718,7 +5718,7 @@ async def _nhl_alt_scan_scoped(date_str, system, shared_games=None, progress=Non
 
 
 def _nhl_alt_coach_cache_get(date_key: str, system: str):
-    version = 8
+    version = 9
     path = _CACHE_DIR / f"nhl_alt_coach_v{version}_{system}_{date_key}.json"
     try:
         if path.exists() and time.time() - path.stat().st_mtime < _NHL_ALT_COACH_TTL:
@@ -5732,7 +5732,7 @@ def _nhl_alt_coach_cache_get(date_key: str, system: str):
 
 def _nhl_alt_coach_cache_set(date_key: str, system: str, payload: dict) -> None:
     try:
-        version = 8
+        version = 9
         (_CACHE_DIR / f"nhl_alt_coach_v{version}_{system}_{date_key}.json").write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception as exc:
@@ -5750,6 +5750,161 @@ def _nhl_alt_implied(odds) -> Optional[float]:
         ((-american / (-american + 100)) if american < 0 else (100 / (american + 100))) * 100,
         2,
     )
+
+
+# Best Alt Over (Edge Coach only): higher genuine alternate OVER lines that the
+# player's history against today's opponent supports. High-risk by design.
+_NHL_BAO_MARKETS = {
+    "player_shots_on_goal_alternate": ("shots", "Shots on Goal", "lines"),
+    "player_points_alternate": ("points", "Points", "pts"),
+}
+_NHL_BAO_MIN_VS = 3        # minimum meetings vs today's opponent (any venue)
+_NHL_BAO_VS_RATE = 60.0    # % of last <=10 meetings that clear the alternate line
+_NHL_BAO_LABELS = {"shots": "Best Alt Over · Shots · Top 10",
+                   "points": "Best Alt Over · Points · Top 10"}
+
+
+def _nhl_bao_over_quote(rec):
+    """Best genuine OVER price at this exact alternate line; never synthesized."""
+    best = None
+    for quote in (rec.get("quotes") or []) if isinstance(rec, dict) else []:
+        if not isinstance(quote, dict) or quote.get("side") != "OVER" or not quote.get("book"):
+            continue
+        try:
+            odds = float(str(quote.get("odds")).replace("+", ""))
+        except (TypeError, ValueError):
+            continue
+        if (not math.isfinite(odds) or not odds.is_integer()
+                or not (odds >= 100 or -1000 <= odds <= -100)):
+            continue
+        if best is None or (odds, quote.get("bookKey") == "espnbet") > (
+                best["odds"], best.get("bookKey") == "espnbet"):
+            best = {**quote, "odds": odds}
+    return best
+
+
+def _nhl_bao_standard(std_map, rec, player):
+    """The player's standard sportsbook line for the same event and market."""
+    for name, info in (std_map or {}).items():
+        if not isinstance(info, dict) or not _match_odds_name(name, [player]):
+            continue
+        if info.get("eventId") and rec.get("eventId") and str(info["eventId"]) != str(rec["eventId"]):
+            continue
+        try:
+            line = float(info.get("line"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(line) and line > 0:
+            return line
+    return None
+
+
+def _nhl_bao_row(player, team, opponent, home_road, logs, stat_key, label,
+                 std_line, recs, system):
+    """Highest genuine alternate OVER above the standard line that clears 60%+
+    of the last 10 meetings vs today's opponent (minimum 3). No edge gate."""
+    versus = [g for g in logs if g.get("opponent") == opponent and stat_key in g][:10]
+    last10 = [g for g in logs if stat_key in g][:10]
+    if std_line is None or len(versus) < _NHL_BAO_MIN_VS or not last10:
+        return None
+    best = None
+    for rec in recs:
+        try:
+            line = float(rec.get("line"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(line) or line <= std_line:
+            continue
+        quote = _nhl_bao_over_quote(rec)
+        implied = _nhl_alt_implied(quote["odds"]) if quote else None
+        if implied is None:
+            continue
+        vs_hits = sum(float(g.get(stat_key) or 0) > line for g in versus)
+        vs_rate = vs_hits / len(versus) * 100
+        if vs_rate < _NHL_BAO_VS_RATE:
+            continue
+        l10_hits = sum(float(g.get(stat_key) or 0) > line for g in last10)
+        l10_rate = l10_hits / len(last10) * 100
+        app_prob = round((vs_rate + l10_rate) / 2, 1)
+        row = {
+            "player": player["name"], "pid": player["id"], "team": team, "opponent": opponent,
+            "market": label, "marketKey": stat_key, "side": "OVER",
+            "line": line, "standardLine": std_line, "odds": quote["odds"],
+            "book": quote["book"], "bookKey": quote.get("bookKey", ""),
+            "quoteTimestamp": quote.get("lastUpdate"),
+            "appProb": app_prob, "implied": implied, "edge": round(app_prob - implied, 2),
+            "isAlternate": True, "bestAltOver": True,
+            "vsRate": round(vs_rate, 1), "vsHits": vs_hits, "vsTotal": len(versus),
+            "vsValues": [{"date": g.get("date"), "value": g.get(stat_key),
+                          "homeRoad": g.get("homeRoad")} for g in versus],
+            "vsAvg": round(sum(float(g.get(stat_key) or 0) for g in versus) / len(versus), 2),
+            "l10Rate": round(l10_rate, 1), "l10Hits": l10_hits, "l10Total": len(last10),
+            "l10Avg": round(sum(float(g.get(stat_key) or 0) for g in last10) / len(last10), 2),
+            "homeRoad": home_road, "system": system,
+            "source": {"positionGroup": player.get("positionGroup", "F"),
+                       "lineupStatus": player.get("lineupStatus")},
+            "positionGroup": player.get("positionGroup", "F"),
+        }
+        if best is None or (line, quote["odds"]) > (best["line"], best["odds"]):
+            best = row
+    return best
+
+
+def _nhl_bao_rank(row):
+    return (float(row.get("vsRate") or 0), float(row.get("appProb") or 0),
+            float(row.get("line") or 0) - float(row.get("standardLine") or 0),
+            float(row.get("odds") or -1000))
+
+
+def _nhl_bao_lists(candidates, game="", market="", limit=10):
+    """Ranked lists per market, one play per player; optional game filter."""
+    out = {}
+    for stat_key in ("shots", "points"):
+        if market and market != stat_key:
+            continue
+        rows, seen = [], set()
+        for row in sorted((r for r in candidates or [] if r.get("marketKey") == stat_key),
+                          key=_nhl_bao_rank, reverse=True):
+            if game and "|".join(sorted((row.get("team", ""), row.get("opponent", "")))) != game:
+                continue
+            if str(row.get("pid")) in seen:
+                continue
+            seen.add(str(row.get("pid")))
+            rows.append(row)
+        out[stat_key] = rows[:limit] if limit else rows
+    return out
+
+
+def _nhl_bao_preset_groups(payload, games):
+    """Unfiltered Top 10 per market for the Edge Coach record."""
+    game_by_team = {team: g for g in games or [] for team in (
+        g.get("homeTeam"), g.get("awayTeam"))}
+    groups = {}
+    for stat_key, rows in _nhl_bao_lists(payload.get("bestAltOverCandidates")).items():
+        groups[_NHL_BAO_LABELS[stat_key]] = [{
+            "name": p.get("player"), "pid": p.get("pid"), "team": p.get("team"),
+            "opponent": p.get("opponent"), "category": p.get("market"),
+            "stat_key": _NHL_COACH_STAT_KEYS.get(stat_key), "side": "OVER",
+            "line": p.get("line"), "standard_line": p.get("standardLine"),
+            "odds": p.get("odds"), "book": p.get("book"), "score": p.get("appProb"),
+            "app_probability": p.get("appProb", 0) / 100,
+            "implied_probability": p.get("implied", 0) / 100,
+            "coach_edge": p.get("edge"), "vs_rate": p.get("vsRate"),
+            "vs_hits": p.get("vsHits"), "vs_total": p.get("vsTotal"),
+            "rank": rank, "is_overflow": False,
+            "game_start": (game_by_team.get(p.get("team")) or {}).get("startTime"),
+            "result": "PENDING", "actual": None, "profit": None,
+            "pricing_status": "priced_alternate", "coach_model_only": False,
+        } for rank, p in enumerate(rows, 1)]
+    return groups
+
+
+async def _nhl_bao_standard_lines(date_str, games):
+    cached = _odds_cache_get("nhl_lineup_v5_us_ca", date_str)
+    if isinstance(cached, dict) and (cached.get("lines") or cached.get("pts")):
+        return {"lines": cached.get("lines") or {}, "pts": cached.get("pts") or {}}
+    lines, pts, *_ = await get_shot_lines(date_str, games)
+    return {"lines": lines or {}, "pts": pts or {}}
 
 
 async def _build_nhl_alt_coach(
@@ -5772,6 +5927,7 @@ async def _build_nhl_alt_coach(
                         "error": "Cannot verify games for the saved alternate Coach board."}
             cached = {**cached, "games": games}
         cached = await _nhl_refresh_injury_board(cached, date_str)
+        cached["bestAltOver"] = _nhl_bao_lists(cached.get("bestAltOverCandidates"))
         best = {}
         for row in cached.get("candidates") or cached.get("picks") or []:
             key = str(row["pid"])
@@ -5790,12 +5946,20 @@ async def _build_nhl_alt_coach(
     # touching standard board inputs or refreshing their cached quote timestamp.
     source_feed = await _nhl_alt_book_feed(date_str, games)
     alternates = source_feed.get("alternates") or {}
+    # Best Alt Over reads the unfiltered OVER ladders (plus-money higher lines
+    # never meet the 70% implied rule of the existing alternate Coach).
+    bao_ladders = {
+        market: {key: rec for key, rec in (alternates.get(market) or {}).items()
+                 if isinstance(rec, dict) and rec.get("player") and _nhl_bao_over_quote(rec)}
+        for market in _NHL_BAO_MARKETS}
     alternates = {
         market: {key: rec for key, rec in ladder.items() if _nhl_alt_priced_record(rec)}
         for market, ladder in alternates.items() if isinstance(ladder, dict)}
-    if not any(alternates.get(k) for k in LIVE_ALTERNATE_PROP_MARKETS):
+    if (not any(alternates.get(k) for k in LIVE_ALTERNATE_PROP_MARKETS)
+            and not any(bao_ladders.values())):
         return {"date": date_str, "system": system, "picks": [],
                 "candidates": [], "games": games,
+                "bestAltOverCandidates": [], "bestAltOver": {"shots": [], "points": []},
                 "sourceCoverage": source_feed.get("sourceCoverage"),
                 "sourceFetchedAt": source_feed.get("sourceFetchedAt")}
 
@@ -5815,6 +5979,10 @@ async def _build_nhl_alt_coach(
         for market in skater_markets for rec in (alternates.get(market) or {}).values()
         if isinstance(rec, dict) and rec.get("player")
     }
+    for ladder in bao_ladders.values():
+        for rec in ladder.values():
+            skater_names.setdefault(rec.get("player", ""), rec)
+    bao_std = await _nhl_bao_standard_lines(date_str, games) if any(bao_ladders.values()) else {}
     goalie_names = {
         rec.get("player", ""): rec
         for rec in (alternates.get("player_total_saves_alternate") or {}).values()
@@ -5888,7 +6056,7 @@ async def _build_nhl_alt_coach(
     people_by_id = {person[0]["id"]: person for person in people}
     log_map = await _nhl_load_history_map(
         people_by_id, lambda pid: load_history(people_by_id[pid]))
-    rows = []
+    rows, bao_rows = [], []
     _nhl_alt_note("Ranking exact alternate lines by model hit probability")
     for player, team, opponent, home_road, kind in people:
         logs = _nhl_pre_game_logs(log_map.get(player["id"], []), date_str)
@@ -5905,6 +6073,19 @@ async def _build_nhl_alt_coach(
             for rec in exact_lines:
                 rows.extend(_nhl_alt_coach_exact_rows(
                     player, team, opponent, home_road, logs, stat_key, label, rec, system, date_str))
+        for market, (stat_key, label, std_key) in _NHL_BAO_MARKETS.items():
+            if kind != "skater":
+                continue
+            recs = [rec for rec in (bao_ladders.get(market) or {}).values()
+                    if _odds_event_matches_slate(rec, player_games)
+                    and _match_odds_name(rec.get("player", ""), [player])]
+            if not recs:
+                continue
+            std_line = _nhl_bao_standard((bao_std or {}).get(std_key), recs[0], player)
+            row = _nhl_bao_row(player, team, opponent, home_road, logs, stat_key, label,
+                               std_line, recs, system)
+            if row:
+                bao_rows.append(row)
         if kind == "goalie":
             for rec in (alternates.get("player_total_saves_alternate") or {}).values():
                 if (isinstance(rec, dict)
@@ -5921,9 +6102,11 @@ async def _build_nhl_alt_coach(
     picks = sorted(best.values(), key=_nhl_alt_rank, reverse=True)[:10]
     payload = {"date": date_str, "system": system, "picks": picks, "games": games,
                "candidates": rows, "lines": len(rows),
+               "bestAltOverCandidates": bao_rows,
                "sourceCoverage": source_feed.get("sourceCoverage"),
                "sourceFetchedAt": source_feed.get("sourceFetchedAt")}
     payload = _nhl_apply_injury_report(payload, injury_report)
+    payload["bestAltOver"] = _nhl_bao_lists(payload.get("bestAltOverCandidates"))
     _nhl_alt_coach_cache_set(date_str, system, payload)
     return payload
 
@@ -8289,7 +8472,7 @@ function _nhlTogglePastDates(force){
       </div>
     </div>
     <div class="frank-tabs" role="tablist" aria-label="Edge Coach presets">
-      <button type="button" class="frank-tab on" data-tab="edge" role="tab" aria-selected="true" onclick="_frankTab(this)">&#11088; Edge Picks <i>9</i></button>
+      <button type="button" class="frank-tab on" data-tab="edge" role="tab" aria-selected="true" onclick="_frankTab(this)">&#11088; Edge Picks <i>10</i></button>
       <button type="button" class="frank-tab" data-tab="markets" role="tab" aria-selected="false" onclick="_frankTab(this)">&#128202; Markets <i>14</i></button>
       <button type="button" class="frank-tab" data-tab="hot" role="tab" aria-selected="false" onclick="_frankTab(this)">&#128293; Hot <i>7</i></button>
       <button type="button" class="frank-tab" data-tab="cold" role="tab" aria-selected="false" onclick="_frankTab(this)">&#10052;&#65039; Cold <i>7</i></button>
@@ -8297,7 +8480,7 @@ function _nhlTogglePastDates(force){
       <button type="button" class="frank-tab" data-tab="funnel" role="tab" aria-selected="false" onclick="_frankTab(this)">&#127919; Funnel <i>2</i></button>
     </div>
     <div class="frank-panes">
-      <div class="frank-pane" data-pane="edge" role="tabpanel"><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays at any eligible odds')" data-label="Coach Edge · Top 10" style="--c:#a78bfa"><b class="ncx-t">Coach Edge · Top 10</b><small>Biggest app-vs-book probability gap</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show me the top 10 safest bets')" data-label="Safest Bets · Top 10" style="--c:#38bdf8"><b class="ncx-t">Safest Bets · Top 10</b><small>Highest implied win chance first</small></button><button class="frank-ai-preset ncx-preset frank-alt" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" data-label="Best Alt-Line Hit Rate · Top 10" style="--c:#f59e0b"><b class="ncx-t">Best Alt-Line Hit Rate · Top 10</b><small>Genuine alternate-line ladders</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')" data-label="Top 3 Plays" style="--c:#22c55e"><b class="ncx-t">Top 3 Plays</b><small>The three strongest edges</small></button><button class="frank-ai-preset ncx-preset frank-game" onclick="askFrankPreset(&#39;Show the best positive edge play for each game and each team&#39;)" data-label="Best Play Each Game &amp; Team" style="--c:#f97316"><b class="ncx-t">Best Play Each Game &amp; Team</b><small>Top play per game and per team</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge over plays')" data-label="Best Overs · Top 10" style="--c:#4ade80"><b class="ncx-t">Best Overs · Top 10</b><small>Strongest positive-edge Overs</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge under plays')" data-label="Best Unders · Top 10" style="--c:#f87171"><b class="ncx-t">Best Unders · Top 10</b><small>Strongest positive-edge Unders</small></button><button class="frank-ai-preset ncx-preset" onclick="askNhlStreakCoach('shots')" data-label="Shots Over 1.5 Streak · Top 10" style="--c:#fb923c"><b class="ncx-t">Shots Over 1.5 Streak · Top 10</b><small>2+ shots · L10 &amp; L10 vs team 70%+</small></button><button class="frank-ai-preset ncx-preset" onclick="askNhlStreakCoach('points')" data-label="Points Under 1.5 · Top 10" style="--c:#60a5fa"><b class="ncx-t">Points Under 1.5 · Top 10</b><small>0&ndash;1 points · L10 &amp; L10 vs team 70%+</small></button></div></div>
+      <div class="frank-pane" data-pane="edge" role="tabpanel"><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 highest positive edge plays at any eligible odds')" data-label="Coach Edge · Top 10" style="--c:#a78bfa"><b class="ncx-t">Coach Edge · Top 10</b><small>Biggest app-vs-book probability gap</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show me the top 10 safest bets')" data-label="Safest Bets · Top 10" style="--c:#38bdf8"><b class="ncx-t">Safest Bets · Top 10</b><small>Highest implied win chance first</small></button><button class="frank-ai-preset ncx-preset frank-alt" id="nhlAltCoachBtn" onclick="askNhlAltCoach()" data-label="Best Alt-Line Hit Rate · Top 10" style="--c:#f59e0b"><b class="ncx-t">Best Alt-Line Hit Rate · Top 10</b><small>Genuine alternate-line ladders</small></button><button class="frank-ai-preset ncx-preset frank-alt" id="nhlBaoBtn" onclick="askNhlBestAltOver()" data-label="Best Alt Over · Top 10" style="--c:#ef4444"><b class="ncx-t">Best Alt Over · Top 10</b><small>High risk · higher Shots/Points lines he clears vs this team</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('What are the top 3 positive edge plays?')" data-label="Top 3 Plays" style="--c:#22c55e"><b class="ncx-t">Top 3 Plays</b><small>The three strongest edges</small></button><button class="frank-ai-preset ncx-preset frank-game" onclick="askFrankPreset(&#39;Show the best positive edge play for each game and each team&#39;)" data-label="Best Play Each Game &amp; Team" style="--c:#f97316"><b class="ncx-t">Best Play Each Game &amp; Team</b><small>Top play per game and per team</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge over plays')" data-label="Best Overs · Top 10" style="--c:#4ade80"><b class="ncx-t">Best Overs · Top 10</b><small>Strongest positive-edge Overs</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge under plays')" data-label="Best Unders · Top 10" style="--c:#f87171"><b class="ncx-t">Best Unders · Top 10</b><small>Strongest positive-edge Unders</small></button><button class="frank-ai-preset ncx-preset" onclick="askNhlStreakCoach('shots')" data-label="Shots Over 1.5 Streak · Top 10" style="--c:#fb923c"><b class="ncx-t">Shots Over 1.5 Streak · Top 10</b><small>2+ shots · L10 &amp; L10 vs team 70%+</small></button><button class="frank-ai-preset ncx-preset" onclick="askNhlStreakCoach('points')" data-label="Points Under 1.5 · Top 10" style="--c:#60a5fa"><b class="ncx-t">Points Under 1.5 · Top 10</b><small>0&ndash;1 points · L10 &amp; L10 vs team 70%+</small></button></div></div>
       <div class="frank-pane" data-pane="markets" role="tabpanel" hidden><div class="frank-mk-grid"><div class="frank-mk"><div class="frank-mk-t">Shots on Goal</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge shots over props')" data-label="Shots Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge shots under props')" data-label="Shots Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Points</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge points over props')" data-label="Points Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge points under props')" data-label="Points Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Power Play Points</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge power play points over props')" data-label="PP Points Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge power play points under props')" data-label="PP Points Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Plus/Minus</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPlusMinusPreset('OVER')" title="Model-only while genuine Plus/Minus odds are unavailable" data-label="Plus/Minus Overs · Top 10">Over · Top 10</button><button class="frank-ai-preset frank-un" onclick="askFrankPlusMinusPreset('UNDER')" title="Model-only while genuine Plus/Minus odds are unavailable" data-label="Plus/Minus Unders · Top 10">Under · Top 10</button></div></div><div class="frank-mk"><div class="frank-mk-t">Assists</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge assists over props')" data-label="Assists Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge assists under props')" data-label="Assists Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Goals</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge goals over props')" data-label="Goals Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge goals under props')" data-label="Goals Unders · Top 5">Under · Top 5</button></div></div><div class="frank-mk"><div class="frank-mk-t">Goalie Saves</div><div class="frank-mk-b"><button class="frank-ai-preset frank-ov" onclick="askFrankPreset('Show the top 5 positive edge goalie saves over props')" data-label="Saves Overs · Top 5">Over · Top 5</button><button class="frank-ai-preset frank-un" onclick="askFrankPreset('Show the top 5 positive edge goalie saves under props')" data-label="Saves Unders · Top 5">Under · Top 5</button></div></div></div></div>
       <div class="frank-pane" data-pane="hot" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot shots over props')" data-label="Hot Shots · Top 10" style="--c:#f97316"><b class="ncx-t">Shots · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot points over props')" data-label="Hot Points · Top 10" style="--c:#f97316"><b class="ncx-t">Points · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot goals over props')" data-label="Hot Goals · Top 10" style="--c:#f97316"><b class="ncx-t">Goals · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot assists over props')" data-label="Hot Assists · Top 10" style="--c:#f97316"><b class="ncx-t">Assists · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot pp points over props')" data-label="Hot PP Points · Top 10" style="--c:#f97316"><b class="ncx-t">PP Points · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot plus/minus over props')" data-label="Hot Plus/Minus · Top 10" style="--c:#f97316"><b class="ncx-t">Plus/Minus · Top 10</b><small>Overs from players on a heater</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge hot saves over props')" data-label="Hot Saves · Top 10" style="--c:#f97316"><b class="ncx-t">Saves · Top 10</b><small>Overs from players on a heater</small></button></div></div>
       <div class="frank-pane" data-pane="cold" role="tabpanel" hidden><div class="frank-ai-presets"><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold shots under props')" data-label="Cold Shots · Top 10" style="--c:#3b82f6"><b class="ncx-t">Shots · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold points under props')" data-label="Cold Points · Top 10" style="--c:#3b82f6"><b class="ncx-t">Points · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold goals under props')" data-label="Cold Goals · Top 10" style="--c:#3b82f6"><b class="ncx-t">Goals · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold assists under props')" data-label="Cold Assists · Top 10" style="--c:#3b82f6"><b class="ncx-t">Assists · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold pp points under props')" data-label="Cold PP Points · Top 10" style="--c:#3b82f6"><b class="ncx-t">PP Points · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold plus/minus under props')" data-label="Cold Plus/Minus · Top 10" style="--c:#3b82f6"><b class="ncx-t">Plus/Minus · Top 10</b><small>Unders from players in a slump</small></button><button class="frank-ai-preset ncx-preset" onclick="askFrankPreset('Show the top 10 positive edge cold saves under props')" data-label="Cold Saves · Top 10" style="--c:#3b82f6"><b class="ncx-t">Saves · Top 10</b><small>Unders from players in a slump</small></button></div></div>
@@ -8366,7 +8549,7 @@ function _nhlTogglePastDates(force){
       <button id="frankAiSend" class="frank-ai-send" onclick="askFrank()">Analyze</button>
     </div>
     <details class="frank-how"><summary>&#9432; How it works</summary>
-      <div class="frank-ai-note">Choose category, side, players (All / Forwards / DEF) and game, then Generate Picks. Also applies to presets, Analyze, and Best Alt-Line Hit Rate. Only Coach Edge, Safest Bets, Top 3, Best Overs and Best Unders require positive edge and genuine prices. All other standard categories show the loaded app picks in their original order, including negative-edge and unpriced model picks. Existing category limits and sides stay unchanged.</div>
+      <div class="frank-ai-note">Choose category, side, players (All / Forwards / DEF) and game, then Generate Picks. Also applies to presets, Analyze, Best Alt-Line Hit Rate and Best Alt Over (Shots/Points Overs only). Only Coach Edge, Safest Bets, Top 3, Best Overs and Best Unders require positive edge and genuine prices. All other standard categories show the loaded app picks in their original order, including negative-edge and unpriced model picks. Existing category limits and sides stay unchanged.</div>
     </details>
     <div id="frankShowing" class="frank-showing" hidden></div>
     <div id="frankParlayOv" class="frank-parlay-ov" onclick="if(event.target===this)closeFrankParlay()">
@@ -9920,6 +10103,95 @@ async function askNhlAltCoach(){
     document.querySelectorAll('.frank-ai-side-btn').forEach(function(btn){btn.disabled=false;});
     if(window.__NHL_ALT_COACH_ABORT__===controller)delete window.__NHL_ALT_COACH_ABORT__;
     if(btn){btn.disabled=false;(btn.querySelector('.ncx-t')||btn).textContent='Best Alt-Line Hit Rate · Top 10';}
+  }
+}
+var _NHL_BAO_CTRL=null;
+function _nhlBaoTable(rows,start){
+  var th='padding:7px 6px;text-align:center';
+  var rc=function(r){r=Number(r);return r>=80?'#4ade80':r>=70?'#86efac':'#fbbf24';};
+  var h='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.76rem"><thead><tr style="color:#94a3b8;font-size:.66rem;text-transform:uppercase;letter-spacing:.05em">'
+    +'<th style="'+th+'">#</th><th style="padding:7px 6px;text-align:left">Player</th><th style="'+th+'">Book line</th><th style="'+th+'">Alt Over</th><th style="'+th+'">Odds</th><th style="'+th+'">vs team</th><th style="'+th+'">Last 10</th><th style="'+th+'">App / Book</th></tr></thead><tbody>';
+  rows.forEach(function(p,i){
+    var odds=Number(p.odds),oddsTxt=(odds>0?'+':'')+odds;
+    var vals=(p.vsValues||[]).map(function(g){return _frankEsc(g.value);}).join(', ');
+    var edge=Number(p.edge||0);
+    h+='<tr style="border-top:1px solid rgba(148,163,184,.15)"><td style="'+th+';color:#94a3b8">'+(start+i)+'</td>'
+      +'<td style="padding:7px 6px"><b>'+_frankEsc(p.player)+'</b>'+(_nhlInjuryBadge(p)||'')+'<br><small style="color:#94a3b8">'+_frankEsc(p.team)+' '+(p.homeRoad==='H'?'vs':'@')+' '+_frankEsc(p.opponent)+(vals?' · vs '+_frankEsc(p.opponent)+': '+vals:'')+'</small></td>'
+      +'<td style="'+th+';color:#94a3b8">O '+_frankEsc(p.standardLine)+'</td>'
+      +'<td style="'+th+'"><b style="color:#f87171">O '+_frankEsc(p.line)+'</b></td>'
+      +'<td style="'+th+'"><b>'+_frankEsc(oddsTxt)+'</b><br><small style="color:#94a3b8">'+_frankEsc(p.book||'')+'</small></td>'
+      +'<td style="'+th+'"><b style="color:'+rc(p.vsRate)+'">'+_frankEsc(p.vsHits)+'/'+_frankEsc(p.vsTotal)+'</b><br><small style="color:#94a3b8">'+_frankEsc(p.vsRate)+'% · avg '+_frankEsc(p.vsAvg)+'</small></td>'
+      +'<td style="'+th+'">'+_frankEsc(p.l10Hits)+'/'+_frankEsc(p.l10Total)+'<br><small style="color:#94a3b8">avg '+_frankEsc(p.l10Avg)+'</small></td>'
+      +'<td style="'+th+'">'+_frankEsc(p.appProb)+'% / '+_frankEsc(p.implied)+'%<br><small style="color:'+(edge>0?'#4ade80':'#f87171')+'">'+(edge>0?'+':'')+_frankEsc(edge)+' edge</small></td></tr>';
+  });
+  return h+'</tbody></table></div>';
+}
+async function askNhlBestAltOver(){
+  var btn=document.getElementById('nhlBaoBtn'),answer=document.getElementById('frankAiAnswer'),title='Best Alt Over · Top 10';
+  var setBtn=function(t){if(btn)(btn.querySelector('.ncx-t')||btn).textContent=t;};
+  if(_NHL_BAO_CTRL){
+    _NHL_BAO_CTRL.abort();_NHL_BAO_CTRL=null;setBtn(title);
+    if(answer){answer.style.display='block';answer.innerHTML='<div class="frank-ai-summary">Best Alt Over scan cancelled. Click again to retry.</div>';}
+    return;
+  }
+  window.__NHL_ALT_COACH_ACTIVE__=false;
+  var categoryEl=document.getElementById('frankAiCategory'),market=categoryEl?categoryEl.value:'';
+  if(market&&market!=='shots'&&market!=='points'){
+    _frankCommit('<div class="frank-ai-summary">Best Alt Over covers Shots on Goal and Points only. Choose All categories, Shots on Goal or Points.</div>');return;
+  }
+  if((window.NHL_FRANK_SIDE||'')==='UNDER'){
+    _frankCommit('<div class="frank-ai-summary">Best Alt Over is Overs only. Choose All sides or Over.</div>');return;
+  }
+  var gameEl=document.getElementById('frankAiGame'),game=gameEl?gameEl.value:'';
+  var gameLabel=gameEl&&gameEl.selectedIndex>=0?gameEl.options[gameEl.selectedIndex].text:'All games';
+  var controller=new AbortController();_NHL_BAO_CTRL=controller;setBtn('Cancel Best Alt Over scan');
+  if(answer){answer.style.display='block';answer.innerHTML='<div class="frank-ai-summary">Loading genuine alternate ladders and each player&#39;s history vs today&#39;s opponent. Click the button again to cancel.</div>';}
+  try{
+    var token=localStorage.getItem('__mpa_token')||'',dateEl=document.getElementById('datePicker');
+    var selected=(dateEl&&dateEl.value)||new Date().toISOString().slice(0,10);
+    var system=window.IS_ADMIN?(window.NHL_FRANK_SYSTEM||'A'):'A';
+    var admin=new URLSearchParams(location.search).get('admin')||'';
+    var url='/api/nhl/coach-alternates?poll=true&mode=best_alt_over&date_str='+encodeURIComponent(selected)+'&system='+encodeURIComponent(system)+'&market='+encodeURIComponent(market)+'&game='+encodeURIComponent(game)+'&token='+encodeURIComponent(token)+'&admin='+encodeURIComponent(admin);
+    var data,scanId='',retries=0,started=Date.now();
+    while(true){
+      if(controller.signal.aborted)throw new DOMException('Cancelled','AbortError');
+      if(Date.now()-started>600000)throw new Error('The scan reached its 10-minute wait limit. Click again to reuse completed source data.');
+      try{
+        var res=await fetch(url+'&scan_id='+encodeURIComponent(scanId),{signal:controller.signal,cache:'no-store'});
+        data=await res.json();
+        if(!res.ok||data.error)throw new Error(data.detail||data.error||('HTTP '+res.status));
+        retries=0;
+      }catch(err){
+        if(controller.signal.aborted)throw err;
+        if((err instanceof TypeError||err instanceof SyntaxError)&&retries++<2){await new Promise(function(r){setTimeout(r,2000);});continue;}
+        throw err;
+      }
+      if(data.status!=='RUNNING')break;
+      scanId=data.scanId||'';
+      if(answer)answer.innerHTML='<div class="frank-ai-summary">'+_frankEsc(data.stage||'Scanning alternate lines')+(data.total?' · '+Number(data.done||0)+' / '+Number(data.total)+' histories':'')+' · '+Number(data.elapsed_seconds||0)+' seconds. Click again to cancel.</div>';
+      await new Promise(function(r){setTimeout(r,1500);});
+    }
+    if(data.note){_frankCommit('<div class="frank-ai-summary">'+_frankEsc(data.note)+'</div>');return;}
+    var lists=data.bestAltOver||{},rules=data.rules||{};
+    var html='<div class="frank-ai-question">'+_frankEsc(title)+' · '+_frankEsc(gameLabel)+' · '+_frankEsc(_frankPosLabel())+' · '+_frankEsc(_frankSystemLabel(system))+'</div>'
+      +'<div class="frank-ai-summary"><b style="color:#f87171">High-risk plays.</b> For Shots on Goal and Points, each genuine sportsbook alternate Over line above the player&#39;s standard book line is tested against his last '+'10 meetings with today&#39;s opponent (any venue, minimum '+_frankEsc(rules.minMeetings||3)+'). The highest alt line he cleared in '+_frankEsc(rules.vsRate||60)+'%+ of those meetings is his Best Alt Over. Ranked by the vs-team hit rate; one play per player per market; no edge requirement (edge shown for reference). Real prices only, odds no shorter than -1000. The unfiltered Top 10 of each market is tracked in the Edge Coach record.</div>';
+    [['shots','Shots on Goal'],['points','Points']].forEach(function(m){
+      if(market&&market!==m[0])return;
+      var rows=(lists[m[0]]||[]).filter(function(p){return _frankPosOk(p);});
+      html+='<div class="sec">Best Alt Over · '+m[1]+(rows.length?' · Top '+Math.min(10,rows.length)+' of '+rows.length+' qualified':'')+'</div>';
+      if(!rows.length){html+='<div class="frank-ai-empty">No '+m[1]+' alternate Over above the book line clears '+_frankEsc(rules.vsRate||60)+'% vs today&#39;s opponent'+(game?' for this game':'')+'.</div>';return;}
+      html+=_nhlBaoTable(rows.slice(0,10),1);
+      if(rows.length>10)html+='<details style="margin-top:8px"><summary style="cursor:pointer;color:#94a3b8;font-size:.75rem">Show the other '+(rows.length-10)+' qualified players (not tracked)</summary>'+_nhlBaoTable(rows.slice(10),11)+'</details>';
+    });
+    if(data.captureStatus)html+='<div class="frank-ai-summary">'+_frankEsc(data.captureStatus)+'</div>';
+    window.__FRANK_LAST_ROWS__=[];
+    _frankCommit(html);
+  }catch(e){
+    var msg=e&&e.name==='AbortError'?'Best Alt Over scan cancelled. Click again to reuse completed source data.':(e.message||'Best Alt Over scan failed.');
+    if(answer){answer.style.display='block';answer.innerHTML='<div class="frank-ai-summary"><div class="frank-ai-empty">'+_frankEsc(msg)+'</div></div>';}
+  }finally{
+    if(_NHL_BAO_CTRL===controller)_NHL_BAO_CTRL=null;
+    setBtn(title);
   }
 }
 async function askFrank(){
@@ -14291,6 +14563,7 @@ _NHL_STREAK_SPECS = [
 ]
 _NHL_COACH_PRESET_LABELS = [
     "Coach Edge Top 10", "Safest Bets Top 10", "Best Alt-Line Edge Top 10",
+    "Best Alt Over · Shots · Top 10", "Best Alt Over · Points · Top 10",
     "Top 3", "Best Overs", "Best Unders",
     *[f"{market} {side} · Top {10 if market == 'Plus/Minus' else 5}" for market in _NHL_COACH_MARKETS
       for side in ("OVER", "UNDER")],
@@ -14894,7 +15167,8 @@ async def _nhl_capture_daily_coach(date_str: str, board: dict, system: str):
             "result": "PENDING", "actual": None, "profit": None,
         } for rank, p in enumerate(picks[:10], 1)]
         ok = await asyncio.to_thread(_nhl_store_coach_groups, date_str, system,
-                                    {"Best Alt-Line Edge Top 10": alt_rows}, games)
+                                    {"Best Alt-Line Edge Top 10": alt_rows,
+                                     **_nhl_bao_preset_groups(payload, games)}, games)
         if not ok:
             raise RuntimeError("Alternate Top 10 preset could not be saved")
         board["coachCaptureStatus"] = "AUTO_CAPTURE"
@@ -18918,12 +19192,41 @@ async def index(admin: str = "", token: str = ""):
     is_admin = (bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__")) or _is_admin_token(token)
     return HTMLResponse(_render_dashboard_shell(is_admin))
 
+async def _nhl_bao_response(payload, date_str, system, market, game):
+    """Best Alt Over answer: filtered lists for display, unfiltered Top 10 tracked."""
+    if payload.get("error"):
+        return {"error": payload["error"], "bestAltOver": {"shots": [], "points": []}}
+    if market not in ("", "shots", "points"):
+        return {"bestAltOver": {"shots": [], "points": []},
+                "note": "Best Alt Over covers Shots on Goal and Points only."}
+    lists = _nhl_bao_lists(payload.get("bestAltOverCandidates"), game=game,
+                           market=market, limit=0)
+    out = {"date": date_str, "system": system, "bestAltOver": lists,
+           "rules": {"minMeetings": _NHL_BAO_MIN_VS, "vsRate": _NHL_BAO_VS_RATE}}
+    games = payload.get("games") or await get_today_games(date_str)
+    if not games:
+        out["captureStatus"] = "Cannot verify game starts; Best Alt Over plays were not saved."
+    elif any(g.get("gameType") == 1 for g in games):
+        out["captureStatus"] = "View-only slate; no official Coach record."
+    else:
+        groups = _nhl_bao_preset_groups(payload, games)
+        if any(groups.values()):
+            try:
+                ok = await asyncio.to_thread(_nhl_store_coach_groups, date_str, system, groups, games)
+            except Exception:
+                logger.exception("NHL Best Alt Over capture failed")
+                ok = False
+            out["captureStatus"] = ("Top 10 per market saved to the Edge Coach record before puck drop."
+                                    if ok else "Best Alt Over record could not be saved.")
+    return out
+
+
 @app.get("/api/nhl/coach-alternates")
 async def api_nhl_coach_alternates(request: Request, date_str: str = "",
                                    token: str = "", system: str = "A",
                                    admin: str = "", market: str = "", game: str = "",
                                    side: str = "", poll: bool = False,
-                                   scan_id: str = ""):
+                                   scan_id: str = "", mode: str = ""):
     tok = token or request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     direct_admin = bool(admin) and admin == os.environ.get("INTERNAL_API_TOKEN", "__none__")
     if not (_verify_hub_token(tok) or direct_admin):
@@ -19000,6 +19303,9 @@ async def api_nhl_coach_alternates(request: Request, date_str: str = "",
         else:
             payload = await asyncio.wait_for(
                 _warm_nhl_alt_coach(selected_date.isoformat(), selected_system), timeout=120)
+        if str(mode or "").lower() == "best_alt_over":
+            return JSONResponse(await _nhl_bao_response(
+                payload, selected_date.isoformat(), selected_system, market, game))
         if (market or game or side) and not payload.get("error"):
             best = {}
             for row in payload.get("candidates", []):
@@ -19034,7 +19340,8 @@ async def api_nhl_coach_alternates(request: Request, date_str: str = "",
                     f"{tracked}/{len(payload['picks'])} alternate plays saved before puck drop")
         payload["sourceSummary"] = _nhl_alt_source_summary(
             payload.get("sourceCoverage"), market, side)
-        payload = {k: v for k, v in payload.items() if k != "candidates"}
+        payload = {k: v for k, v in payload.items()
+                   if k not in ("candidates", "bestAltOverCandidates", "bestAltOver")}
         return JSONResponse(payload)
     except _NHLAlternateFeedError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
